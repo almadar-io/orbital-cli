@@ -156,6 +156,19 @@ enum Commands {
         path: PathBuf,
     },
 
+    /// Print the embedded lolo type-signature catalog (signatures.lolo).
+    ///
+    /// Emits the generated catalog of every operator (arity + return types),
+    /// enum/struct, binding-context rule, and std behavior entity/trait/page
+    /// contract — the canonical lolo vocabulary that agents (e.g. rabit) read
+    /// to author valid `.lolo`. Baked into the binary at compile time from
+    /// `signatures.lolo`; regenerate with `make lolo-sync`.
+    Signatures {
+        /// Write to this file instead of stdout.
+        #[arg(long, value_name = "FILE")]
+        out: Option<PathBuf>,
+    },
+
     /// Resolve a schema: run Inline + Compose + Enrich and emit the
     /// fully-inlined .orb form without generating code.
     ///
@@ -483,6 +496,25 @@ enum Commands {
     },
 }
 
+/// The lolo type-signature catalog, baked at compile time. Generated from the
+/// vendored @almadar/{core,std,patterns} packages by `tools/lolo-types-sync`
+/// (`make lolo-sync`). Exposed via `orb signatures` so the bundled agent can
+/// read the canonical vocabulary from the binary instead of a fragile path.
+const LOLO_SIGNATURES: &str = include_str!("../../../signatures.lolo");
+
+fn print_lolo_signatures(out: Option<&std::path::Path>) -> anyhow::Result<()> {
+    match out {
+        Some(path) => {
+            std::fs::write(path, LOLO_SIGNATURES)?;
+            eprintln!("Wrote {} bytes to {}", LOLO_SIGNATURES.len(), path.display());
+        }
+        None => {
+            print!("{LOLO_SIGNATURES}");
+        }
+    }
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
@@ -517,6 +549,7 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Some(Commands::Parse { path }) => parse_schema(&path),
+        Some(Commands::Signatures { out }) => print_lolo_signatures(out.as_deref()),
         Some(Commands::Resolve { path, output, verbose }) => resolve_schema_cli(&path, output.as_deref(), verbose),
         Some(Commands::Format { path, write }) => format_schema(&path, write),
         Some(Commands::Compile {
