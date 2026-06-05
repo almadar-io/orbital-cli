@@ -1,0 +1,92 @@
+//! S-expression evaluation command + JSON-to-Value conversion.
+
+/// Evaluate an S-expression and print the result.
+///
+/// The expression is parsed from JSON, evaluated in a fresh context (with optional
+/// @entity and @payload bindings), and the result is printed according to `output_format`:
+/// - "value"  — human-readable via Display (default)
+/// - "json"   — compact JSON
+/// - "pretty" — indented JSON
+pub(crate) fn evaluate_sexpr(
+    expr_src: Option<&str>,
+    entity_json: Option<&str>,
+    payload_json: Option<&str>,
+    output_format: &str,
+) -> anyhow::Result<()> {
+    use orbital_core::Value;
+    use orbital_core::{BindingContext, Evaluator, SExpression};
+    use std::io::Read;
+
+    // Read source: argument or stdin
+    let src = if let Some(s) = expr_src {
+        s.to_string()
+    } else {
+        let mut buf = String::new();
+        std::io::stdin().read_to_string(&mut buf)?;
+        buf
+    };
+
+    let src = src.trim();
+    if src.is_empty() {
+        anyhow::bail!("No S-expression provided. Pass it as an argument or via stdin.");
+    }
+
+    // Parse expression
+    let expr: SExpression =
+        serde_json::from_str(src).map_err(|e| anyhow::anyhow!("JSON parse error: {}", e))?;
+
+    // Build context
+    let mut ctx = BindingContext::new();
+
+    if let Some(json) = entity_json {
+        let raw: serde_json::Value = serde_json::from_str(json)
+            .map_err(|e| anyhow::anyhow!("--entity JSON parse error: {}", e))?;
+        ctx.set_entity(json_to_value(&raw));
+    }
+
+    if let Some(json) = payload_json {
+        let raw: serde_json::Value = serde_json::from_str(json)
+            .map_err(|e| anyhow::anyhow!("--payload JSON parse error: {}", e))?;
+        ctx.set_payload(json_to_value(&raw));
+    }
+
+    // Evaluate
+    let evaluator = Evaluator::new();
+    let result = evaluator
+        .evaluate(&expr, &ctx)
+        .map_err(|e| anyhow::anyhow!("Evaluation error: {}", e))?;
+
+    // Output
+    match output_format {
+        "json" => {
+            println!("{}", serde_json::to_string(&result)?);
+        }
+        "pretty" => {
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+        _ => {
+            // "value": human-readable — strings without quotes, numbers as integers when whole
+            println!("{}", result.to_string_value());
+        }
+    }
+
+    Ok(())
+}
+
+/// Convert serde_json::Value to orbital_core::Value
+pub(crate) fn json_to_value(json: &serde_json::Value) -> orbital_core::Value {
+    use orbital_core::Value;
+
+    match json {
+        serde_json::Value::Null => Value::Null,
+        serde_json::Value::Bool(b) => Value::Bool(*b),
+        serde_json::Value::Number(n) => Value::Number(n.as_f64().unwrap_or(0.0)),
+        serde_json::Value::String(s) => Value::String(s.clone()),
+        serde_json::Value::Array(arr) => Value::Array(arr.iter().map(json_to_value).collect()),
+        serde_json::Value::Object(obj) => Value::Object(
+            obj.iter()
+                .map(|(k, v)| (k.clone(), json_to_value(v)))
+                .collect(),
+        ),
+    }
+}
