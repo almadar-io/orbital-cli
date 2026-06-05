@@ -1,0 +1,38 @@
+[package]
+name = "orbital-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Command-line interface for Orbital compiler and tools"
+
+[[bin]]
+name = "orbital"
+path = "src/main.rs"
+
+[[bin]]
+name = "orb"
+path = "src/main.rs"
+
+[dependencies]
+# Core crates
+orbital-core = { path = "../orbital-core" }
+orbital-compiler = { path = "../orbital-compiler" }
+orbital-lolo = { path = "../orbital-lolo" }
+orbital-shell-typescript = { path = "../orbital-shell-typescript" }
+orbital-shell-python = { path = "../orbital-shell-python" }
+orbital-shell-mobile = { path = "../orbital-shell-mobile" }
+orbital-server = { path = "../orbital-server" }
+# Use desktop feature without bevy (default-features = false to skip bevy-ui)
+orbital-client = { path = "../orbital-client", default-features = false, features = ["desktop", "sync-http"] }
+
+# CLI essentials only
+clap.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+# Source Map v3 emission for `orb emit --map` and `orb trace`
+sourcemap = "9"
+
+[dev-dependencies]
+pretty_assertions.workspace = true
