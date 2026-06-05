@@ -134,7 +134,7 @@ fn execute_tests_headless(
     verbose: bool,
 ) -> anyhow::Result<()> {
     use orbital_compiler::TestCategory;
-    use orbital_core::ir::{OirBinaryOp, OirBindingRoot, OirExpr, OirTrait, OirTransitionFrom};
+    
 
     let mut total_passed = 0usize;
     let mut total_failed = 0usize;
@@ -303,7 +303,7 @@ fn execute_event_headless(
     payload: Option<&serde_json::Value>,
     entity_data: Option<&serde_json::Value>,
 ) -> Option<String> {
-    use orbital_core::ir::{OirBinaryOp, OirBindingRoot, OirExpr, OirTransitionFrom};
+    
 
     // Find matching transition
     let transition = trait_def
@@ -334,7 +334,7 @@ fn evaluate_guard_headless(
     payload: &serde_json::Value,
     entity_data: &serde_json::Value,
 ) -> bool {
-    use orbital_core::ir::{OirBinaryOp, OirBindingRoot, OirExpr};
+    use orbital_core::ir::{OirBinaryOp, OirExpr};
 
     match expr {
         OirExpr::Bool { value } => *value,

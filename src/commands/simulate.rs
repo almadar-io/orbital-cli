@@ -7,10 +7,10 @@ use std::path::PathBuf;
 /// This is the compile-time equivalent of running the app and inspecting what renders.
 pub(crate) fn simulate_render(
     path: &PathBuf,
-    patterns_path: Option<&std::path::Path>,
+    _patterns_path: Option<&std::path::Path>,
 ) -> anyhow::Result<()> {
     use orbital_core::schema::{SExpression, TraitReference};
-    use std::collections::{HashMap, HashSet, VecDeque};
+    use std::collections::{HashSet, VecDeque};
 
     let content_raw = std::fs::read_to_string(path)?;
     let schema = parse_schema_auto(&content_raw)?;
@@ -20,7 +20,7 @@ pub(crate) fn simulate_render(
 
     for orbital in &schema.orbitals {
         // Get entity name
-        let entity_name = match &orbital.entity {
+        let _entity_name = match &orbital.entity {
             orbital_core::EntityRef::Inline(e) => e.name.as_str(),
             orbital_core::EntityRef::Reference(r) => r.as_str(),
             // Phase 3.5.G.A.5: `Extends` is rewritten to `Inline` by the
@@ -31,7 +31,7 @@ pub(crate) fn simulate_render(
         };
 
         // Get entity field names for checking
-        let entity_fields: Vec<&str> = match &orbital.entity {
+        let _entity_fields: Vec<&str> = match &orbital.entity {
             orbital_core::EntityRef::Inline(e) => {
                 e.fields.iter().filter_map(|f| f.name.as_deref()).collect()
             }

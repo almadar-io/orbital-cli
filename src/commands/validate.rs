@@ -290,7 +290,7 @@ fn validate_schema_native(
     };
 
     // Step 4: Validate OIR (post-resolution semantic validation)
-    let mut validator = OirValidator::new(&module);
+    let validator = OirValidator::new(&module);
     let oir_result = validator.validate();
 
     if !oir_result.is_valid() {

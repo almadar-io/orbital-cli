@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use orbital_compiler::generate::GeneratedFile;
 use orbital_core::str_utils::kebab_to_pascal;
 
-use super::spans::{byte_to_line_col, NodeKind, OrbSpans};
+use super::spans::{byte_to_line_col, NodeKind};
 use super::EmitTarget;
 
 /// Classify a generated file path into a (kind, name) pair so we can look

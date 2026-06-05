@@ -4,7 +4,7 @@
 //! from `docs/Almadar_Compiler_Emit_Code.md`. Runs the compiled `orb` binary
 //! via `CARGO_BIN_EXE_orb` — no external crate dependency required.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
 /// Resolve the repo root from this test's location.

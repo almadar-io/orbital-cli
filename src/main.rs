@@ -3,14 +3,7 @@
 //! Thin command-line interface for Orbital tools.
 //! All heavy lifting is delegated to orbital-core, orbital-server, and orbital-client.
 
-#![allow(
-    dead_code,
-    unused_imports,
-    unused_variables,
-    unused_mut,
-    clippy::all,
-    unexpected_cfgs
-)]
+#![allow(unexpected_cfgs)]
 
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::Serialize;
