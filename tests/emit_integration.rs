@@ -7,18 +7,16 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Resolve the monorepo root from this test's location.
-/// The binary is at `target/<profile>/orb`; the monorepo root is four levels
-/// up from `orbital-rust/crates/orbital-cli/tests/`. We anchor on the source
-/// tree instead for determinism.
+/// Resolve the repo root from this test's location.
+/// Package data lives in submodules under `orbital-rust/packages/`.
 fn monorepo_root() -> PathBuf {
     // CARGO_MANIFEST_DIR points at orbital-rust/crates/orbital-cli during tests.
-    // Walk up twice to orbital-rust, then once more to the monorepo root.
+    // Walk up twice to reach the orbital-rust repo root.
     let cargo_manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     cargo_manifest_dir
         .ancestors()
-        .nth(3)
-        .expect("couldn't resolve monorepo root")
+        .nth(2)
+        .expect("couldn't resolve repo root")
         .to_path_buf()
 }
 
