@@ -17,6 +17,7 @@
 use std::path::{Path, PathBuf};
 
 use orbital_compiler::generate::GeneratedFile;
+use orbital_core::str_utils::kebab_to_pascal;
 
 use super::spans::{byte_to_line_col, NodeKind, OrbSpans};
 use super::EmitTarget;
@@ -160,22 +161,6 @@ fn strip_between(s: &str, prefix: &str, suffix: &str) -> Option<String> {
         return None;
     }
     Some(name.to_string())
-}
-
-fn kebab_to_pascal(s: &str) -> String {
-    let mut out = String::new();
-    let mut upper = true;
-    for c in s.chars() {
-        if c == '-' {
-            upper = true;
-        } else if upper {
-            out.extend(c.to_uppercase());
-            upper = false;
-        } else {
-            out.push(c);
-        }
-    }
-    out
 }
 
 fn snake_to_pascal(s: &str) -> String {
