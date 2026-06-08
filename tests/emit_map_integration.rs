@@ -7,20 +7,14 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-fn monorepo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(3)
-        .unwrap()
-        .to_path_buf()
-}
-
 fn orb_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_orb"))
 }
 
 fn std_modal_orb() -> PathBuf {
-    monorepo_root().join("packages/almadar-std/behaviors/registry/atoms/std-modal.orb")
+    // Self-contained fixture (the std submodule was removed in the npm-pinned
+    // bake migration). Shared with emit_integration.rs.
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/std-modal.orb")
 }
 
 fn run(args: &[&str]) -> (String, String, bool) {

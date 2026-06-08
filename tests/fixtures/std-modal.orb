@@ -1,0 +1,362 @@
+{
+  "name": "std-modal",
+  "version": "1.0.0",
+  "description": "std-modal as a Function",
+  "orbitals": [
+    {
+      "name": "ModalRecordOrbital",
+      "entity": {
+        "name": "ModalRecord",
+        "persistence": "runtime",
+        "fields": [
+          {
+            "name": "id",
+            "type": "string"
+          },
+          {
+            "name": "name",
+            "type": "string",
+            "description": "A user-facing identifier for the modal.",
+            "synonyms": "title, label, identifier"
+          },
+          {
+            "name": "description",
+            "type": "string",
+            "description": "A textual explanation of the modal's content or function.",
+            "synonyms": "details, explanation, notes, summary"
+          },
+          {
+            "name": "status",
+            "type": "string",
+            "default": "active",
+            "values": [
+              "active",
+              "inactive",
+              "pending"
+            ],
+            "description": "Current operational state of the record.",
+            "synonyms": "state, condition, flag"
+          },
+          {
+            "name": "createdAt",
+            "type": "string"
+          }
+        ]
+      },
+      "traits": [
+        {
+          "name": "ModalRecordModal",
+          "entityRebindable": true,
+          "entityContract": {
+            "requires": [],
+            "provides": []
+          },
+          "category": "interaction",
+          "linkedEntity": "ModalRecord",
+          "emits": [
+            {
+              "event": "SAVE",
+              "description": "Indicates a successful data save operation.",
+              "synonyms": "submit, persist, confirm",
+              "tier": "essential",
+              "payloadSchema": [
+                {
+                  "name": "data",
+                  "type": "object",
+                  "required": true
+                }
+              ]
+            },
+            {
+              "event": "CLOSE",
+              "description": "Indicates the modal window is being closed.",
+              "synonyms": "dismiss, hide, cancel",
+              "tier": "essential"
+            },
+            {
+              "event": "ModalRecordLoadFailed",
+              "description": "Indicates a failure to load the record data.",
+              "synonyms": "error, failure, problem, unsuccessful",
+              "tier": "internal",
+              "scope": "internal",
+              "payloadSchema": [
+                {
+                  "name": "error",
+                  "type": "string"
+                },
+                {
+                  "name": "code",
+                  "type": "string"
+                }
+              ]
+            },
+            {
+              "event": "ModalRecordLoaded",
+              "description": "Signals that the modal's data has been successfully loaded.",
+              "synonyms": "loaded, data ready, populated",
+              "tier": "essential",
+              "scope": "internal",
+              "payloadSchema": [
+                {
+                  "name": "data",
+                  "type": "[ModalRecord]"
+                }
+              ]
+            }
+          ],
+          "stateMachine": {
+            "states": [
+              {
+                "name": "closed",
+                "isInitial": true
+              },
+              {
+                "name": "open"
+              }
+            ],
+            "events": [
+              {
+                "key": "INIT",
+                "name": "Initialize"
+              },
+              {
+                "key": "OPEN",
+                "name": "Open",
+                "description": "A request to display the modal window.",
+                "synonyms": "show, display, present, reveal",
+                "tier": "essential",
+                "payloadSchema": [
+                  {
+                    "name": "id",
+                    "type": "string"
+                  },
+                  {
+                    "name": "row",
+                    "type": "ModalRecord"
+                  }
+                ]
+              },
+              {
+                "key": "CLOSE",
+                "name": "Close",
+                "description": "Indicates the modal window is being closed.",
+                "synonyms": "dismiss, hide, cancel",
+                "tier": "essential"
+              },
+              {
+                "key": "SAVE",
+                "name": "Save",
+                "description": "Indicates a successful data save operation.",
+                "synonyms": "submit, persist, confirm",
+                "tier": "essential",
+                "payloadSchema": [
+                  {
+                    "name": "data",
+                    "type": "object",
+                    "required": true
+                  }
+                ]
+              },
+              {
+                "key": "ModalRecordLoadFailed",
+                "name": "ModalRecord load failed",
+                "description": "Indicates a failure to load the record data.",
+                "synonyms": "error, failure, problem, unsuccessful",
+                "tier": "internal",
+                "payloadSchema": [
+                  {
+                    "name": "error",
+                    "type": "string"
+                  },
+                  {
+                    "name": "code",
+                    "type": "string"
+                  }
+                ]
+              },
+              {
+                "key": "ModalRecordLoaded",
+                "name": "ModalRecord loaded",
+                "description": "Signals that the modal's data has been successfully loaded.",
+                "synonyms": "loaded, data ready, populated",
+                "tier": "essential",
+                "payloadSchema": [
+                  {
+                    "name": "data",
+                    "type": "[ModalRecord]"
+                  }
+                ]
+              }
+            ],
+            "transitions": [
+              {
+                "from": "closed",
+                "to": "closed",
+                "event": "INIT",
+                "effects": [
+                  [
+                    "fetch",
+                    "ModalRecord",
+                    {
+                      "emit": {
+                        "success": "ModalRecordLoaded",
+                        "failure": "ModalRecordLoadFailed"
+                      }
+                    }
+                  ]
+                ]
+              },
+              {
+                "from": "closed",
+                "to": "open",
+                "event": "OPEN",
+                "guard": [
+                  "or",
+                  [
+                    "=",
+                    "@config.mode",
+                    "create"
+                  ],
+                  "@payload.row"
+                ],
+                "effects": [
+                  [
+                    "set",
+                    "@entity.id",
+                    "@payload.id"
+                  ],
+                  [
+                    "render-ui",
+                    "@config.detailSlot",
+                    {
+                      "type": "@config.detailPattern",
+                      "direction": "vertical",
+                      "children": [
+                        {
+                          "gap": "sm",
+                          "type": "stack",
+                          "direction": "horizontal",
+                          "children": [
+                            {
+                              "type": "icon",
+                              "name": "@config.icon"
+                            },
+                            {
+                              "variant": "h3",
+                              "type": "typography",
+                              "content": "@config.title"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "divider"
+                        },
+                        {
+                          "mode": "@config.mode",
+                          "submitEvent": "SAVE",
+                          "fields": "@config.fields",
+                          "entity": "@payload.row",
+                          "cancelEvent": "CLOSE",
+                          "type": "form-section"
+                        }
+                      ],
+                      "gap": "md"
+                    }
+                  ]
+                ]
+              },
+              {
+                "from": "open",
+                "to": "closed",
+                "event": "CLOSE",
+                "effects": [
+                  [
+                    "render-ui",
+                    "@config.detailSlot",
+                    null
+                  ],
+                  [
+                    "notify",
+                    "Cancelled",
+                    "info"
+                  ]
+                ]
+              },
+              {
+                "from": "open",
+                "to": "closed",
+                "event": "SAVE",
+                "effects": [
+                  [
+                    "render-ui",
+                    "@config.detailSlot",
+                    null
+                  ]
+                ]
+              }
+            ]
+          },
+          "config": {
+            "detailPattern": {
+              "type": "pattern",
+              "default": "stack",
+              "label": "Layout pattern",
+              "description": "Pattern used to arrange the form body",
+              "tier": "internal"
+            },
+            "detailSlot": {
+              "type": "slot",
+              "default": "modal",
+              "label": "Render slot",
+              "description": "UI slot the modal renders into",
+              "tier": "internal"
+            },
+            "mode": {
+              "type": "string",
+              "default": "create",
+              "label": "Form mode",
+              "description": "create or edit — controls submit-button copy and validation",
+              "tier": "presentation"
+            },
+            "icon": {
+              "type": "string",
+              "default": "layout-panel-top",
+              "label": "Icon",
+              "description": "Icon shown in the modal header",
+              "tier": "presentation"
+            },
+            "title": {
+              "type": "string",
+              "default": "Details",
+              "label": "Modal title",
+              "description": "Heading at the top of the modal",
+              "tier": "presentation"
+            },
+            "fields": {
+              "type": "[string]",
+              "default": [],
+              "label": "Form fields",
+              "description": "Entity fields displayed as inputs in the modal form",
+              "tier": "presentation",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "scope": "instance"
+        }
+      ],
+      "pages": [
+        {
+          "name": "ModalRecordModalPage",
+          "path": "/modalrecords/modal",
+          "traits": [
+            {
+              "ref": "ModalRecordModal"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,147 @@
+app std-modal "1.0.0"
+"std-modal as a Function"
+;;
+;; Modal-only trait: renders ONLY to the `modal` slot. The parent molecule's
+;; layout/browse trait is responsible for the `main` slot (the list, the
+;; trigger buttons, etc.). Consumers configure icon/title/fields/mode at
+;; the trait-ref call site via `config: { ... }`. Side effects (persist,
+;; notify) belong in a sibling coordinator trait that
+;; `listens { ModalTrait SAVE -> DO_PERSIST }`.
+orbital ModalRecordOrbital {
+    type ModalRecordLoaded = Event { data : [ModalRecord] }
+
+    type ModalRecordLoadFailed = Event { error : string, code : string }
+
+  entity ModalRecord [runtime] {
+    id : string
+    name : string @description "A user-facing identifier for the modal." @synonyms "title, label, identifier"
+    description : string @description "A textual explanation of the modal's content or function." @synonyms "details, explanation, notes, summary"
+    status : "active" | "inactive" | "pending" @description "Current operational state of the record." @synonyms "state, condition, flag" = active
+    createdAt : string
+  }
+
+  trait ModalRecordModal -> @rebindable ModalRecord [interaction, instance] {
+    initial: closed
+
+    state closed {
+      INIT -> closed
+        (fetch ModalRecord {
+          emit: { failure: ModalRecordLoadFailed, success: ModalRecordLoaded }
+        })
+      ;; Mode-aware guard: in create mode the modal opens unconditionally
+      ;; (no row exists yet); in edit mode @payload.row must be present
+      ;; or the OPEN is rejected (no silent first-row fallback). The
+      ;; @config.mode literal is substituted at molecule inline time —
+      ;; atoms validate this with @config allowed-but-unresolved.
+      OPEN -> open when (or ["=", @config.mode, create] ?row)
+        (set @entity.id ?id)
+        (render-ui @config.detailSlot {
+          children: [{
+            children: [{ name: @config.icon, type: icon }, {
+              content: @config.title
+              type: typography
+              variant: h3
+            }]
+            direction: horizontal
+            gap: sm
+            type: stack
+          }, { type: divider }, {
+            cancelEvent: CLOSE
+            entity: ?row
+            fields: @config.fields
+            mode: @config.mode
+            submitEvent: SAVE
+            type: form-section
+          }]
+          direction: vertical
+          gap: md
+          type: @config.detailPattern
+        })
+    }
+
+    state open {
+      CLOSE -> closed
+        (render-ui @config.detailSlot null)
+        (notify Cancelled info)
+      SAVE -> closed
+        (render-ui @config.detailSlot null)
+    }
+
+    emits {
+      SAVE {
+        data : object!
+      }
+        @description "Indicates a successful data save operation."
+        @synonyms "submit, persist, confirm"
+        @tier "essential"
+      CLOSE
+        @description "Indicates the modal window is being closed."
+        @synonyms "dismiss, hide, cancel"
+        @tier "essential"
+      ModalRecordLoadFailed
+        @description "Indicates a failure to load the record data."
+        @synonyms "error, failure, problem, unsuccessful"
+        @tier "internal"
+      ModalRecordLoaded
+        @description "Signals that the modal's data has been successfully loaded."
+        @synonyms "loaded, data ready, populated"
+        @tier "essential"
+    }
+
+    listens {
+      OPEN {
+        id : string
+        row : ModalRecord
+      }
+        @description "A request to display the modal window."
+        @synonyms "show, display, present, reveal"
+        @tier "essential"
+      SAVE {
+        data : object!
+      }
+        @description "Indicates a successful data submission or confirmation."
+        @synonyms "submit, confirm, accept, persist"
+        @tier "essential"
+      ModalRecordLoadFailed {
+        error : string
+        code : string
+      }
+        @description "Indicates a failure to load the record data."
+        @synonyms "error, failure, problem, unsuccessful"
+        @tier "internal"
+    }
+
+    config {
+      icon : string = layout-panel-top
+        @label "Icon"
+        @description "Icon shown in the modal header"
+        @tier "presentation"
+      title : string = Details
+        @label "Modal title"
+        @description "Heading at the top of the modal"
+        @tier "presentation"
+      fields : [string] = []
+        @label "Form fields"
+        @description "Entity fields displayed as inputs in the modal form"
+        @tier "presentation"
+      mode : string = create
+        @label "Form mode"
+        @description "create or edit — controls submit-button copy and validation"
+        @tier "presentation"
+      detailSlot : slot = modal
+        @label "Render slot"
+        @description "UI slot the modal renders into"
+        @tier "internal"
+      detailPattern : pattern = stack
+        @label "Layout pattern"
+        @description "Pattern used to arrange the form body"
+        @tier "internal"
+    }
+  }
+
+  ;; consumer: a sibling coordinator trait listens for SAVE to run (persist create|update ...)
+  ;; For edit mode, OPEN's payload.id seeds @entity.id so form-section
+  ;; pre-fills the target row AND carries that id into the SAVE payload
+  ;; (so (persist update X @payload.data) can find the right row).
+  page "/modalrecords/modal" as ModalRecordModalPage -> ModalRecordModal
+}

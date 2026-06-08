@@ -7,25 +7,19 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-/// Resolve the repo root from this test's location.
-/// Package data lives in submodules under `orbital-rust/packages/`.
-fn monorepo_root() -> PathBuf {
-    // CARGO_MANIFEST_DIR points at orbital-rust/crates/orbital-cli during tests.
-    // Walk up twice to reach the orbital-rust repo root.
-    let cargo_manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    cargo_manifest_dir
-        .ancestors()
-        .nth(2)
-        .expect("couldn't resolve repo root")
-        .to_path_buf()
+/// Self-contained fixtures vendored into the test crate. The std submodule that
+/// once held these (`packages/almadar-std/…`) was removed when orbital-rust moved
+/// to npm-pinned bake inputs, so the emit tests carry their own copies.
+fn fixtures_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
 }
 
 fn std_modal_lolo() -> PathBuf {
-    monorepo_root().join("packages/almadar-std/behaviors/lolo/core/atoms/std-modal.lolo")
+    fixtures_dir().join("std-modal.lolo")
 }
 
 fn std_modal_orb() -> PathBuf {
-    monorepo_root().join("packages/almadar-std/behaviors/registry/atoms/std-modal.orb")
+    fixtures_dir().join("std-modal.orb")
 }
 
 fn orb_bin() -> PathBuf {
@@ -51,9 +45,8 @@ fn emit_orb_from_lolo_produces_valid_json() {
     let lolo = std_modal_lolo();
     assert!(
         lolo.exists(),
-        "test fixture missing: {} (monorepo root: {})",
-        lolo.display(),
-        monorepo_root().display()
+        "test fixture missing: {}",
+        lolo.display()
     );
     let (stdout, stderr, ok) = run_orb(&["emit", "orb", lolo.to_str().unwrap()]);
     assert!(ok, "emit orb exited non-zero. stderr:\n{}", stderr);
