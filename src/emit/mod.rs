@@ -631,26 +631,15 @@ mod filter {
         }
     }
 
+    // Canonical `str_utils` impls (Pillar F3). `to_kebab` is the NAIVE,
+    // non-acronym-aware variant (`to_kebab_case_simple`) — trait names here are
+    // simple PascalCase, so it matches the acronym-aware form anyway.
     fn to_kebab(name: &str) -> String {
-        let mut out = String::new();
-        for (i, c) in name.chars().enumerate() {
-            if c.is_ascii_uppercase() && i > 0 {
-                out.push('-');
-            }
-            out.push(c.to_ascii_lowercase());
-        }
-        out
+        orbital_core::str_utils::to_kebab_case_simple(name)
     }
 
     fn to_snake(name: &str) -> String {
-        let mut out = String::new();
-        for (i, c) in name.chars().enumerate() {
-            if c.is_ascii_uppercase() && i > 0 {
-                out.push('_');
-            }
-            out.push(c.to_ascii_lowercase());
-        }
-        out
+        orbital_core::str_utils::to_snake_case(name)
     }
 
     #[cfg(test)]
