@@ -31,11 +31,7 @@ fn run(args: &[&str]) -> (String, String, bool) {
 
 fn tmp(name: &str) -> PathBuf {
     let mut p = std::env::temp_dir();
-    p.push(format!(
-        "orb-emit-map-test-{}-{}",
-        std::process::id(),
-        name
-    ));
+    p.push(format!("orb-emit-map-test-{}-{}", std::process::id(), name));
     p
 }
 
@@ -66,9 +62,8 @@ fn map_sidecar_is_valid_source_map_v3() {
     assert!(out.exists());
     assert!(map.exists(), "sidecar map not written");
 
-    let map_json: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&map).unwrap())
-            .expect("map is not valid JSON");
+    let map_json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&map).unwrap())
+        .expect("map is not valid JSON");
     assert_eq!(
         map_json.get("version").and_then(|v| v.as_u64()),
         Some(3),
@@ -137,7 +132,10 @@ fn map_ignored_for_orb_target() {
     ]);
     assert!(ok);
     assert!(out.exists());
-    assert!(!map.exists(), "orb target should not produce a .map sidecar");
+    assert!(
+        !map.exists(),
+        "orb target should not produce a .map sidecar"
+    );
 
     let _ = std::fs::remove_file(&out);
 }

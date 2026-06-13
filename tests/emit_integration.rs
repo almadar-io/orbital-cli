@@ -43,11 +43,7 @@ fn run_orb(args: &[&str]) -> (String, String, bool) {
 #[test]
 fn emit_orb_from_lolo_produces_valid_json() {
     let lolo = std_modal_lolo();
-    assert!(
-        lolo.exists(),
-        "test fixture missing: {}",
-        lolo.display()
-    );
+    assert!(lolo.exists(), "test fixture missing: {}", lolo.display());
     let (stdout, stderr, ok) = run_orb(&["emit", "orb", lolo.to_str().unwrap()]);
     assert!(ok, "emit orb exited non-zero. stderr:\n{}", stderr);
     // Valid JSON parse — catches regressions where the output is not well-formed.
@@ -155,13 +151,7 @@ fn emit_ts_section_entities_excludes_reducers() {
     if !orb.exists() {
         return;
     }
-    let (stdout, _, ok) = run_orb(&[
-        "emit",
-        "ts",
-        orb.to_str().unwrap(),
-        "--section",
-        "entities",
-    ]);
+    let (stdout, _, ok) = run_orb(&["emit", "ts", orb.to_str().unwrap(), "--section", "entities"]);
     assert!(ok);
     // Pure entity files have no React/reducer code.
     assert!(
@@ -212,10 +202,7 @@ fn only_hooks_under_traits_section() {
     ]);
     assert!(ok);
     // Every banner must have "/hooks/" in its path.
-    for banner in stdout
-        .lines()
-        .filter(|l| l.starts_with("// ───── "))
-    {
+    for banner in stdout.lines().filter(|l| l.starts_with("// ───── ")) {
         assert!(
             banner.contains("/hooks/"),
             "--only hooks leaked a non-hook path: {}",
@@ -247,7 +234,8 @@ fn json_format_parses() {
     assert!(parsed.is_object());
     let obj = parsed.as_object().unwrap();
     assert!(
-        obj.keys().any(|k| k.contains("shared/src/types/entities.ts")),
+        obj.keys()
+            .any(|k| k.contains("shared/src/types/entities.ts")),
         "json output should be keyed by file path"
     );
 }
@@ -260,13 +248,7 @@ fn bad_selector_reports_clear_error() {
     if !orb.exists() {
         return;
     }
-    let (_, stderr, ok) = run_orb(&[
-        "emit",
-        "ts",
-        orb.to_str().unwrap(),
-        "--section",
-        "nonsense",
-    ]);
+    let (_, stderr, ok) = run_orb(&["emit", "ts", orb.to_str().unwrap(), "--section", "nonsense"]);
     assert!(!ok, "bad selector must exit non-zero");
     assert!(
         stderr.contains("unknown section selector"),
