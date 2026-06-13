@@ -317,12 +317,7 @@ fn has_orbital_ancestor(path: &[PathSeg], from: usize) -> bool {
 }
 
 /// When a tracked object closes, extract its identifier and record the span.
-fn finalize_tracked(
-    out: &mut OrbSpans,
-    path: &[PathSeg],
-    source: &str,
-    range: Range<usize>,
-) {
+fn finalize_tracked(out: &mut OrbSpans, path: &[PathSeg], source: &str, range: Range<usize>) {
     // Classify kind based on the path we're at.
     let me_idx = path.len() - 1;
     let parent = &path[me_idx - 1];

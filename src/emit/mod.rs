@@ -90,8 +90,9 @@ pub fn run(opts: EmitOptions) -> Result<()> {
 
 fn read_input(path: Option<&Path>) -> Result<String> {
     match path {
-        Some(p) => std::fs::read_to_string(p)
-            .map_err(|e| anyhow!("Failed to read {}: {}", p.display(), e)),
+        Some(p) => {
+            std::fs::read_to_string(p).map_err(|e| anyhow!("Failed to read {}: {}", p.display(), e))
+        }
         None => {
             let mut buf = String::new();
             std::io::stdin()
@@ -124,8 +125,8 @@ fn emit_orb(source: &str, output: Option<&Path>) -> Result<()> {
     // from main.rs but reimplemented here to avoid a circular import; the
     // logic is ~5 lines and we want this module to stand on its own.
     let schema = parse_any_syntax(source)?;
-    let value = serde_json::to_value(&schema)
-        .map_err(|e| anyhow!("Failed to serialize schema: {}", e))?;
+    let value =
+        serde_json::to_value(&schema).map_err(|e| anyhow!("Failed to serialize schema: {}", e))?;
     let cleaned = crate::strip_json_nulls(value);
     let json = serde_json::to_string_pretty(&cleaned)
         .map_err(|e| anyhow!("Failed to serialize schema: {}", e))?;
@@ -142,8 +143,7 @@ fn parse_any_syntax(source: &str) -> Result<orbital_core::schema::OrbitalSchema>
         .next();
     if matches!(first, Some('{')) {
         // `.orb` JSON.
-        orbital_core::schema::parse_schema(source)
-            .map_err(|e| anyhow!("JSON parse error: {}", e))
+        orbital_core::schema::parse_schema(source).map_err(|e| anyhow!("JSON parse error: {}", e))
     } else {
         // Assume `.lolo` surface syntax.
         orbital_lolo::parse_and_lower_str(source)
@@ -197,12 +197,19 @@ fn emit_code(opts: EmitOptions, source: &str) -> Result<()> {
         );
     }
 
-    let format = opts.format.unwrap_or_else(|| auto_format(opts.output.as_deref()));
+    let format = opts
+        .format
+        .unwrap_or_else(|| auto_format(opts.output.as_deref()));
     let rendered = render::render(&files, format, opts.target);
 
     // Source-map emission. Only applies when the user asked for `--map`
     // and the render format produces source code (not the JSON object view).
-    if opts.map && matches!(format, EmitFormat::Stream | EmitFormat::Markdown | EmitFormat::Raw) {
+    if opts.map
+        && matches!(
+            format,
+            EmitFormat::Stream | EmitFormat::Markdown | EmitFormat::Raw
+        )
+    {
         emit_maps(&opts, source, &files, &rendered)?;
     }
 
@@ -231,17 +238,15 @@ fn emit_maps(
             // the first tracked node we know about (good enough signal for
             // IDE navigation until Phase 5 per-line spans land).
             let first_anchor = files.iter().find_map(|f| {
-                sourcemap::classify_file(f, opts.target).and_then(|(kind, name)| {
-                    spans.lookup(kind, &name).map(|range| (name, range))
-                })
+                sourcemap::classify_file(f, opts.target)
+                    .and_then(|(kind, name)| spans.lookup(kind, &name).map(|range| (name, range)))
             });
             let Some((_, range)) = first_anchor else {
                 eprintln!("warning: --map: no tracked node found in selected files; map skipped");
                 return Ok(());
             };
             let map_path = sourcemap::map_path_for_output(out);
-            let map_json =
-                sourcemap::build_map_for_file(rendered, orb_source, &orb_path, range);
+            let map_json = sourcemap::build_map_for_file(rendered, orb_source, &orb_path, range);
             std::fs::write(&map_path, map_json)
                 .map_err(|e| anyhow!("Failed to write {}: {}", map_path.display(), e))?;
             eprintln!("source map: {}", map_path.display());
@@ -532,12 +537,8 @@ mod filter {
         match (section, target) {
             (Section::All, _) => true,
 
-            (Section::AllEntities, EmitTarget::Ts) => {
-                path.starts_with("packages/shared/")
-            }
-            (Section::AllEntities, EmitTarget::Py) => {
-                path.starts_with("entities/")
-            }
+            (Section::AllEntities, EmitTarget::Ts) => path.starts_with("packages/shared/"),
+            (Section::AllEntities, EmitTarget::Py) => path.starts_with("entities/"),
             (Section::AllEntities, EmitTarget::Orb) => unreachable!(),
 
             (Section::Entity(name), EmitTarget::Ts) => {
@@ -564,7 +565,9 @@ mod filter {
                 let hooks_dir = format!("/traits/use{}", name);
                 let components_dir = format!("/traits/{}", name);
                 let route_file = format!("/routes/{}", to_kebab(name));
-                path.contains(&hooks_dir) || path.contains(&components_dir) || path.contains(&route_file)
+                path.contains(&hooks_dir)
+                    || path.contains(&components_dir)
+                    || path.contains(&route_file)
             }
             (Section::Trait(name), EmitTarget::Py) => {
                 let snake = to_snake(name);
@@ -587,9 +590,7 @@ mod filter {
             (Section::Page(_), EmitTarget::Py) => false,
             (Section::Page(_), EmitTarget::Orb) => unreachable!(),
 
-            (Section::AllServices, EmitTarget::Ts) => {
-                path.contains("/services/")
-            }
+            (Section::AllServices, EmitTarget::Ts) => path.contains("/services/"),
             (Section::AllServices, EmitTarget::Py) => {
                 path.starts_with("services/") || path.contains("service")
             }
@@ -625,7 +626,9 @@ mod filter {
             (OnlyKind::Routes, EmitTarget::Ts) => p.starts_with("packages/server/src/routes/"),
             (OnlyKind::Routes, EmitTarget::Py) => p.starts_with("routes/"),
             (OnlyKind::Services, _) => p.contains("services") || p.contains("service"),
-            (OnlyKind::Tests, EmitTarget::Ts) => p.contains("__tests__") || p.ends_with(".test.tsx") || p.ends_with(".test.ts"),
+            (OnlyKind::Tests, EmitTarget::Ts) => {
+                p.contains("__tests__") || p.ends_with(".test.tsx") || p.ends_with(".test.ts")
+            }
             (OnlyKind::Tests, EmitTarget::Py) => p.starts_with("tests/") || p.starts_with("test_"),
             (_, EmitTarget::Orb) => unreachable!(),
         }
@@ -655,7 +658,10 @@ mod filter {
         #[test]
         fn only_parse() {
             let kinds = parse_only("entities,traits,tests").unwrap();
-            assert_eq!(kinds, vec![OnlyKind::Entities, OnlyKind::Traits, OnlyKind::Tests]);
+            assert_eq!(
+                kinds,
+                vec![OnlyKind::Entities, OnlyKind::Traits, OnlyKind::Tests]
+            );
             assert!(parse_only("garbage").is_err());
         }
     }

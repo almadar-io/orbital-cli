@@ -59,8 +59,8 @@ pub fn run(position: &str) -> Result<()> {
         ));
     }
 
-    let contents = fs::read_to_string(&map_path)
-        .with_context(|| format!("reading {}", map_path.display()))?;
+    let contents =
+        fs::read_to_string(&map_path).with_context(|| format!("reading {}", map_path.display()))?;
     let sm = SourceMap::from_reader(contents.as_bytes())
         .with_context(|| format!("parsing {} as Source Map v3", map_path.display()))?;
 
@@ -79,10 +79,7 @@ pub fn run(position: &str) -> Result<()> {
         ));
     };
 
-    let src = tok
-        .get_source()
-        .unwrap_or("<unknown>")
-        .to_string();
+    let src = tok.get_source().unwrap_or("<unknown>").to_string();
     let src_line = tok.get_src_line() + 1; // → 1-indexed for user output
     let src_col = tok.get_src_col() + 1;
 

@@ -30,6 +30,7 @@ pub(crate) fn compile_schema(
     use orbital_compiler::{generate_from_file, GenerateOptions};
     use orbital_shell_mobile::MobileBackend;
     use orbital_shell_python::PythonBackend;
+    use orbital_shell_rust::{RustBackend, RustShell};
     use orbital_shell_typescript::TypeScriptBackend;
     use std::path::PathBuf;
 
@@ -58,8 +59,7 @@ pub(crate) fn compile_schema(
         .map(|e| e.eq_ignore_ascii_case("lolo"))
         .unwrap_or(false);
 
-    let is_lolo = is_lolo_ext
-        || matches!(detect_syntax(&source_content), InputSyntax::Lolo);
+    let is_lolo = is_lolo_ext || matches!(detect_syntax(&source_content), InputSyntax::Lolo);
 
     let compile_path: PathBuf = if is_lolo {
         let schema = if is_lolo_ext {
@@ -72,7 +72,14 @@ pub(crate) fn compile_schema(
                 .map_err(|e| anyhow::anyhow!("Failed to compile LOLO source: {}", e.render()))?
         };
         if verbose {
-            println!("Detected LOLO syntax{}", if is_lolo_ext { " (.lolo file)" } else { " in .orb file" });
+            println!(
+                "Detected LOLO syntax{}",
+                if is_lolo_ext {
+                    " (.lolo file)"
+                } else {
+                    " in .orb file"
+                }
+            );
         }
         // Round-trip through serde_json::Value and strip nulls so the
         // emitted .orb matches the sparse hand-authored shape used in
@@ -244,6 +251,26 @@ pub(crate) fn compile_schema(
             println!("  npm install");
             println!("  npx expo start");
         }
+        ShellType::Rust => {
+            let rust_shell = RustShell::new();
+            let rust_backend = RustBackend::new();
+            let result =
+                generate_from_file(&compile_path, output, &rust_shell, &rust_backend, &options)?;
+
+            println!("\n✅ Generated {} files", result.files.len());
+
+            if !result.warnings.is_empty() {
+                println!("\nWarnings:");
+                for warning in &result.warnings {
+                    println!("  ⚠️  {}", warning);
+                }
+            }
+
+            println!("\nNext steps:");
+            println!("  cd {}", output.display());
+            println!("  cargo check");
+            println!("  cargo run");
+        }
     }
 
     Ok(())
@@ -263,6 +290,7 @@ fn compile_mixed(
     use orbital_compiler::{generate_from_file, GenerateOptions};
     use orbital_shell_mobile::MobileBackend;
     use orbital_shell_python::PythonBackend;
+    use orbital_shell_rust::{RustBackend, RustShell};
     use orbital_shell_typescript::TypeScriptBackend;
 
     println!("Compiling schema: {}", path.display());
@@ -361,6 +389,18 @@ fn compile_mixed(
                 )?;
                 total_files += result.files.len();
             }
+            ShellType::Rust => {
+                let rust_shell = RustShell::new();
+                let rust_backend = RustBackend::new();
+                let result = generate_from_file(
+                    &compile_path,
+                    &frontend_output,
+                    &rust_shell,
+                    &rust_backend,
+                    &options,
+                )?;
+                total_files += result.files.len();
+            }
         }
     }
 
@@ -406,6 +446,18 @@ fn compile_mixed(
                 )?;
                 total_files += result.files.len();
             }
+            ShellType::Rust => {
+                let rust_shell = RustShell::new();
+                let rust_backend = RustBackend::new();
+                let result = generate_from_file(
+                    &compile_path,
+                    &backend_output,
+                    &rust_shell,
+                    &rust_backend,
+                    &options,
+                )?;
+                total_files += result.files.len();
+            }
             ShellType::Mobile => {
                 return Err(anyhow::anyhow!("Mobile shell cannot be used as a backend"));
             }
@@ -425,6 +477,7 @@ fn compile_mixed(
         let backend_url = match backend {
             Some(ShellType::Python) => "http://localhost:8000",
             Some(ShellType::Typescript) => "http://localhost:3030",
+            Some(ShellType::Rust) => "http://localhost:3030",
             Some(ShellType::Mobile) => "http://localhost:8000",
             None => "http://localhost:8000",
         };
@@ -442,6 +495,9 @@ fn compile_mixed(
                     "# API URL for backend server\nEXPO_PUBLIC_API_URL={}\n",
                     backend_url
                 )
+            }
+            Some(ShellType::Rust) => {
+                format!("# API URL for backend server\nAPI_URL={}\n", backend_url)
             }
             None => String::new(),
         };
@@ -489,6 +545,15 @@ fn generate_docker_compose(frontend: Option<ShellType>, backend: Option<ShellTyp
                 compose.push_str("      - CORS_ORIGINS=http://localhost:3000\n");
                 compose.push_str("\n");
             }
+            ShellType::Rust => {
+                compose.push_str("  backend:\n");
+                compose.push_str("    build: ./backend\n");
+                compose.push_str("    ports:\n");
+                compose.push_str("      - \"3030:3030\"\n");
+                compose.push_str("    environment:\n");
+                compose.push_str("      - CORS_ORIGINS=http://localhost:3000\n");
+                compose.push_str("\n");
+            }
             ShellType::Mobile => {
                 // Mobile apps don't have a backend component
             }
@@ -500,6 +565,7 @@ fn generate_docker_compose(frontend: Option<ShellType>, backend: Option<ShellTyp
         let backend_url = match backend {
             Some(ShellType::Python) => "http://localhost:8000",
             Some(ShellType::Typescript) => "http://localhost:3030",
+            Some(ShellType::Rust) => "http://localhost:3030",
             Some(ShellType::Mobile) => "http://localhost:8000",
             None => "http://localhost:8000",
         };
@@ -533,6 +599,17 @@ fn generate_docker_compose(frontend: Option<ShellType>, backend: Option<ShellTyp
                 compose.push_str("  #   cd frontend && npm install && npx expo start\n");
                 compose.push_str("  # Backend URL for mobile app:\n");
                 compose.push_str(&format!("  #   EXPO_PUBLIC_API_URL={}\n", backend_url));
+            }
+            ShellType::Rust => {
+                compose.push_str("  frontend:\n");
+                compose.push_str("    build:\n");
+                compose.push_str("      context: ./frontend\n");
+                compose.push_str("      args:\n");
+                compose.push_str(&format!("        API_URL: {}\n", backend_url));
+                compose.push_str("    ports:\n");
+                compose.push_str("      - \"3000:3000\"\n");
+                compose.push_str("    depends_on:\n");
+                compose.push_str("      - backend\n");
             }
         }
     }

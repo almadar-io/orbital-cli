@@ -13,7 +13,6 @@ pub(crate) fn evaluate_sexpr(
     payload_json: Option<&str>,
     output_format: &str,
 ) -> anyhow::Result<()> {
-    
     use orbital_core::{BindingContext, Evaluator, SExpression};
     use std::io::Read;
 

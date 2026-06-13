@@ -53,7 +53,9 @@ pub(crate) fn detect_syntax(content: &str) -> InputSyntax {
 /// Parse a schema from its raw content, auto-detecting LOLO vs Orb JSON syntax.
 /// For Orb JSON, i18n translation is applied before parsing.
 /// Returns the parsed `OrbitalSchema`.
-pub(crate) fn parse_schema_auto(content: &str) -> anyhow::Result<orbital_core::schema::OrbitalSchema> {
+pub(crate) fn parse_schema_auto(
+    content: &str,
+) -> anyhow::Result<orbital_core::schema::OrbitalSchema> {
     parse_schema_auto_typed(content).map_err(|e| anyhow::anyhow!("{}", e.describe()))
 }
 
@@ -83,7 +85,9 @@ pub fn parse_schema_auto_typed(
 ) -> Result<orbital_core::schema::OrbitalSchema, TypedParseError> {
     use orbital_core::schema::parse_schema;
     match detect_syntax(content) {
-        InputSyntax::Lolo => orbital_lolo::parse_and_lower_str(content).map_err(TypedParseError::Lolo),
+        InputSyntax::Lolo => {
+            orbital_lolo::parse_and_lower_str(content).map_err(TypedParseError::Lolo)
+        }
         InputSyntax::OrbJson => {
             let translated = translate_schema_content(content);
             parse_schema(&translated).map_err(|e| TypedParseError::Json(e.to_string()))
@@ -138,9 +142,7 @@ pub(crate) fn typed_parse_error_to_json(e: &TypedParseError) -> Vec<ValidationJs
             let (code, suggestion) = match te {
                 TypeError::UnknownType { suggestion, .. } => (
                     "ORB_T_TYPE_UNKNOWN",
-                    suggestion
-                        .as_ref()
-                        .map(|s| format!("did you mean {s:?}?")),
+                    suggestion.as_ref().map(|s| format!("did you mean {s:?}?")),
                 ),
                 TypeError::CircularType { .. } => (
                     "ORB_T_TYPE_CYCLE",
@@ -174,7 +176,9 @@ pub(crate) fn typed_parse_error_to_json(e: &TypedParseError) -> Vec<ValidationJs
                 ),
                 TypeError::WrongTypeArgCount { expected, got, .. } => (
                     "ORB_T_TYPE_WRONG_ARG_COUNT",
-                    Some(format!("supply exactly {expected} type argument(s), got {got}")),
+                    Some(format!(
+                        "supply exactly {expected} type argument(s), got {got}"
+                    )),
                 ),
                 TypeError::EventTypeWrongKind { name, actual, .. } => (
                     "ORB_T_EVENT_TYPE_WRONG_KIND",

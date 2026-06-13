@@ -240,6 +240,10 @@ coverage/\n\
 \n\
 # Lock files (regenerated on install)\n\
 package-lock.json\n";
+            let mut gitignore = gitignore.to_string();
+            if matches!(shell, ShellType::Rust) {
+                gitignore.push_str("\n# Rust\ntarget/\nCargo.lock\n");
+            }
             fs::write(project_dir.join(".gitignore"), gitignore)?;
             println!("  Initialized git repository");
         } else {
@@ -288,6 +292,11 @@ package-lock.json\n";
                     );
                 }
             }
+            ShellType::Rust => {
+                println!("Rust dependencies are resolved by Cargo on first build.");
+                println!("  cd {}/app", name);
+                println!("  cargo check");
+            }
         }
     }
 
@@ -315,6 +324,11 @@ package-lock.json\n";
                 println!("  cd app && npm install");
             }
             println!("  cd app && npx expo start");
+        }
+        ShellType::Rust => {
+            println!("  cd app");
+            println!("  cargo check");
+            println!("  cargo run");
         }
     }
     println!();

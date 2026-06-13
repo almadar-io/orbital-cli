@@ -73,6 +73,8 @@ pub enum ShellType {
     Python,
     /// React Native mobile application
     Mobile,
+    /// Rust native application with Axum server and egui client
+    Rust,
 }
 
 /// Server framework choice for backend code generation
@@ -506,7 +508,11 @@ fn print_lolo_signatures(out: Option<&std::path::Path>) -> anyhow::Result<()> {
     match out {
         Some(path) => {
             std::fs::write(path, LOLO_SIGNATURES)?;
-            eprintln!("Wrote {} bytes to {}", LOLO_SIGNATURES.len(), path.display());
+            eprintln!(
+                "Wrote {} bytes to {}",
+                LOLO_SIGNATURES.len(),
+                path.display()
+            );
         }
         None => {
             print!("{LOLO_SIGNATURES}");
@@ -550,7 +556,11 @@ fn main() -> anyhow::Result<()> {
         }
         Some(Commands::Parse { path }) => parse_schema(&path),
         Some(Commands::Signatures { out }) => print_lolo_signatures(out.as_deref()),
-        Some(Commands::Resolve { path, output, verbose }) => resolve_schema_cli(&path, output.as_deref(), verbose),
+        Some(Commands::Resolve {
+            path,
+            output,
+            verbose,
+        }) => resolve_schema_cli(&path, output.as_deref(), verbose),
         Some(Commands::Format { path, write }) => format_schema(&path, write),
         Some(Commands::Compile {
             path,

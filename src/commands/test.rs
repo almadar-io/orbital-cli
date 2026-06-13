@@ -134,7 +134,6 @@ fn execute_tests_headless(
     verbose: bool,
 ) -> anyhow::Result<()> {
     use orbital_compiler::TestCategory;
-    
 
     let mut total_passed = 0usize;
     let mut total_failed = 0usize;

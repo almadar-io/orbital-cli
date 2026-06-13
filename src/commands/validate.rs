@@ -36,8 +36,8 @@ fn validate_schema_json(
     extra_patterns: Option<orbital_compiler::ExtraPatterns>,
     service_actions: std::collections::HashMap<String, std::collections::HashSet<String>>,
 ) -> anyhow::Result<()> {
-    use orbital_compiler::{compile_schema, validate_comprehensive_full, CompilerOptions};
     use orbital_compiler::phases::{inline_schema, InlineConfig};
+    use orbital_compiler::{compile_schema, validate_comprehensive_full, CompilerOptions};
     use orbital_core::ir::{OirValidator, ValidationSeverity};
 
     // Step 1: Parse schema (auto-detect LOLO vs JSON syntax)
@@ -223,10 +223,10 @@ fn validate_schema_native(
     extra_patterns: Option<orbital_compiler::ExtraPatterns>,
     service_actions: std::collections::HashMap<String, std::collections::HashSet<String>>,
 ) -> anyhow::Result<()> {
+    use orbital_compiler::phases::{enrich_schema, inline_schema};
     use orbital_compiler::{
         compile_schema, validate_comprehensive_full, CompilerOptions, SchemaLanguage,
     };
-    use orbital_compiler::phases::{inline_schema, enrich_schema};
     use orbital_core::ir::{OirValidator, ValidationSeverity};
 
     // Step 1: Parse schema (auto-detect LOLO vs JSON syntax)

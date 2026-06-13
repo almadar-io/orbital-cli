@@ -126,11 +126,7 @@ pub fn build_map_for_file(
     // line (otherwise the IDE says "no source" for lines without mappings).
     let gen_line_count = generated_content.lines().count().max(1);
     let mut sm = sourcemap::SourceMapBuilder::new(None);
-    let src_id = sm.add_source(
-        orb_source_path
-            .to_str()
-            .unwrap_or("schema.orb"),
-    );
+    let src_id = sm.add_source(orb_source_path.to_str().unwrap_or("schema.orb"));
     sm.set_source_contents(src_id, Some(orb_source_content));
     for gen_line in 0..gen_line_count as u32 {
         sm.add_raw(gen_line, 0, src_line, src_col, Some(src_id), None, false);
@@ -234,10 +230,7 @@ mod tests {
 
     #[test]
     fn ts_classifier_catches_trait_hook() {
-        let f = GeneratedFile::new(
-            "packages/client/src/hooks/traits/useFooLogic.tsx",
-            "",
-        );
+        let f = GeneratedFile::new("packages/client/src/hooks/traits/useFooLogic.tsx", "");
         assert_eq!(
             classify_ts(&f.path, &f.content),
             Some((NodeKind::Trait, "Foo".into()))
