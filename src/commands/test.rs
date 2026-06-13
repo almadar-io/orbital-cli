@@ -305,23 +305,30 @@ fn execute_event_headless(
 ) -> Option<String> {
     
 
-    // Find matching transition
-    let transition = trait_def
+    // The same (event, from_state) can have several transitions disambiguated by
+    // guards (a gauge fans `UPDATE` into → normal / warning / critical). Try each
+    // in declaration order and take the first whose guard passes; a `.find()` on
+    // the first match alone would wrongly block when only a *later* branch's guard
+    // holds.
+    let empty = serde_json::Value::Object(serde_json::Map::new());
+    let p = payload.unwrap_or(&empty);
+    let e = entity_data.unwrap_or(&empty);
+
+    for transition in trait_def
         .transitions
         .iter()
-        .find(|t| t.event == event && t.from.matches(current_state))?;
-
-    // Evaluate guard if present
-    if let Some(ref guard) = transition.guard {
-        let empty = serde_json::Value::Object(serde_json::Map::new());
-        let p = payload.unwrap_or(&empty);
-        let e = entity_data.unwrap_or(&empty);
-        if !evaluate_guard_headless(guard, p, e) {
-            return None;
+        .filter(|t| t.event == event && t.from.matches(current_state))
+    {
+        let passes = match &transition.guard {
+            Some(guard) => evaluate_guard_headless(guard, p, e),
+            None => true,
+        };
+        if passes {
+            return Some(transition.to.clone());
         }
     }
 
-    Some(transition.to.clone())
+    None
 }
 
 /// Headless guard evaluator for OIR expressions.
@@ -437,14 +444,60 @@ fn resolve_expr_value(
 }
 
 /// Resolve an OIR expression to an f64 for numeric comparison.
+///
+/// Computes arithmetic operands (`["/", ?current, @entity.max]` etc.) so a guard
+/// like `[">=", ["/", ?current, @entity.max], 0.85]` evaluates against real
+/// numbers. Arithmetic may lower to either `BinaryOp` or operator `Call` form, so
+/// both are handled. Non-numeric / unresolvable operands return `None`, which the
+/// comparison arms treat as a blocked transition (matching the real runtime's
+/// canonical `Evaluator`, which already computes these).
 fn resolve_expr_to_f64(
     expr: &orbital_core::ir::OirExpr,
     payload: &serde_json::Value,
     entity_data: &serde_json::Value,
 ) -> Option<f64> {
-    let val = resolve_expr_value(expr, payload, entity_data);
-    match val {
-        serde_json::Value::Number(n) => n.as_f64(),
-        _ => None,
+    use orbital_core::ir::{OirBinaryOp, OirExpr};
+
+    fn op_symbol_binary(op: &OirBinaryOp) -> Option<&'static str> {
+        Some(match op {
+            OirBinaryOp::Add => "+",
+            OirBinaryOp::Sub => "-",
+            OirBinaryOp::Mul => "*",
+            OirBinaryOp::Div => "/",
+            OirBinaryOp::Mod => "%",
+            _ => return None, // comparison / logic ops aren't numeric operands
+        })
+    }
+
+    fn apply_arith(sym: &str, l: f64, r: f64) -> Option<f64> {
+        Some(match sym {
+            "+" => l + r,
+            "-" => l - r,
+            "*" => l * r,
+            "/" if r != 0.0 => l / r,
+            "%" if r != 0.0 => l % r,
+            _ => return None, // division/modulo by zero → unresolvable
+        })
+    }
+
+    match expr {
+        OirExpr::BinaryOp { op, left, right } => {
+            let l = resolve_expr_to_f64(left, payload, entity_data)?;
+            let r = resolve_expr_to_f64(right, payload, entity_data)?;
+            apply_arith(op_symbol_binary(op)?, l, r)
+        }
+        OirExpr::Call { function, args } if args.len() == 2 => {
+            let sym = match function.as_str() {
+                "+" | "-" | "*" | "/" | "%" => function.as_str(),
+                _ => return None,
+            };
+            let l = resolve_expr_to_f64(&args[0], payload, entity_data)?;
+            let r = resolve_expr_to_f64(&args[1], payload, entity_data)?;
+            apply_arith(sym, l, r)
+        }
+        _ => match resolve_expr_value(expr, payload, entity_data) {
+            serde_json::Value::Number(n) => n.as_f64(),
+            _ => None,
+        },
     }
 }
