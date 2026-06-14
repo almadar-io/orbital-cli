@@ -75,6 +75,8 @@ pub enum ShellType {
     Mobile,
     /// Rust native application with Axum server and egui client
     Rust,
+    /// Native Android application with Jetpack Compose
+    Android,
 }
 
 /// Server framework choice for backend code generation

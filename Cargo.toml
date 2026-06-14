@@ -22,6 +22,7 @@ orbital-shell-typescript = { path = "../orbital-shell-typescript" }
 orbital-shell-python = { path = "../orbital-shell-python" }
 orbital-shell-mobile = { path = "../orbital-shell-mobile" }
 orbital-shell-rust = { path = "../orbital-shell-rust" }
+orbital-shell-android = { path = "../orbital-shell-android" }
 orbital-server = { path = "../orbital-server" }
 # Use desktop feature without bevy (default-features = false to skip bevy-ui)
 orbital-client = { path = "../orbital-client", default-features = false, features = ["desktop", "sync-http"] }

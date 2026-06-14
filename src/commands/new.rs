@@ -244,6 +244,9 @@ package-lock.json\n";
             if matches!(shell, ShellType::Rust) {
                 gitignore.push_str("\n# Rust\ntarget/\nCargo.lock\n");
             }
+            if matches!(shell, ShellType::Android) {
+                gitignore.push_str("\n# Android\nbuild/\n.gradle/\nlocal.properties\n*.iml\n");
+            }
             fs::write(project_dir.join(".gitignore"), gitignore)?;
             println!("  Initialized git repository");
         } else {
@@ -297,6 +300,11 @@ package-lock.json\n";
                 println!("  cd {}/app", name);
                 println!("  cargo check");
             }
+            ShellType::Android => {
+                println!("Android dependencies are resolved by Gradle on first build.");
+                println!("  cd {}/app", name);
+                println!("  ./gradlew assembleDebug");
+            }
         }
     }
 
@@ -329,6 +337,10 @@ package-lock.json\n";
             println!("  cd app");
             println!("  cargo check");
             println!("  cargo run");
+        }
+        ShellType::Android => {
+            println!("  cd app");
+            println!("  ./gradlew assembleDebug");
         }
     }
     println!();
