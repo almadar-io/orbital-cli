@@ -300,13 +300,8 @@ pub(crate) fn compile_schema(
         ShellType::Ios => {
             let ios_shell = IosShell::new();
             let ios_backend = IosBackend::new();
-            let result = generate_from_file(
-                &compile_path,
-                output,
-                &ios_shell,
-                &ios_backend,
-                &options,
-            )?;
+            let result =
+                generate_from_file(&compile_path, output, &ios_shell, &ios_backend, &options)?;
 
             println!("\n✅ Generated {} files", result.files.len());
 
