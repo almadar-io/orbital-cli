@@ -29,6 +29,7 @@ pub(crate) fn compile_schema(
 
     use orbital_compiler::{generate_from_file, GenerateOptions};
     use orbital_shell_android::{AndroidBackend, AndroidShell};
+    use orbital_shell_ios::{IosBackend, IosShell};
     use orbital_shell_mobile::MobileBackend;
     use orbital_shell_python::PythonBackend;
     use orbital_shell_rust::{RustBackend, RustShell};
@@ -296,6 +297,30 @@ pub(crate) fn compile_schema(
             println!("  cd {}", output.display());
             println!("  ./gradlew assembleDebug");
         }
+        ShellType::Ios => {
+            let ios_shell = IosShell::new();
+            let ios_backend = IosBackend::new();
+            let result = generate_from_file(
+                &compile_path,
+                output,
+                &ios_shell,
+                &ios_backend,
+                &options,
+            )?;
+
+            println!("\n✅ Generated {} files", result.files.len());
+
+            if !result.warnings.is_empty() {
+                println!("\nWarnings:");
+                for warning in &result.warnings {
+                    println!("  ⚠️  {}", warning);
+                }
+            }
+
+            println!("\nNext steps:");
+            println!("  cd {}", output.display());
+            println!("  ./orb-build.sh");
+        }
     }
 
     Ok(())
@@ -314,6 +339,7 @@ fn compile_mixed(
 
     use orbital_compiler::{generate_from_file, GenerateOptions};
     use orbital_shell_android::{AndroidBackend, AndroidShell};
+    use orbital_shell_ios::{IosBackend, IosShell};
     use orbital_shell_mobile::MobileBackend;
     use orbital_shell_python::PythonBackend;
     use orbital_shell_rust::{RustBackend, RustShell};
@@ -439,6 +465,18 @@ fn compile_mixed(
                 )?;
                 total_files += result.files.len();
             }
+            ShellType::Ios => {
+                let ios_shell = IosShell::new();
+                let ios_backend = IosBackend::new();
+                let result = generate_from_file(
+                    &compile_path,
+                    &frontend_output,
+                    &ios_shell,
+                    &ios_backend,
+                    &options,
+                )?;
+                total_files += result.files.len();
+            }
         }
     }
 
@@ -502,6 +540,9 @@ fn compile_mixed(
             ShellType::Android => {
                 return Err(anyhow::anyhow!("Android shell cannot be used as a backend"));
             }
+            ShellType::Ios => {
+                return Err(anyhow::anyhow!("iOS shell cannot be used as a backend"));
+            }
         }
     }
 
@@ -521,6 +562,7 @@ fn compile_mixed(
             Some(ShellType::Rust) => "http://localhost:3030",
             Some(ShellType::Mobile) => "http://localhost:8000",
             Some(ShellType::Android) => "http://localhost:8000",
+            Some(ShellType::Ios) => "http://localhost:8000",
             None => "http://localhost:8000",
         };
 
@@ -542,6 +584,9 @@ fn compile_mixed(
                 format!("# API URL for backend server\nAPI_URL={}\n", backend_url)
             }
             Some(ShellType::Android) => {
+                format!("# API URL for backend server\nAPI_URL={}\n", backend_url)
+            }
+            Some(ShellType::Ios) => {
                 format!("# API URL for backend server\nAPI_URL={}\n", backend_url)
             }
             None => String::new(),
@@ -605,6 +650,9 @@ fn generate_docker_compose(frontend: Option<ShellType>, backend: Option<ShellTyp
             ShellType::Android => {
                 // Android apps don't have a backend component
             }
+            ShellType::Ios => {
+                // iOS apps don't have a backend component
+            }
         }
     }
 
@@ -616,6 +664,7 @@ fn generate_docker_compose(frontend: Option<ShellType>, backend: Option<ShellTyp
             Some(ShellType::Rust) => "http://localhost:3030",
             Some(ShellType::Mobile) => "http://localhost:8000",
             Some(ShellType::Android) => "http://localhost:8000",
+            Some(ShellType::Ios) => "http://localhost:8000",
             None => "http://localhost:8000",
         };
 
@@ -668,6 +717,12 @@ fn generate_docker_compose(frontend: Option<ShellType>, backend: Option<ShellTyp
                 compose.push_str("      - \"3000:3000\"\n");
                 compose.push_str("    depends_on:\n");
                 compose.push_str("      - backend\n");
+            }
+            ShellType::Ios => {
+                compose.push_str("  # iOS app - run locally with:\n");
+                compose.push_str("  #   cd frontend && ./orb-build.sh\n");
+                compose.push_str("  # Backend URL for iOS app:\n");
+                compose.push_str(&format!("  #   API_URL={}\n", backend_url));
             }
         }
     }

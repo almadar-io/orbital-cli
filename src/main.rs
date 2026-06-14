@@ -77,6 +77,8 @@ pub enum ShellType {
     Rust,
     /// Native Android application with Jetpack Compose
     Android,
+    /// Native iOS application with SwiftUI
+    Ios,
 }
 
 /// Server framework choice for backend code generation

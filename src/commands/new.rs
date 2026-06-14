@@ -247,6 +247,9 @@ package-lock.json\n";
             if matches!(shell, ShellType::Android) {
                 gitignore.push_str("\n# Android\nbuild/\n.gradle/\nlocal.properties\n*.iml\n");
             }
+            if matches!(shell, ShellType::Ios) {
+                gitignore.push_str("\n# iOS\nDerivedData/\n*.xcworkspace\n*.xcodeproj\nbuild/\n");
+            }
             fs::write(project_dir.join(".gitignore"), gitignore)?;
             println!("  Initialized git repository");
         } else {
@@ -305,6 +308,11 @@ package-lock.json\n";
                 println!("  cd {}/app", name);
                 println!("  ./gradlew assembleDebug");
             }
+            ShellType::Ios => {
+                println!("iOS dependencies are resolved by Xcode on first build.");
+                println!("  cd {}/app", name);
+                println!("  ./orb-build.sh");
+            }
         }
     }
 
@@ -341,6 +349,10 @@ package-lock.json\n";
         ShellType::Android => {
             println!("  cd app");
             println!("  ./gradlew assembleDebug");
+        }
+        ShellType::Ios => {
+            println!("  cd app");
+            println!("  ./orb-build.sh");
         }
     }
     println!();
