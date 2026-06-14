@@ -27,6 +27,7 @@ orbital-shell-ios = { path = "../orbital-shell-ios" }
 orbital-server = { path = "../orbital-server" }
 # Use desktop feature without bevy (default-features = false to skip bevy-ui)
 orbital-client = { path = "../orbital-client", default-features = false, features = ["desktop", "sync-http"] }
+orbital-verify = { path = "../orbital-verify" }
 
 # CLI essentials only
 clap.workspace = true

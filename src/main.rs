@@ -199,6 +199,26 @@ enum Commands {
         verbose: bool,
     },
 
+    /// Verify an app headlessly: Layer 1 (kernel circuit) + Layer 2 (client render).
+    /// Pass a FILE, or `--registry [--topic <t>]` to sweep the std/behaviors corpus.
+    Verify {
+        /// Path to a single .orb schema file (omit to use --registry).
+        #[arg(value_name = "FILE")]
+        path: Option<PathBuf>,
+
+        /// Verify across the almadar-std + almadar-behaviors registry corpus.
+        #[arg(long)]
+        registry: bool,
+
+        /// Restrict the corpus sweep to one topic (e.g. `app`, `game`).
+        #[arg(long, value_name = "TOPIC")]
+        topic: Option<String>,
+
+        /// Write per-organism verify-report.json into this directory.
+        #[arg(long, value_name = "DIR")]
+        report_dir: Option<PathBuf>,
+    },
+
     /// Compile an Orbital schema to generated code
     Compile {
         /// Path to the .orb schema file
@@ -565,6 +585,12 @@ fn main() -> anyhow::Result<()> {
             output,
             verbose,
         }) => resolve_schema_cli(&path, output.as_deref(), verbose),
+        Some(Commands::Verify {
+            path,
+            registry,
+            topic,
+            report_dir,
+        }) => commands::verify::run_verify(path, registry, topic, report_dir),
         Some(Commands::Format { path, write }) => format_schema(&path, write),
         Some(Commands::Compile {
             path,
