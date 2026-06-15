@@ -193,6 +193,10 @@ pub(crate) fn run_screenshot_frames(path: &Path, out_dir: &Path) -> Result<bool>
 
     {
         let mut app = build_app()?;
+        // Pump INIT's fetch→`<X>Loaded` emits to quiescence (as the real frame loop does)
+        // so the initial frame shows the natural *settled* state — a populated data table,
+        // not a frozen spinner. The per-transition frames below stay hermetic.
+        app.settle(8);
         let png = out_dir.join(format!("{item}.frame{idx:02}.initial.png"));
         orbital_client::screenshot::capture(&mut app, &png)?;
         entry(idx, "·", "INIT", app.current_state_name(), &png);
