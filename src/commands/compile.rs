@@ -23,14 +23,12 @@ pub(crate) fn compile_schema(
     server_framework: ServerFrameworkArg,
     emit_orb: Option<&std::path::Path>,
 ) -> anyhow::Result<()> {
-    use orbital_compiler::shell::{
-        mobile_shell, python_shell, typescript_shell, typescript_shell_hono,
-    };
+    use orbital_compiler::shell::{python_shell, typescript_shell, typescript_shell_hono};
 
     use orbital_compiler::{generate_from_file, GenerateOptions};
     use orbital_shell_android::{AndroidBackend, AndroidShell};
     use orbital_shell_ios::{IosBackend, IosShell};
-    use orbital_shell_mobile::MobileBackend;
+    use orbital_shell_mobile::{MobileBackend, MobileShell};
     use orbital_shell_python::PythonBackend;
     use orbital_shell_rust::{RustBackend, RustShell};
     use orbital_shell_typescript::TypeScriptBackend;
@@ -229,7 +227,7 @@ pub(crate) fn compile_schema(
             println!("  python -m orbital_app.main");
         }
         ShellType::Mobile => {
-            let mobile_shell = mobile_shell(&shells_dir);
+            let mobile_shell = MobileShell::new();
             let mobile_backend = MobileBackend::new();
             let result = generate_from_file(
                 &compile_path,
@@ -330,12 +328,12 @@ fn compile_mixed(
     shells_dir: &PathBuf,
     verbose: bool,
 ) -> anyhow::Result<()> {
-    use orbital_compiler::shell::{mobile_shell, python_shell, typescript_shell};
+    use orbital_compiler::shell::{python_shell, typescript_shell};
 
     use orbital_compiler::{generate_from_file, GenerateOptions};
     use orbital_shell_android::{AndroidBackend, AndroidShell};
     use orbital_shell_ios::{IosBackend, IosShell};
-    use orbital_shell_mobile::MobileBackend;
+    use orbital_shell_mobile::{MobileBackend, MobileShell};
     use orbital_shell_python::PythonBackend;
     use orbital_shell_rust::{RustBackend, RustShell};
     use orbital_shell_typescript::TypeScriptBackend;
@@ -425,7 +423,7 @@ fn compile_mixed(
                 total_files += result.files.len();
             }
             ShellType::Mobile => {
-                let mob_shell = mobile_shell(shells_dir);
+                let mob_shell = MobileShell::new();
                 let mob_backend = MobileBackend::new();
                 let result = generate_from_file(
                     &compile_path,
