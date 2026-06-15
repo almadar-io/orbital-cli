@@ -140,11 +140,27 @@ pub(crate) fn run_screenshot_frames(path: &Path, out_dir: &Path) -> Result<bool>
     let item = path.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown").to_string();
     std::fs::create_dir_all(out_dir)?;
 
-    // Pick the richest inline trait of the primary orbital (most transitions).
+    // Pick the trait that drives the VISIBLE `main` slot the most (so frames differ as
+    // it transitions) — a backend/lifecycle trait with no `render-ui main` would yield
+    // identical frames. Tie-break on state count.
     let traits = orbital_verify::planner::inline_traits(&schema);
+    let renders_main = |t: &orbital_core::TraitDefinition| -> usize {
+        t.state_machine
+            .transitions
+            .iter()
+            .filter(|tr| {
+                tr.effects.as_ref().is_some_and(|effs| {
+                    effs.iter().any(|e| {
+                        let s = serde_json::to_string(e).unwrap_or_default();
+                        s.contains("render-ui") && s.contains("\"main\"")
+                    })
+                })
+            })
+            .count()
+    };
     let Some(td) = traits
         .iter()
-        .max_by_key(|t| (t.state_machine.states.len(), t.state_machine.transitions.len()))
+        .max_by_key(|t| (renders_main(t), t.state_machine.states.len()))
         .copied()
     else {
         anyhow::bail!("no inline traits to walk");
@@ -169,6 +185,8 @@ pub(crate) fn run_screenshot_frames(path: &Path, out_dir: &Path) -> Result<bool>
             schema.clone(),
             Arc::clone(&bridge) as Arc<dyn ServerBridge>,
         );
+        // Drive (and display) the trait we're walking, not the orbital's first trait.
+        app.set_active_trait(&trait_name);
         app.init_all_traits_blocking();
         Ok(app)
     };
