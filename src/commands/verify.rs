@@ -8,6 +8,7 @@
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_verify(
     path: Option<PathBuf>,
     registry: bool,
@@ -15,6 +16,7 @@ pub(crate) fn run_verify(
     report_dir: Option<PathBuf>,
     screenshot_dir: Option<PathBuf>,
     frames_dir: Option<PathBuf>,
+    server: bool,
 ) -> Result<()> {
     let targets = collect_targets(path, registry, topic.as_deref());
     if targets.is_empty() {
@@ -52,7 +54,7 @@ pub(crate) fn run_verify(
     let mut passed = 0usize;
     let mut failed = 0usize;
     for target in &targets {
-        match verify_one(target, report_dir.as_deref(), screenshot_dir.as_deref()) {
+        match verify_one(target, report_dir.as_deref(), screenshot_dir.as_deref(), server) {
             Ok(true) => passed += 1,
             Ok(false) => failed += 1,
             Err(e) => {
@@ -69,7 +71,12 @@ pub(crate) fn run_verify(
     Ok(())
 }
 
-fn verify_one(path: &Path, report_dir: Option<&Path>, screenshot_dir: Option<&Path>) -> Result<bool> {
+fn verify_one(
+    path: &Path,
+    report_dir: Option<&Path>,
+    screenshot_dir: Option<&Path>,
+    server: bool,
+) -> Result<bool> {
     let schema = orbital_verify::corpus::resolve_file(path)?;
     let item = path
         .file_stem()
@@ -86,12 +93,26 @@ fn verify_one(path: &Path, report_dir: Option<&Path>, screenshot_dir: Option<&Pa
         }
     }
 
-    // Layer 2 — client render contract (enforces the bindings L1 deferred).
+    // Layer 2 — client render contract (enforces the bindings L1 deferred), in-process kernel.
     let l2 = orbital_client::render_probe::probe_schema(&item, schema.clone())?;
     println!("{}", l2.headline());
     for v in &l2.verdicts {
         if !v.passed {
             println!("    L2 FAIL {} — {}", v.name, v.detail);
+        }
+    }
+
+    // Layer 2 (server) — the SAME render contract driven over real HTTP against a live
+    // `orbital-server`, verifying server routes + serialization + client together.
+    let mut l2_server_ok = true;
+    if server {
+        let l2s = super::verify_server::probe_over_http(&item, schema.clone())?;
+        println!("{} [server]", l2s.headline());
+        for v in &l2s.verdicts {
+            if !v.passed {
+                l2_server_ok = false;
+                println!("    L2/server FAIL {} — {}", v.name, v.detail);
+            }
         }
     }
 
@@ -125,7 +146,7 @@ fn verify_one(path: &Path, report_dir: Option<&Path>, screenshot_dir: Option<&Pa
         }
     }
 
-    Ok(l1.ok() && l2.ok())
+    Ok(l1.ok() && l2.ok() && l2_server_ok)
 }
 
 /// Per-frame (state-transition) screenshot capture: for the primary orbital's richest

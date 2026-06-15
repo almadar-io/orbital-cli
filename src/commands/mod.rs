@@ -11,6 +11,7 @@ pub(crate) mod simulate;
 pub(crate) mod test;
 pub(crate) mod validate;
 pub(crate) mod verify;
+pub(crate) mod verify_server;
 
 pub(crate) use compile::compile_schema;
 pub(crate) use convert::run_convert;

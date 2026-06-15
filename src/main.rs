@@ -227,6 +227,11 @@ enum Commands {
         /// frame + a frames.json manifest for the vision-review workflow.
         #[arg(long, value_name = "DIR")]
         screenshot_frames: Option<PathBuf>,
+
+        /// Also run Layer 2 over real HTTP against an in-process `orbital-server`
+        /// (server↔client render parity, not just the fused in-process kernel).
+        #[arg(long)]
+        server: bool,
     },
 
     /// Compile an Orbital schema to generated code
@@ -606,7 +611,16 @@ fn main() -> anyhow::Result<()> {
             report_dir,
             screenshot,
             screenshot_frames,
-        }) => commands::verify::run_verify(path, registry, topic, report_dir, screenshot, screenshot_frames),
+            server,
+        }) => commands::verify::run_verify(
+            path,
+            registry,
+            topic,
+            report_dir,
+            screenshot,
+            screenshot_frames,
+            server,
+        ),
         Some(Commands::Format { path, write }) => format_schema(&path, write),
         Some(Commands::Compile {
             path,
