@@ -45,3 +45,4 @@ sourcemap = "9"
 
 [dev-dependencies]
 pretty_assertions.workspace = true
+syn = { version = "2", features = ["full"] }
