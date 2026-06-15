@@ -85,13 +85,23 @@ fn rust_shell_emits_complete_scaffold() {
         "src/effects/mod.rs",
         "src/traits/mod.rs",
         "src/bin/desktop.rs",
-        "schema.orb",   // what `run_desktop(...)` reads at runtime
-        "resolved.orb", // the fully-resolved bundle
+        "schema.orb",   // source reference copy
+        "resolved.orb", // the fully-resolved bundle the runtime actually loads
     ] {
         assert!(
             out.join(required).exists(),
             "missing emitted file: {required}\n(emitted: {:?})",
             rust_files(&out)
+        );
+    }
+
+    // The runtime must load the RESOLVED schema — reading the raw `schema.orb` 404s every
+    // event ("Trait not found: X.traits.Y") for any `uses:`-based organism.
+    for entry in ["src/server.rs", "src/bin/desktop.rs"] {
+        let src = std::fs::read_to_string(out.join(entry)).unwrap();
+        assert!(
+            src.contains("resolved.orb"),
+            "{entry} must load resolved.orb (loading raw schema.orb 404s on uses:-based schemas)"
         );
     }
 }

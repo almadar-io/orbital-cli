@@ -35,19 +35,26 @@ pub(crate) fn run_dev_mode(path: &PathBuf, port: u16, force_headless: bool) -> a
         println!("(Set DISPLAY or WAYLAND_DISPLAY to enable the desktop GUI)");
     }
 
-    let path_clone = path.clone();
+    // Resolve the schema (inline `uses:`, expand composers, collapse trait refs) BEFORE
+    // serving — the runtime registers traits by their resolved names, so a raw `uses:`-based
+    // organism otherwise 404s every event with "Trait not found: X.traits.Y". Server + desktop
+    // both consume the resolved `.orb`. (The CLI owns the resolver; the runtime doesn't.)
+    let resolved_path = resolve_to_temp(path)?;
+    let serve_path = resolved_path.clone();
 
     // Start server in background thread (always uses mock data in dev mode)
     let server_handle =
-        thread::spawn(move || orbital_server::run(&path_clone, "127.0.0.1", port, true));
+        thread::spawn(move || orbital_server::run(&serve_path, "127.0.0.1", port, true));
 
     if display_available {
-        // Give server a moment to start before opening GUI
-        thread::sleep(std::time::Duration::from_millis(500));
+        // Wait for the server to actually bind the port before opening the GUI. The server
+        // registers + seeds the (possibly large) schema BEFORE it binds, so a fixed sleep
+        // races startup: the desktop's one-shot INIT fires early, 404s, and never retries.
+        wait_for_port(port, std::time::Duration::from_secs(15))?;
 
-        // Start GUI client pointing to local server
+        // Start GUI client pointing to local server (also on the resolved schema).
         let server_url = format!("http://127.0.0.1:{}", port);
-        orbital_client::run_desktop(path, Some(&server_url))?;
+        orbital_client::run_desktop(&resolved_path, Some(&server_url))?;
     } else {
         // Headless: block on the server thread so the process stays alive
         server_handle
@@ -56,4 +63,34 @@ pub(crate) fn run_dev_mode(path: &PathBuf, port: u16, force_headless: bool) -> a
     }
 
     Ok(())
+}
+
+/// Resolve a schema (Inline + Compose + Enrich) and write the resolved `.orb` to a temp
+/// file, returning its path. The runtime entry points (`orbital_server::run`,
+/// `run_desktop`) parse a path; resolution lives here in the CLI, which owns the compiler.
+fn resolve_to_temp(path: &std::path::Path) -> anyhow::Result<PathBuf> {
+    let schema = orbital_compiler::parse_file(path)
+        .map_err(|e| anyhow::anyhow!("parse {}: {e}", path.display()))?;
+    let options = orbital_compiler::CompilerOptions::default();
+    let resolved = orbital_compiler::resolve_schema_with_path(schema, &options, Some(path))
+        .map_err(|e| anyhow::anyhow!("resolve {}: {e}", path.display()))?;
+    let out = std::env::temp_dir().join(format!("orbital-dev-{}.orb", std::process::id()));
+    std::fs::write(&out, serde_json::to_string(&resolved)?)?;
+    Ok(out)
+}
+
+/// Poll until the local server binds `port` (it binds only after register + seed, so a
+/// successful connect means it is ready to serve), or the deadline passes.
+fn wait_for_port(port: u16, timeout: std::time::Duration) -> anyhow::Result<()> {
+    let addr = format!("127.0.0.1:{port}");
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if std::net::TcpStream::connect(&addr).is_ok() {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            anyhow::bail!("dev server on {addr} did not become ready within {timeout:?}");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
 }
