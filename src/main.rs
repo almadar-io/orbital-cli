@@ -222,6 +222,11 @@ enum Commands {
         /// (requires `orb` built with `--features screenshot`).
         #[arg(long, value_name = "DIR")]
         screenshot: Option<PathBuf>,
+
+        /// Layer 3 (per-frame): drive each state transition and capture a PNG per
+        /// frame + a frames.json manifest for the vision-review workflow.
+        #[arg(long, value_name = "DIR")]
+        screenshot_frames: Option<PathBuf>,
     },
 
     /// Compile an Orbital schema to generated code
@@ -596,7 +601,8 @@ fn main() -> anyhow::Result<()> {
             topic,
             report_dir,
             screenshot,
-        }) => commands::verify::run_verify(path, registry, topic, report_dir, screenshot),
+            screenshot_frames,
+        }) => commands::verify::run_verify(path, registry, topic, report_dir, screenshot, screenshot_frames),
         Some(Commands::Format { path, write }) => format_schema(&path, write),
         Some(Commands::Compile {
             path,
