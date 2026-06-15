@@ -230,7 +230,7 @@ pub(crate) fn compile_schema(
         }
         ShellType::Mobile => {
             let mobile_shell = mobile_shell(&shells_dir);
-            let mobile_backend = MobileBackend;
+            let mobile_backend = MobileBackend::new();
             let result = generate_from_file(
                 &compile_path,
                 output,
@@ -426,7 +426,7 @@ fn compile_mixed(
             }
             ShellType::Mobile => {
                 let mob_shell = mobile_shell(shells_dir);
-                let mob_backend = MobileBackend;
+                let mob_backend = MobileBackend::new();
                 let result = generate_from_file(
                     &compile_path,
                     &frontend_output,
