@@ -13,6 +13,11 @@ path = "src/main.rs"
 name = "orb"
 path = "src/main.rs"
 
+[features]
+# Layer-3 screenshots: `orb verify --screenshot <dir>` renders each organism's desktop
+# egui UI to a PNG via egui_kittest (offscreen wgpu).
+screenshot = ["orbital-client/screenshot"]
+
 [dependencies]
 # Core crates
 orbital-core = { path = "../orbital-core" }

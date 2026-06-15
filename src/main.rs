@@ -217,6 +217,11 @@ enum Commands {
         /// Write per-organism verify-report.json into this directory.
         #[arg(long, value_name = "DIR")]
         report_dir: Option<PathBuf>,
+
+        /// Layer 3: render each organism's desktop UI to a PNG in this directory
+        /// (requires `orb` built with `--features screenshot`).
+        #[arg(long, value_name = "DIR")]
+        screenshot: Option<PathBuf>,
     },
 
     /// Compile an Orbital schema to generated code
@@ -590,7 +595,8 @@ fn main() -> anyhow::Result<()> {
             registry,
             topic,
             report_dir,
-        }) => commands::verify::run_verify(path, registry, topic, report_dir),
+            screenshot,
+        }) => commands::verify::run_verify(path, registry, topic, report_dir, screenshot),
         Some(Commands::Format { path, write }) => format_schema(&path, write),
         Some(Commands::Compile {
             path,

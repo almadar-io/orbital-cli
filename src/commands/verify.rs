@@ -13,6 +13,7 @@ pub(crate) fn run_verify(
     registry: bool,
     topic: Option<String>,
     report_dir: Option<PathBuf>,
+    screenshot_dir: Option<PathBuf>,
 ) -> Result<()> {
     let targets = collect_targets(path, registry, topic.as_deref());
     if targets.is_empty() {
@@ -22,7 +23,7 @@ pub(crate) fn run_verify(
     let mut passed = 0usize;
     let mut failed = 0usize;
     for target in &targets {
-        match verify_one(target, report_dir.as_deref()) {
+        match verify_one(target, report_dir.as_deref(), screenshot_dir.as_deref()) {
             Ok(true) => passed += 1,
             Ok(false) => failed += 1,
             Err(e) => {
@@ -39,7 +40,7 @@ pub(crate) fn run_verify(
     Ok(())
 }
 
-fn verify_one(path: &Path, report_dir: Option<&Path>) -> Result<bool> {
+fn verify_one(path: &Path, report_dir: Option<&Path>, screenshot_dir: Option<&Path>) -> Result<bool> {
     let schema = orbital_verify::corpus::resolve_file(path)?;
     let item = path
         .file_stem()
@@ -57,11 +58,29 @@ fn verify_one(path: &Path, report_dir: Option<&Path>) -> Result<bool> {
     }
 
     // Layer 2 — client render contract (enforces the bindings L1 deferred).
-    let l2 = orbital_client::render_probe::probe_schema(&item, schema)?;
+    let l2 = orbital_client::render_probe::probe_schema(&item, schema.clone())?;
     println!("{}", l2.headline());
     for v in &l2.verdicts {
         if !v.passed {
             println!("    L2 FAIL {} — {}", v.name, v.detail);
+        }
+    }
+
+    // Layer 3 — headless screenshot (opt-in; only when the binary was built with it).
+    if let Some(dir) = screenshot_dir {
+        #[cfg(feature = "screenshot")]
+        match orbital_client::screenshot::screenshot_schema(&item, schema.clone(), dir) {
+            Ok(paths) => {
+                for p in paths {
+                    println!("    📸 {}", p.display());
+                }
+            }
+            Err(e) => println!("    📸 screenshot FAILED — {e}"),
+        }
+        #[cfg(not(feature = "screenshot"))]
+        {
+            let _ = dir;
+            println!("    📸 (rebuild orb with `--features screenshot` to capture)");
         }
     }
 
