@@ -556,6 +556,10 @@ fn print_lolo_signatures(out: Option<&std::path::Path>) -> anyhow::Result<()> {
 }
 
 fn main() -> anyhow::Result<()> {
+    // Namespaced structured logging (mirror of @almadar/logger). Quiet by default
+    // (warn/error only); enable namespaces with e.g. ALMADAR_DEBUG='almadar:runtime:*'.
+    orbital_core::logging::init();
+
     let cli = Cli::parse();
 
     match cli.command {
