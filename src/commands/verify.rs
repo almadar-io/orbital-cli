@@ -195,7 +195,8 @@ fn parse_shell_lang(s: &str) -> Result<orbital_verify::shell::ShellLang> {
         "python" => Ok(ShellLang::Python),
         "android" => Ok(ShellLang::Kotlin),
         "ios" => Ok(ShellLang::Swift),
-        other => anyhow::bail!("unknown --shell {other:?} (expected: python | android | ios)"),
+        "rust" => Ok(ShellLang::Rust),
+        other => anyhow::bail!("unknown --shell {other:?} (expected: python | android | ios | rust)"),
     }
 }
 
@@ -245,6 +246,12 @@ fn emit_shell_to_tmp(
             use orbital_shell_ios::{IosBackend, IosShell};
             let shell = IosShell::new();
             let backend = IosBackend::new();
+            generate_from_file(path, &tmp_dir, &shell, &backend, &options)?;
+        }
+        ShellLang::Rust => {
+            use orbital_shell_rust::{RustBackend, RustShell};
+            let shell = RustShell::new();
+            let backend = RustBackend::new();
             generate_from_file(path, &tmp_dir, &shell, &backend, &options)?;
         }
     }
