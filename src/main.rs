@@ -232,6 +232,12 @@ enum Commands {
         /// (server↔client render parity, not just the fused in-process kernel).
         #[arg(long)]
         server: bool,
+
+        /// Additionally emit a native shell to a temp dir and run its compile
+        /// gate: `python` (real `py_compile` syntax gate) | `android`
+        /// (Kotlin structural gate) | `ios` (Swift structural gate).
+        #[arg(long, value_name = "SHELL")]
+        shell: Option<String>,
     },
 
     /// Compile an Orbital schema to generated code
@@ -612,6 +618,7 @@ fn main() -> anyhow::Result<()> {
             screenshot,
             screenshot_frames,
             server,
+            shell,
         }) => commands::verify::run_verify(
             path,
             registry,
@@ -620,6 +627,7 @@ fn main() -> anyhow::Result<()> {
             screenshot,
             screenshot_frames,
             server,
+            shell,
         ),
         Some(Commands::Format { path, write }) => format_schema(&path, write),
         Some(Commands::Compile {

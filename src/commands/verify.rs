@@ -17,7 +17,14 @@ pub(crate) fn run_verify(
     screenshot_dir: Option<PathBuf>,
     frames_dir: Option<PathBuf>,
     server: bool,
+    shell: Option<String>,
 ) -> Result<()> {
+    // Map the `--shell` arg to the native compile gate once, up front, so an
+    // unknown value fails fast before any target is walked.
+    let shell_lang = shell
+        .as_deref()
+        .map(parse_shell_lang)
+        .transpose()?;
     let targets = collect_targets(path, registry, topic.as_deref());
     if targets.is_empty() {
         anyhow::bail!("no .orb targets (pass a FILE, or --registry [--topic <t>])");
@@ -54,7 +61,13 @@ pub(crate) fn run_verify(
     let mut passed = 0usize;
     let mut failed = 0usize;
     for target in &targets {
-        match verify_one(target, report_dir.as_deref(), screenshot_dir.as_deref(), server) {
+        match verify_one(
+            target,
+            report_dir.as_deref(),
+            screenshot_dir.as_deref(),
+            server,
+            shell_lang,
+        ) {
             Ok(true) => passed += 1,
             Ok(false) => failed += 1,
             Err(e) => {
@@ -76,6 +89,7 @@ fn verify_one(
     report_dir: Option<&Path>,
     screenshot_dir: Option<&Path>,
     server: bool,
+    shell_lang: Option<orbital_verify::shell::ShellLang>,
 ) -> Result<bool> {
     let schema = orbital_verify::corpus::resolve_file(path)?;
     let item = path
@@ -90,6 +104,30 @@ fn verify_one(
     for v in &l1.verdicts {
         if !v.passed {
             println!("    L1 FAIL {} — {}", v.name, v.detail);
+        }
+    }
+
+    // Native-shell compile gate — emit the resolved schema to a temp dir with
+    // the requested shell, then run the (toolchain-agnostic) gate from
+    // `orbital_verify::shell`. This is the home of the Python `py_compile`
+    // gate that used to live in `orbital-verify-unified`, plus android/ios.
+    let mut shell_ok = true;
+    if let Some(lang) = shell_lang {
+        match emit_shell_to_tmp(path, lang) {
+            Ok(tmp_dir) => {
+                let verdict = orbital_verify::shell::shell_compile_verdict(&tmp_dir, lang);
+                let icon = if verdict.passed { "✓" } else { "✗" };
+                println!("  [{icon}] shell:{} — {}", lang.display_name(), verdict.detail);
+                if !verdict.passed {
+                    shell_ok = false;
+                    println!("    SHELL FAIL {} — {}", verdict.name, verdict.detail);
+                }
+                std::fs::remove_dir_all(&tmp_dir).ok();
+            }
+            Err(e) => {
+                shell_ok = false;
+                println!("    SHELL FAIL emit:{} — {e}", lang.display_name());
+            }
         }
     }
 
@@ -146,7 +184,71 @@ fn verify_one(
         }
     }
 
-    Ok(l1.ok() && l2.ok() && l2_server_ok)
+    Ok(l1.ok() && l2.ok() && l2_server_ok && shell_ok)
+}
+
+/// Map the `--shell` arg value to a native compile-gate language. Errors on an
+/// unknown value (fail-fast, before any target walk).
+fn parse_shell_lang(s: &str) -> Result<orbital_verify::shell::ShellLang> {
+    use orbital_verify::shell::ShellLang;
+    match s {
+        "python" => Ok(ShellLang::Python),
+        "android" => Ok(ShellLang::Kotlin),
+        "ios" => Ok(ShellLang::Swift),
+        other => anyhow::bail!("unknown --shell {other:?} (expected: python | android | ios)"),
+    }
+}
+
+/// Emit the schema at `path` to a fresh temp dir using the native shell that
+/// matches `lang`, returning the dir. Reuses the in-process `generate_from_file`
+/// path that `orb compile --shell X` uses — no codegen reimplementation, no
+/// shelling out to the `orbital` binary.
+fn emit_shell_to_tmp(
+    path: &Path,
+    lang: orbital_verify::shell::ShellLang,
+) -> Result<PathBuf> {
+    use orbital_compiler::{generate_from_file, GenerateOptions};
+    use orbital_verify::shell::ShellLang;
+
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "orbital-verify-shell-emit-{}-{}",
+        lang.display_name(),
+        path.file_stem().and_then(|s| s.to_str()).unwrap_or("schema")
+    ));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir)?;
+
+    let options = GenerateOptions {
+        copy_template: true,
+        clean: false,
+        verbose: false,
+        mode: orbital_compiler::ShellMode::Full,
+        ..Default::default()
+    };
+
+    match lang {
+        ShellLang::Python => {
+            use orbital_compiler::shell::python_shell;
+            use orbital_shell_python::PythonBackend;
+            let shells_dir = crate::utils::find_shells_dir();
+            let shell = python_shell(&shells_dir);
+            let backend = PythonBackend::new();
+            generate_from_file(path, &tmp_dir, &shell, &backend, &options)?;
+        }
+        ShellLang::Kotlin => {
+            use orbital_shell_android::{AndroidBackend, AndroidShell};
+            let shell = AndroidShell::new();
+            let backend = AndroidBackend::new();
+            generate_from_file(path, &tmp_dir, &shell, &backend, &options)?;
+        }
+        ShellLang::Swift => {
+            use orbital_shell_ios::{IosBackend, IosShell};
+            let shell = IosShell::new();
+            let backend = IosBackend::new();
+            generate_from_file(path, &tmp_dir, &shell, &backend, &options)?;
+        }
+    }
+    Ok(tmp_dir)
 }
 
 /// Per-frame (state-transition) screenshot capture: for the primary orbital's richest
