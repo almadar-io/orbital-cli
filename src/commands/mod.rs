@@ -4,7 +4,6 @@
 pub(crate) mod compile;
 pub(crate) mod convert;
 pub(crate) mod dev;
-pub(crate) mod new;
 pub(crate) mod parse;
 pub(crate) mod serve;
 pub(crate) mod simulate;
@@ -16,7 +15,6 @@ pub(crate) mod verify_server;
 pub(crate) use compile::compile_schema;
 pub(crate) use convert::run_convert;
 pub(crate) use dev::run_dev_mode;
-pub(crate) use new::{create_new_project, list_templates};
 pub(crate) use parse::{format_schema, parse_schema, resolve_schema_cli};
 pub(crate) use serve::run_serve;
 pub(crate) use simulate::simulate_render;

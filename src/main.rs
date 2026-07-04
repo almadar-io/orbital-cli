@@ -15,9 +15,8 @@ mod i18n;
 mod utils;
 
 use commands::{
-    compile_schema, create_new_project, format_schema, list_templates, parse_schema,
-    resolve_schema_cli, run_convert, run_dev_mode, run_serve, run_tests, simulate_render,
-    validate_schema,
+    compile_schema, format_schema, parse_schema, resolve_schema_cli, run_convert, run_dev_mode,
+    run_serve, run_tests, simulate_render, validate_schema,
 };
 use utils::{evaluate_sexpr, spawn_agent, spawn_agent_with_args};
 
@@ -105,33 +104,6 @@ pub enum ShellMode {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Create a new project from a template
-    New {
-        /// Project name (will create directory with this name)
-        #[arg(value_name = "NAME", required_unless_present = "list")]
-        name: Option<String>,
-
-        /// Template to use
-        #[arg(short, long, default_value = "crud")]
-        template: String,
-
-        /// List available templates
-        #[arg(long)]
-        list: bool,
-
-        /// Target shell for compilation
-        #[arg(short, long, default_value = "typescript")]
-        shell: ShellType,
-
-        /// Skip git initialization
-        #[arg(long)]
-        no_git: bool,
-
-        /// Skip dependency installation
-        #[arg(long)]
-        no_install: bool,
-    },
-
     /// Validate an Orbital schema using the TypeScript validator
     Validate {
         /// Path to the .orb schema file
@@ -574,22 +546,6 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Some(Commands::New {
-            name,
-            template,
-            list,
-            shell,
-            no_git,
-            no_install,
-        }) => {
-            if list {
-                list_templates()
-            } else if let Some(project_name) = name {
-                create_new_project(&project_name, &template, shell, no_git, no_install)
-            } else {
-                anyhow::bail!("Project name is required. Usage: orb new <name>")
-            }
-        }
         Some(Commands::Validate {
             path,
             json,
