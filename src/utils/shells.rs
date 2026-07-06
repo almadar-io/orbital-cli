@@ -40,15 +40,23 @@ pub(crate) fn find_shells_dir() -> PathBuf {
         }
     }
 
-    // 3. Check compile-time path (for development when cwd doesn't resolve)
+    // 3. Check compile-time paths (monorepo dev when cwd doesn't resolve).
+    //    Shells now live as submodules under orbital-rust/templates/, so prefer
+    //    that; fall back to packages/ only while the legacy layout still exists.
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    if let Some(orbital_root) = manifest_dir.parent().and_then(|p| p.parent()) {
+        let templates_path = orbital_root.join("templates");
+        if templates_path.join("almadar-shell").exists() {
+            return templates_path;
+        }
+    }
     if let Some(repo_root) = manifest_dir
         .parent()
         .and_then(|p| p.parent())
         .and_then(|p| p.parent())
     {
         let packages_path = repo_root.join("packages");
-        if packages_path.exists() {
+        if packages_path.join("almadar-shell").exists() {
             return packages_path;
         }
     }
