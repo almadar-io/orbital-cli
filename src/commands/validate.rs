@@ -56,6 +56,8 @@ fn validate_schema_json(
                     fix_guidance: None,
                     expected_shape: None,
                     valid_values: None,
+                    line: None,
+                    column: None,
                 }]),
                 warnings: None,
                 stats: None,
@@ -110,6 +112,8 @@ fn validate_schema_json(
                 fix_guidance: None,
                 expected_shape: None,
                 valid_values: None,
+                line: None,
+                column: None,
             }]),
             warnings: None,
             stats: None,
@@ -157,6 +161,8 @@ fn validate_schema_json(
             fix_guidance: error.fix_guidance.clone(),
             expected_shape: error.expected_shape.clone(),
             valid_values: error.valid_values.clone(),
+            line: None,
+            column: None,
         });
     }
 
@@ -185,6 +191,8 @@ fn validate_schema_json(
                     fix_guidance: None,
                     expected_shape: None,
                     valid_values: None,
+                    line: None,
+                    column: None,
                 });
             } else {
                 all_warnings.push(ValidationJsonWarning {

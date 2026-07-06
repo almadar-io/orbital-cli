@@ -753,6 +753,10 @@ pub(crate) struct ValidationJsonError {
     pub(crate) expected_shape: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) valid_values: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) line: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) column: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]

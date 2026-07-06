@@ -121,6 +121,8 @@ pub(crate) fn typed_parse_error_to_json(e: &TypedParseError) -> Vec<ValidationJs
             fix_guidance: None,
             expected_shape: None,
             valid_values: None,
+            line: None,
+            column: None,
         }],
         TypedParseError::Lolo(LoloError::Io { path, message }) => vec![ValidationJsonError {
             code: "LOLO_IO_ERROR".to_string(),
@@ -130,17 +132,22 @@ pub(crate) fn typed_parse_error_to_json(e: &TypedParseError) -> Vec<ValidationJs
             fix_guidance: None,
             expected_shape: None,
             valid_values: None,
+            line: None,
+            column: None,
         }],
         TypedParseError::Lolo(LoloError::Parse { path, inner }) => {
             let span = inner.span();
+            let (suggestion, fix_guidance) = inner.hint();
             vec![ValidationJsonError {
                 code: "LOLO_PARSE_ERROR".to_string(),
                 path: format!("{path}:{}:{}", span.line, span.col),
                 message: format!("{inner}"),
-                suggestion: None,
-                fix_guidance: None,
+                suggestion,
+                fix_guidance,
                 expected_shape: None,
                 valid_values: None,
+                line: Some(span.line),
+                column: Some(span.col),
             }]
         }
         TypedParseError::Lolo(LoloError::Lower {
@@ -205,6 +212,8 @@ pub(crate) fn typed_parse_error_to_json(e: &TypedParseError) -> Vec<ValidationJs
                 fix_guidance: None,
                 expected_shape: None,
                 valid_values: None,
+                line: Some(span.line),
+                column: Some(span.col),
             }]
         }
         TypedParseError::Lolo(LoloError::Lower { path, inner }) => vec![ValidationJsonError {
@@ -215,6 +224,8 @@ pub(crate) fn typed_parse_error_to_json(e: &TypedParseError) -> Vec<ValidationJs
             fix_guidance: None,
             expected_shape: None,
             valid_values: None,
+            line: None,
+            column: None,
         }],
     }
 }
