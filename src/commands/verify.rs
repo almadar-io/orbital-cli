@@ -196,7 +196,8 @@ fn parse_shell_lang(s: &str) -> Result<orbital_verify::shell::ShellLang> {
         "android" => Ok(ShellLang::Kotlin),
         "ios" => Ok(ShellLang::Swift),
         "rust" => Ok(ShellLang::Rust),
-        other => anyhow::bail!("unknown --shell {other:?} (expected: python | android | ios | rust)"),
+        "typescript" | "ts" => Ok(ShellLang::TypeScript),
+        other => anyhow::bail!("unknown --shell {other:?} (expected: python | android | ios | rust | typescript)"),
     }
 }
 
@@ -252,6 +253,14 @@ fn emit_shell_to_tmp(
             use orbital_shell_rust::{RustBackend, RustShell};
             let shell = RustShell::new();
             let backend = RustBackend::new();
+            generate_from_file(path, &tmp_dir, &shell, &backend, &options)?;
+        }
+        ShellLang::TypeScript => {
+            use orbital_compiler::shell::typescript_shell;
+            use orbital_shell_typescript::TypeScriptBackend;
+            let shells_dir = crate::utils::find_shells_dir();
+            let shell = typescript_shell(&shells_dir);
+            let backend = TypeScriptBackend::new();
             generate_from_file(path, &tmp_dir, &shell, &backend, &options)?;
         }
     }
