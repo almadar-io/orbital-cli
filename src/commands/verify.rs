@@ -91,12 +91,37 @@ fn verify_one(
     server: bool,
     shell_lang: Option<orbital_verify::shell::ShellLang>,
 ) -> Result<bool> {
-    let schema = orbital_verify::corpus::resolve_file(path)?;
     let item = path
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("unknown")
         .to_string();
+
+    // Layer 0 — static validation (the `orb validate` phase: structural + type +
+    // config + OIR checks). verify is a strict superset of validate, so a schema
+    // that fails static validation fails fast HERE — before being executed
+    // through the L1/L2 kernel circuits. Shares the one validation pipeline
+    // (`run_full_validation`) with `orb validate`; the two can never diverge.
+    {
+        let extra_patterns = crate::utils::load_extra_patterns(path, None);
+        let service_actions = crate::utils::load_services_registry(None);
+        let l0 = crate::commands::validate::run_full_validation(path, extra_patterns, service_actions)?;
+        let l0_ok = l0.errors.is_empty();
+        let l0_icon = if l0_ok { "✓" } else { "✗" };
+        println!(
+            "[{l0_icon}] {item} — validate: {} error(s), {} warning(s)",
+            l0.errors.len(),
+            l0.warnings.len()
+        );
+        if !l0_ok {
+            for e in &l0.errors {
+                println!("    L0 FAIL {e}");
+            }
+            return Ok(false);
+        }
+    }
+
+    let schema = orbital_verify::corpus::resolve_file(path)?;
 
     // Layer 1 — kernel circuit.
     let l1 = orbital_verify::verify_schema(&item, schema.clone())?;

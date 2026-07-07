@@ -225,105 +225,123 @@ fn validate_schema_json(
     Ok(())
 }
 
-/// Native Rust schema validation (no kflow dependency)
-fn validate_schema_native(
-    path: &PathBuf,
+/// Collected validation diagnostics (formatted, self-describing strings).
+/// Shared by `orb validate` (human formatting) and `orb verify` (Layer 0 verdict)
+/// so the two commands can never diverge on what counts as a validation error.
+pub(crate) struct ValidationDiagnostics {
+    pub errors: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+/// Run the full static validation pipeline on `path` — the SAME pipeline
+/// `orb validate` runs: parse -> inline -> enrich -> `validate_comprehensive_full`
+/// -> compile to OIR -> `OirValidator`. Returns collected diagnostics; never
+/// bails on validation errors (those live in `errors`), only on I/O failures.
+/// `extra_patterns` / `service_actions` mirror the `orb validate` inputs.
+pub(crate) fn run_full_validation(
+    path: &std::path::Path,
     extra_patterns: Option<orbital_compiler::ExtraPatterns>,
     service_actions: std::collections::HashMap<String, std::collections::HashSet<String>>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<ValidationDiagnostics> {
     use orbital_compiler::phases::{enrich_schema, inline_schema};
     use orbital_compiler::{
         compile_schema, validate_comprehensive_full, CompilerOptions, SchemaLanguage,
     };
     use orbital_core::ir::{OirValidator, ValidationSeverity};
 
-    // Step 1: Parse schema (auto-detect LOLO vs JSON syntax)
     let content_raw = std::fs::read_to_string(path)?;
-    // Detect i18n language BEFORE translation for validation context (GAP-V001)
     let schema_language = match detect_language(&content_raw) {
         Some(lang) if lang != "en" => SchemaLanguage::NonLatin(lang),
         _ => SchemaLanguage::English,
     };
     let mut schema = parse_schema_auto(&content_raw)?;
 
-    // Step 1b: Inline + enrich before validation so that `uses`-based trait/entity/page
-    // references are resolved and default collection names are present. Without this,
-    // validate_comprehensive_full raises false ORB_T_UNDEFINED_TRAIT / ORB_E_MISSING_COLLECTION
-    // errors for any schema that uses `uses` declarations.
+    // Inline + enrich before validation so `uses`-based trait/entity/page refs
+    // resolve (otherwise validate_comprehensive_full false-positives on every
+    // multi-use schema). Mirrors the `orb validate` path.
     let default_opts = CompilerOptions::default();
-    // Best-effort: inline errors (e.g. missing std behavior) surface in Step 3 compile.
     let _ = inline_schema(&mut schema, &default_opts.inline, Some(path));
     enrich_schema(&mut schema, &default_opts.enrichment);
 
-    // Step 2: Run comprehensive schema validation (all semantic checks, on resolved schema)
     let comprehensive_result =
         validate_comprehensive_full(&schema, extra_patterns, schema_language, service_actions);
 
-    let mut has_errors = false;
-
-    if !comprehensive_result.is_valid() {
-        eprintln!("Schema validation errors:");
-        for error in &comprehensive_result.errors {
-            eprintln!("  ❌ [{}] {}: {}", error.code, error.path, error.message);
-            if let Some(suggestion) = &error.suggestion {
-                eprintln!("     💡 {}", suggestion);
+    let mut errors: Vec<String> = comprehensive_result
+        .errors
+        .iter()
+        .map(|e| {
+            let mut s = format!("[{}] {}: {}", e.code, e.path, e.message);
+            if let Some(sug) = &e.suggestion {
+                s.push_str(&format!(" \u{1f4a1} {sug}"));
             }
-        }
-        has_errors = true;
-    }
-
-    if comprehensive_result.has_warnings() {
-        println!("Schema validation warnings:");
-        for warning in &comprehensive_result.warnings {
-            println!(
-                "  ⚠️  [{}] {}: {}",
-                warning.code, warning.path, warning.message
-            );
-            if let Some(suggestion) = &warning.suggestion {
-                println!("     💡 {}", suggestion);
+            s
+        })
+        .collect();
+    let mut warnings: Vec<String> = comprehensive_result
+        .warnings
+        .iter()
+        .map(|w| {
+            let mut s = format!("[{}] {}: {}", w.code, w.path, w.message);
+            if let Some(sug) = &w.suggestion {
+                s.push_str(&format!(" \u{1f4a1} {sug}"));
             }
-        }
-    }
+            s
+        })
+        .collect();
 
-    // Step 3: Compile to OIR (validates references)
-    // Skip inline + enrich since Step 1b already ran them on this schema.
+    // Compile to OIR (schema already inlined+enriched above -> skip re-inline).
     let mut options = CompilerOptions::default();
     options.inline.skip_inline = true;
-    let module = match compile_schema(schema, &options) {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!("Compilation error: {}", e);
-            anyhow::bail!("Schema compilation failed: {}", e);
+    match compile_schema(schema, &options) {
+        Ok(module) => {
+            let oir = OirValidator::new(&module).validate();
+            for e in &oir.errors {
+                if e.severity == ValidationSeverity::Error {
+                    errors.push(format!("OIR {e}"));
+                } else {
+                    warnings.push(format!("OIR {e}"));
+                }
+            }
+            // Phase 4 (C-GUARD-NO-BOOLEAN-CHECK): warn on guards that resolve
+            // to a definitively non-boolean type (arithmetic / literals /
+            // number-returning operator calls) — they run with JS truthiness.
+            for w in orbital_compiler::type_infer::collect_guard_type_warnings(&module) {
+                warnings.push(w);
+            }
         }
-    };
-
-    // Step 4: Validate OIR (post-resolution semantic validation)
-    let validator = OirValidator::new(&module);
-    let oir_result = validator.validate();
-
-    if !oir_result.is_valid() {
-        eprintln!("OIR validation errors:");
-        for error in &oir_result.errors {
-            eprintln!("  ❌ {}", error);
-        }
-        has_errors = true;
-    } else if oir_result.has_warnings() {
-        println!("OIR warnings:");
-        for warning in oir_result
-            .errors
-            .iter()
-            .filter(|e| e.severity == ValidationSeverity::Warning)
-        {
-            println!("  ⚠️  {}", warning);
-        }
+        Err(e) => errors.push(format!("Compilation error: {e}")),
     }
 
-    if has_errors {
+    Ok(ValidationDiagnostics { errors, warnings })
+}
+
+/// Native Rust schema validation (human text output). Thin formatting layer
+/// over `run_full_validation` so `orb validate` and `orb verify` share one
+/// validation code path and can never diverge.
+fn validate_schema_native(
+    path: &PathBuf,
+    extra_patterns: Option<orbital_compiler::ExtraPatterns>,
+    service_actions: std::collections::HashMap<String, std::collections::HashSet<String>>,
+) -> anyhow::Result<()> {
+    let diags = run_full_validation(path, extra_patterns, service_actions)?;
+
+    if !diags.errors.is_empty() {
+        eprintln!("Schema validation errors:");
+        for e in &diags.errors {
+            eprintln!("  \u{274c} {e}");
+        }
         anyhow::bail!(
             "Schema validation failed with {} error(s)",
-            comprehensive_result.error_count() + oir_result.error_count()
-        )
-    } else {
-        Ok(())
+            diags.errors.len()
+        );
     }
+
+    if !diags.warnings.is_empty() {
+        println!("Schema validation warnings:");
+        for w in &diags.warnings {
+            println!("  \u{26a0}\u{fe0f}  {w}");
+        }
+    }
+
+    Ok(())
 }
