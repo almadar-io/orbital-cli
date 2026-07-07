@@ -53,15 +53,18 @@ pub(crate) fn resolve_schema_cli(
     output: Option<&std::path::Path>,
     verbose: bool,
 ) -> anyhow::Result<()> {
-    use orbital_compiler::{parse_file, resolve_schema_with_path, CompilerOptions};
+    use orbital_compiler::{resolve_schema_with_path, CompilerOptions};
+    use crate::utils::parse_schema_auto;
 
     let options = CompilerOptions {
         verbose,
         ..CompilerOptions::default()
     };
 
-    let schema = parse_file(path)
-        .map_err(|e| anyhow::anyhow!("Failed to parse {}: {}", path.display(), e))?;
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("Failed to read {}: {}", path.display(), e))?;
+    let schema = parse_schema_auto(&content)
+        .map_err(|e| anyhow::anyhow!("Failed to parse {}: {}", path.display(), e))?;;
     let resolved = resolve_schema_with_path(schema, &options, Some(path))
         .map_err(|e| anyhow::anyhow!("Failed to resolve {}: {}", path.display(), e))?;
     let json = serde_json::to_string_pretty(&resolved)
