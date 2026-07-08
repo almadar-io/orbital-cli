@@ -19,7 +19,7 @@ pub(crate) fn run_tests(
     println!("Loading schema: {}", path.display());
 
     // Compile schema to OIR
-    let options = CompilerOptions::default();
+    let options = CompilerOptions::from_env();
     let module =
         compile_file(path, &options).map_err(|e| anyhow::anyhow!("Compilation failed: {}", e))?;
 

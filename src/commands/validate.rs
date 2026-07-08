@@ -176,7 +176,7 @@ fn validate_schema_json(
     }
 
     // Step 3: Try to compile to OIR for additional validation
-    let options = CompilerOptions::default();
+    let options = CompilerOptions::from_env();
     if let Ok(module) = compile_schema(schema, &options) {
         let validator = OirValidator::new(&module);
         let oir_result = validator.validate();
@@ -258,8 +258,10 @@ pub(crate) fn run_full_validation(
 
     // Inline + enrich before validation so `uses`-based trait/entity/page refs
     // resolve (otherwise validate_comprehensive_full false-positives on every
-    // multi-use schema). Mirrors the `orb validate` path.
-    let default_opts = CompilerOptions::default();
+    // multi-use schema). Mirrors the `orb validate` path. `from_env` enables
+    // dev-workspace resolution (ALMADAR_DEV) so behavior edits apply without a
+    // rebuild + rebake.
+    let default_opts = CompilerOptions::from_env();
     let _ = inline_schema(&mut schema, &default_opts.inline, Some(path));
     enrich_schema(&mut schema, &default_opts.enrichment);
 
@@ -290,7 +292,7 @@ pub(crate) fn run_full_validation(
         .collect();
 
     // Compile to OIR (schema already inlined+enriched above -> skip re-inline).
-    let mut options = CompilerOptions::default();
+    let mut options = CompilerOptions::from_env();
     options.inline.skip_inline = true;
     match compile_schema(schema, &options) {
         Ok(module) => {

@@ -71,7 +71,7 @@ pub(crate) fn run_dev_mode(path: &PathBuf, port: u16, force_headless: bool) -> a
 fn resolve_to_temp(path: &std::path::Path) -> anyhow::Result<PathBuf> {
     let schema = orbital_compiler::parse_file(path)
         .map_err(|e| anyhow::anyhow!("parse {}: {e}", path.display()))?;
-    let options = orbital_compiler::CompilerOptions::default();
+    let options = orbital_compiler::CompilerOptions::from_env();
     let resolved = orbital_compiler::resolve_schema_with_path(schema, &options, Some(path))
         .map_err(|e| anyhow::anyhow!("resolve {}: {e}", path.display()))?;
     let out = std::env::temp_dir().join(format!("orbital-dev-{}.orb", std::process::id()));

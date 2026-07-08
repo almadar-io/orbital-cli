@@ -155,7 +155,7 @@ fn parse_any_syntax(source: &str) -> Result<orbital_core::schema::OrbitalSchema>
 
 fn emit_code(opts: EmitOptions, source: &str) -> Result<()> {
     let schema = parse_any_syntax(source)?;
-    let compiler_options = CompilerOptions::default();
+    let compiler_options = CompilerOptions::from_env();
     let module = compile_schema(schema, &compiler_options)
         .map_err(|e| anyhow!("Schema compilation failed: {}", e))?;
 
