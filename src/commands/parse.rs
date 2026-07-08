@@ -58,7 +58,7 @@ pub(crate) fn resolve_schema_cli(
 
     let options = CompilerOptions {
         verbose,
-        ..CompilerOptions::default()
+        ..CompilerOptions::from_env()
     };
 
     let content = std::fs::read_to_string(path)
