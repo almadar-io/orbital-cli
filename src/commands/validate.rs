@@ -36,7 +36,9 @@ fn validate_schema_json(
     extra_patterns: Option<orbital_compiler::ExtraPatterns>,
     service_actions: std::collections::HashMap<String, std::collections::HashSet<String>>,
 ) -> anyhow::Result<()> {
-    use orbital_compiler::phases::{inline_schema, InlineConfig};
+    use orbital_compiler::phases::inline::inline_schema_with_config_diagnostics;
+    use orbital_compiler::phases::validation::trait_ref_config::validate_trait_ref_config_diagnostics;
+    use orbital_compiler::phases::InlineConfig;
     use orbital_compiler::{compile_schema, validate_comprehensive_full, CompilerOptions};
     use orbital_core::ir::{OirValidator, ValidationSeverity};
 
@@ -93,7 +95,13 @@ fn validate_schema_json(
     // phase resolves external refs via the embedded std loader and
     // filesystem — same path `orb compile` uses. Validation-only mode used
     // to skip this and produced false positives on every multi-use schema.
-    if let Err(e) = inline_schema(&mut schema, &InlineConfig::default(), Some(path.as_path())) {
+    let mut trait_ref_config_diagnostics = Vec::new();
+    if let Err(e) = inline_schema_with_config_diagnostics(
+        &mut schema,
+        &InlineConfig::default(),
+        Some(path.as_path()),
+        &mut trait_ref_config_diagnostics,
+    ) {
         // Source-tag from the inline-phase variant: when the producer
         // populated a structured path (e.g. DuplicateTraitName carries
         // `orbitals[name=Foo].traits[idx]`), surface it on the JSON
@@ -145,8 +153,11 @@ fn validate_schema_json(
         Some(lang) if lang != "en" => orbital_compiler::SchemaLanguage::NonLatin(lang),
         _ => orbital_compiler::SchemaLanguage::English,
     };
-    let comprehensive_result =
+    let mut comprehensive_result =
         validate_comprehensive_full(&schema, extra_patterns, schema_language, service_actions);
+    comprehensive_result.merge(validate_trait_ref_config_diagnostics(
+        &trait_ref_config_diagnostics,
+    ));
 
     let mut all_errors: Vec<ValidationJsonError> = Vec::new();
     let mut all_warnings: Vec<ValidationJsonWarning> = Vec::new();
@@ -243,7 +254,9 @@ pub(crate) fn run_full_validation(
     extra_patterns: Option<orbital_compiler::ExtraPatterns>,
     service_actions: std::collections::HashMap<String, std::collections::HashSet<String>>,
 ) -> anyhow::Result<ValidationDiagnostics> {
-    use orbital_compiler::phases::{enrich_schema, inline_schema};
+    use orbital_compiler::phases::enrich_schema;
+    use orbital_compiler::phases::inline::inline_schema_with_config_diagnostics;
+    use orbital_compiler::phases::validation::trait_ref_config::validate_trait_ref_config_diagnostics;
     use orbital_compiler::{
         compile_schema, validate_comprehensive_full, CompilerOptions, SchemaLanguage,
     };
@@ -262,11 +275,20 @@ pub(crate) fn run_full_validation(
     // dev-workspace resolution (ALMADAR_DEV) so behavior edits apply without a
     // rebuild + rebake.
     let default_opts = CompilerOptions::from_env();
-    let _ = inline_schema(&mut schema, &default_opts.inline, Some(path));
+    let mut trait_ref_config_diagnostics = Vec::new();
+    let _ = inline_schema_with_config_diagnostics(
+        &mut schema,
+        &default_opts.inline,
+        Some(path),
+        &mut trait_ref_config_diagnostics,
+    );
     enrich_schema(&mut schema, &default_opts.enrichment);
 
-    let comprehensive_result =
+    let mut comprehensive_result =
         validate_comprehensive_full(&schema, extra_patterns, schema_language, service_actions);
+    comprehensive_result.merge(validate_trait_ref_config_diagnostics(
+        &trait_ref_config_diagnostics,
+    ));
 
     let mut errors: Vec<String> = comprehensive_result
         .errors
