@@ -38,7 +38,6 @@ fn validate_schema_json(
 ) -> anyhow::Result<()> {
     use orbital_compiler::phases::inline::inline_schema_with_config_diagnostics;
     use orbital_compiler::phases::validation::trait_ref_config::validate_trait_ref_config_diagnostics;
-    use orbital_compiler::phases::InlineConfig;
     use orbital_compiler::{compile_schema, validate_comprehensive_full, CompilerOptions};
     use orbital_core::ir::{OirValidator, ValidationSeverity};
 
@@ -96,9 +95,16 @@ fn validate_schema_json(
     // filesystem — same path `orb compile` uses. Validation-only mode used
     // to skip this and produced false positives on every multi-use schema.
     let mut trait_ref_config_diagnostics = Vec::new();
+    // from_env, NOT default: the plain-text validate path resolves imports
+    // through dev-workspace registries (ALMADAR_DEV) while this --json path
+    // used InlineConfig::default() and silently inlined the STALE baked
+    // copy of any behavior edited since the last bake — rabit's
+    // validateWithOrbitalCLI (--json) and a manual `orb validate` then
+    // disagreed about the same schema.
+    let inline_config = CompilerOptions::from_env().inline;
     if let Err(e) = inline_schema_with_config_diagnostics(
         &mut schema,
-        &InlineConfig::default(),
+        &inline_config,
         Some(path.as_path()),
         &mut trait_ref_config_diagnostics,
     ) {
