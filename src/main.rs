@@ -16,7 +16,7 @@ mod utils;
 
 use commands::{
     compile_schema, format_schema, parse_schema, resolve_schema_cli, run_convert, run_dev_mode,
-    run_serve, run_tests, simulate_render, validate_schema,
+    run_serve, run_tests, simulate_render, stamp_schema_cli, validate_schema,
 };
 use utils::{evaluate_sexpr, spawn_agent, spawn_agent_with_args};
 
@@ -169,6 +169,27 @@ enum Commands {
         /// Verbose phase logging on stderr.
         #[arg(short, long)]
         verbose: bool,
+    },
+
+    /// Stamp V4 identity (ids + ledger) onto a name-only `.orb` schema.
+    ///
+    /// Runs the same `stamp_identity` minter the `.lolo` lowerer uses, but over
+    /// an already-lowered `.orb` (e.g. a name-only factory schema). Mints ids
+    /// for every declaration, resolves in-file refs to id edges, and writes the
+    /// ledger. Unlike `resolve`, the schema shape is preserved — no Inline/
+    /// Compose/Enrich runs. Pass `--prior` to keep ids stable across re-stamps.
+    Stamp {
+        /// Path to the name-only .orb schema file.
+        #[arg(value_name = "FILE")]
+        path: PathBuf,
+
+        /// Prior .orb to reuse ids from (byte-stable re-stamp).
+        #[arg(long, value_name = "FILE")]
+        prior: Option<PathBuf>,
+
+        /// Write the stamped schema to a file. Defaults to stdout.
+        #[arg(short, long, value_name = "FILE")]
+        output: Option<PathBuf>,
     },
 
     /// Verify an app headlessly: Layer 1 (kernel circuit) + Layer 2 (client render).
@@ -566,6 +587,11 @@ fn main() -> anyhow::Result<()> {
             output,
             verbose,
         }) => resolve_schema_cli(&path, output.as_deref(), verbose),
+        Some(Commands::Stamp {
+            path,
+            prior,
+            output,
+        }) => stamp_schema_cli(&path, prior.as_deref(), output.as_deref()),
         Some(Commands::Verify {
             path,
             registry,
