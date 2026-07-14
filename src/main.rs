@@ -190,6 +190,15 @@ enum Commands {
         /// Write the stamped schema to a file. Defaults to stdout.
         #[arg(short, long, value_name = "FILE")]
         output: Option<PathBuf>,
+
+        /// Workspace root to resolve `uses` imports against, in addition to
+        /// in-file stamping: after minting local ids, load each aliased
+        /// import from this directory's live registries (std/behaviors) and
+        /// write the imported declaration's id into every dotted
+        /// `Alias.traits.X` / `Alias.entity` / `Alias.pages.X` ref whose id
+        /// sibling is still unset. Omit to keep stamping in-file only.
+        #[arg(long, value_name = "DIR")]
+        imports: Option<PathBuf>,
     },
 
     /// Verify an app headlessly: Layer 1 (kernel circuit) + Layer 2 (client render).
@@ -591,7 +600,13 @@ fn main() -> anyhow::Result<()> {
             path,
             prior,
             output,
-        }) => stamp_schema_cli(&path, prior.as_deref(), output.as_deref()),
+            imports,
+        }) => stamp_schema_cli(
+            &path,
+            prior.as_deref(),
+            output.as_deref(),
+            imports.as_deref(),
+        ),
         Some(Commands::Verify {
             path,
             registry,
