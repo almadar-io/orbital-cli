@@ -256,3 +256,47 @@ fn bad_selector_reports_clear_error() {
         stderr
     );
 }
+
+// --- V4 identity: in-place re-emit id stability ------------------------------
+
+/// `orb emit orb <lolo> --output <existing.orb>` must reuse the prior output's
+/// ids (zero churn); a fresh path mints new ids, so run-2-vs-run-1 equality is
+/// only guaranteed by the prior-ledger thread in `emit_orb`.
+#[test]
+fn emit_orb_in_place_reemit_is_id_stable() {
+    let lolo = std_modal_lolo();
+    assert!(lolo.exists(), "test fixture missing: {}", lolo.display());
+    let mut out = std::env::temp_dir();
+    out.push(format!("orb-emit-id-stable-{}.orb", std::process::id()));
+    let _ = std::fs::remove_file(&out);
+
+    let (_, stderr, ok) = run_orb(&[
+        "emit",
+        "orb",
+        lolo.to_str().unwrap(),
+        "--output",
+        out.to_str().unwrap(),
+    ]);
+    assert!(ok, "first emit failed. stderr:\n{}", stderr);
+    let first = std::fs::read_to_string(&out).expect("first output missing");
+    assert!(
+        first.contains("\"ledger\""),
+        "emitted .orb should carry an identity ledger"
+    );
+
+    let (_, stderr, ok) = run_orb(&[
+        "emit",
+        "orb",
+        lolo.to_str().unwrap(),
+        "--output",
+        out.to_str().unwrap(),
+    ]);
+    assert!(ok, "second emit failed. stderr:\n{}", stderr);
+    let second = std::fs::read_to_string(&out).expect("second output missing");
+
+    assert_eq!(
+        first, second,
+        "in-place re-emit churned ids — prior ledger was not threaded"
+    );
+    let _ = std::fs::remove_file(&out);
+}

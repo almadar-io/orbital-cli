@@ -124,7 +124,16 @@ fn emit_orb(source: &str, output: Option<&Path>) -> Result<()> {
     // Parse whichever surface the file uses. Mirrors parse_schema_auto_typed
     // from main.rs but reimplemented here to avoid a circular import; the
     // logic is ~5 lines and we want this module to stand on its own.
-    let schema = parse_any_syntax(source)?;
+    //
+    // Id stability: when emitting in place (the registry regen pattern —
+    // `orb emit orb <lolo> --output <existing.orb>`), the existing output is
+    // the prior ledger anchor, so re-emits reuse ids instead of minting fresh
+    // ones every run.
+    let prior = output
+        .filter(|p| p.exists())
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| orbital_core::schema::parse_schema(&s).ok());
+    let schema = parse_any_syntax_with_prior(source, prior.as_ref())?;
     let value =
         serde_json::to_value(&schema).map_err(|e| anyhow!("Failed to serialize schema: {}", e))?;
     let cleaned = crate::strip_json_nulls(value);
@@ -136,6 +145,15 @@ fn emit_orb(source: &str, output: Option<&Path>) -> Result<()> {
 /// Parse either `.lolo` surface syntax or `.orb` JSON based on first
 /// non-whitespace character. Shared helper; mirrors main.rs's dispatch.
 fn parse_any_syntax(source: &str) -> Result<orbital_core::schema::OrbitalSchema> {
+    parse_any_syntax_with_prior(source, None)
+}
+
+/// [`parse_any_syntax`] with a prior schema anchoring id reuse on the `.lolo`
+/// branch (`.orb` JSON input passes through untouched — its ids ARE the ids).
+fn parse_any_syntax_with_prior(
+    source: &str,
+    prior: Option<&orbital_core::schema::OrbitalSchema>,
+) -> Result<orbital_core::schema::OrbitalSchema> {
     let first = source
         .trim_start_matches('\u{FEFF}')
         .trim_start()
@@ -146,7 +164,7 @@ fn parse_any_syntax(source: &str) -> Result<orbital_core::schema::OrbitalSchema>
         orbital_core::schema::parse_schema(source).map_err(|e| anyhow!("JSON parse error: {}", e))
     } else {
         // Assume `.lolo` surface syntax.
-        orbital_lolo::parse_and_lower_str(source)
+        orbital_lolo::parse_and_lower_str_with_prior(source, prior)
             .map_err(|e| anyhow!("LOLO parse error: {}", e.render()))
     }
 }

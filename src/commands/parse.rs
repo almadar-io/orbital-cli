@@ -53,8 +53,8 @@ pub(crate) fn resolve_schema_cli(
     output: Option<&std::path::Path>,
     verbose: bool,
 ) -> anyhow::Result<()> {
-    use orbital_compiler::{resolve_schema_with_path, CompilerOptions};
     use crate::utils::parse_schema_auto;
+    use orbital_compiler::{resolve_schema_with_path, CompilerOptions};
 
     let options = CompilerOptions {
         verbose,

@@ -52,7 +52,10 @@ fn boot_http_bridge(schema: &OrbitalSchema) -> anyhow::Result<Arc<dyn ServerBrid
 
     let server = serve_background(runtime)?;
     let inner = SyncServerBridge::new(server.base_url());
-    Ok(Arc::new(HttpServerBridge { inner, _server: server }))
+    Ok(Arc::new(HttpServerBridge {
+        inner,
+        _server: server,
+    }))
 }
 
 /// Run the L2 render contract driving a live HTTP server per orbital — server↔client parity.

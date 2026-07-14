@@ -38,5 +38,8 @@ fn verify_server_runs_http_parity_pass() {
         !stdout.contains("L2/server FAIL"),
         "server-parity pass reported failures:\n{stdout}"
     );
-    assert!(stdout.contains("passed"), "verify did not report a pass:\n{stdout}");
+    assert!(
+        stdout.contains("passed"),
+        "verify did not report a pass:\n{stdout}"
+    );
 }

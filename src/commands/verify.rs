@@ -21,10 +21,7 @@ pub(crate) fn run_verify(
 ) -> Result<()> {
     // Map the `--shell` arg to the native compile gate once, up front, so an
     // unknown value fails fast before any target is walked.
-    let shell_lang = shell
-        .as_deref()
-        .map(parse_shell_lang)
-        .transpose()?;
+    let shell_lang = shell.as_deref().map(parse_shell_lang).transpose()?;
     let targets = collect_targets(path, registry, topic.as_deref());
     if targets.is_empty() {
         anyhow::bail!("no .orb targets (pass a FILE, or --registry [--topic <t>])");
@@ -105,7 +102,8 @@ fn verify_one(
     {
         let extra_patterns = crate::utils::load_extra_patterns(path, None);
         let service_actions = crate::utils::load_services_registry(None);
-        let l0 = crate::commands::validate::run_full_validation(path, extra_patterns, service_actions)?;
+        let l0 =
+            crate::commands::validate::run_full_validation(path, extra_patterns, service_actions)?;
         let l0_ok = l0.errors.is_empty();
         let l0_icon = if l0_ok { "✓" } else { "✗" };
         println!(
@@ -142,7 +140,11 @@ fn verify_one(
             Ok(tmp_dir) => {
                 let verdict = orbital_verify::shell::shell_compile_verdict(&tmp_dir, lang);
                 let icon = if verdict.passed { "✓" } else { "✗" };
-                println!("  [{icon}] shell:{} — {}", lang.display_name(), verdict.detail);
+                println!(
+                    "  [{icon}] shell:{} — {}",
+                    lang.display_name(),
+                    verdict.detail
+                );
                 if !verdict.passed {
                     shell_ok = false;
                     println!("    SHELL FAIL {} — {}", verdict.name, verdict.detail);
@@ -222,7 +224,9 @@ fn parse_shell_lang(s: &str) -> Result<orbital_verify::shell::ShellLang> {
         "ios" => Ok(ShellLang::Swift),
         "rust" => Ok(ShellLang::Rust),
         "typescript" | "ts" => Ok(ShellLang::TypeScript),
-        other => anyhow::bail!("unknown --shell {other:?} (expected: python | android | ios | rust | typescript)"),
+        other => anyhow::bail!(
+            "unknown --shell {other:?} (expected: python | android | ios | rust | typescript)"
+        ),
     }
 }
 
@@ -230,17 +234,16 @@ fn parse_shell_lang(s: &str) -> Result<orbital_verify::shell::ShellLang> {
 /// matches `lang`, returning the dir. Reuses the in-process `generate_from_file`
 /// path that `orb compile --shell X` uses — no codegen reimplementation, no
 /// shelling out to the `orbital` binary.
-fn emit_shell_to_tmp(
-    path: &Path,
-    lang: orbital_verify::shell::ShellLang,
-) -> Result<PathBuf> {
+fn emit_shell_to_tmp(path: &Path, lang: orbital_verify::shell::ShellLang) -> Result<PathBuf> {
     use orbital_compiler::{generate_from_file, GenerateOptions};
     use orbital_verify::shell::ShellLang;
 
     let tmp_dir = std::env::temp_dir().join(format!(
         "orbital-verify-shell-emit-{}-{}",
         lang.display_name(),
-        path.file_stem().and_then(|s| s.to_str()).unwrap_or("schema")
+        path.file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("schema")
     ));
     let _ = std::fs::remove_dir_all(&tmp_dir);
     std::fs::create_dir_all(&tmp_dir)?;
@@ -301,7 +304,11 @@ pub(crate) fn run_screenshot_frames(path: &Path, out_dir: &Path) -> Result<bool>
     use std::sync::Arc;
 
     let schema = orbital_verify::corpus::resolve_file(path)?;
-    let item = path.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown").to_string();
+    let item = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("unknown")
+        .to_string();
     std::fs::create_dir_all(out_dir)?;
 
     // Pick the trait that drives the VISIBLE `main` slot the most (so frames differ as
@@ -343,7 +350,9 @@ pub(crate) fn run_screenshot_frames(path: &Path, out_dir: &Path) -> Result<bool>
     };
 
     let build_app = || -> Result<orbital_client::rendering::desktop::DesktopApp> {
-        let bridge = Arc::new(KernelBridge::new(schema.clone()).map_err(|e| anyhow::anyhow!("bridge: {e}"))?);
+        let bridge = Arc::new(
+            KernelBridge::new(schema.clone()).map_err(|e| anyhow::anyhow!("bridge: {e}"))?,
+        );
         orbital_client::screenshot::seed_entities(&bridge, &schema);
         let mut app = orbital_client::rendering::desktop::DesktopApp::new_headless(
             schema.clone(),
@@ -364,7 +373,11 @@ pub(crate) fn run_screenshot_frames(path: &Path, out_dir: &Path) -> Result<bool>
         let png = out_dir.join(format!("{item}.frame{idx:02}.initial.png"));
         orbital_client::screenshot::capture(&mut app, &png)?;
         entry(idx, "·", "INIT", app.current_state_name(), &png);
-        println!("    📸 frame {idx} INIT → {} — {}", app.current_state_name(), png.display());
+        println!(
+            "    📸 frame {idx} INIT → {} — {}",
+            app.current_state_name(),
+            png.display()
+        );
         idx += 1;
     }
 
@@ -377,7 +390,8 @@ pub(crate) fn run_screenshot_frames(path: &Path, out_dir: &Path) -> Result<bool>
                 app.drive_blocking(&ev, Some(&trait_name), v);
             }
         }
-        let payload = serde_json::from_value(step.payload.clone()).unwrap_or(orbital_core::Value::Null);
+        let payload =
+            serde_json::from_value(step.payload.clone()).unwrap_or(orbital_core::Value::Null);
         app.drive_blocking(&step.event, Some(&trait_name), payload);
         // The planner's expected target for THIS trait (current_state_name tracks the
         // active/first trait, not the one being driven).
@@ -385,7 +399,12 @@ pub(crate) fn run_screenshot_frames(path: &Path, out_dir: &Path) -> Result<bool>
         let png = out_dir.join(format!("{item}.frame{idx:02}.{}.png", step.event));
         orbital_client::screenshot::capture(&mut app, &png)?;
         entry(idx, &step.from, &step.event, &to, &png);
-        println!("    📸 frame {idx} {} --{}--> {to} — {}", step.from, step.event, png.display());
+        println!(
+            "    📸 frame {idx} {} --{}--> {to} — {}",
+            step.from,
+            step.event,
+            png.display()
+        );
         idx += 1;
     }
 

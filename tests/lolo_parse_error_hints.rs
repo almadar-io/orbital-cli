@@ -69,7 +69,10 @@ fn semicolon_comment_gets_hint() {
     let err = first_parse_error(&result);
     assert_eq!(err["code"], "LOLO_PARSE_ERROR");
     assert!(err["suggestion"].as_str().unwrap().contains("`;`"));
-    assert!(err["fixGuidance"].as_str().unwrap().contains("trailing text"));
+    assert!(err["fixGuidance"]
+        .as_str()
+        .unwrap()
+        .contains("trailing text"));
     assert_eq!(err["line"], 7);
     assert!(err["column"].as_u64().unwrap() > 0);
 }
@@ -102,7 +105,10 @@ fn comma_in_children_gets_hint() {
     let err = first_parse_error(&result);
     assert_eq!(err["code"], "LOLO_PARSE_ERROR");
     assert!(err["suggestion"].as_str().unwrap().contains("comma"));
-    assert!(err["fixGuidance"].as_str().unwrap().contains("remove the `,`"));
+    assert!(err["fixGuidance"]
+        .as_str()
+        .unwrap()
+        .contains("remove the `,`"));
     assert!(err["line"].as_u64().unwrap() > 0);
 }
 
@@ -124,7 +130,10 @@ orbital X {
     let result = validate_lolo(lolo, "bang");
     let err = first_parse_error(&result);
     assert_eq!(err["code"], "LOLO_PARSE_ERROR");
-    assert!(err["suggestion"].as_str().unwrap().contains("[ElementType]"));
+    assert!(err["suggestion"]
+        .as_str()
+        .unwrap()
+        .contains("[ElementType]"));
     assert!(err["fixGuidance"].as_str().unwrap().contains("[string]"));
     assert_eq!(err["line"], 1);
 }

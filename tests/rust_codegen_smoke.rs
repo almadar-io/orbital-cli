@@ -29,7 +29,10 @@ fn out_dir(name: &str) -> PathBuf {
 }
 
 fn run_orb(args: &[&str]) -> (String, String, bool) {
-    let out = Command::new(orb_bin()).args(args).output().expect("spawn orb");
+    let out = Command::new(orb_bin())
+        .args(args)
+        .output()
+        .expect("spawn orb");
     (
         String::from_utf8_lossy(&out.stdout).to_string(),
         String::from_utf8_lossy(&out.stderr).to_string(),
@@ -53,7 +56,9 @@ fn rust_files(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&d) else { continue };
+        let Ok(entries) = std::fs::read_dir(&d) else {
+            continue;
+        };
         for e in entries.flatten() {
             let p = e.path();
             if p.is_dir() {
@@ -73,7 +78,10 @@ fn rust_files(dir: &Path) -> Vec<PathBuf> {
 fn rust_shell_emits_complete_scaffold() {
     let out = out_dir("rs_scaffold");
     let (_stdout, stderr, ok) = compile_rust(&out);
-    assert!(ok, "compile --shell rust exited non-zero. stderr:\n{stderr}");
+    assert!(
+        ok,
+        "compile --shell rust exited non-zero. stderr:\n{stderr}"
+    );
 
     // The thin runtime scaffold + the bespoke server-side codegen + the bundled schemas.
     for required in [
@@ -113,12 +121,19 @@ fn emitted_rust_is_syntactically_valid() {
     assert!(ok, "compile failed: {stderr}");
 
     let files = rust_files(&out);
-    assert!(files.len() >= 8, "suspiciously few generated .rs files: {}", files.len());
+    assert!(
+        files.len() >= 8,
+        "suspiciously few generated .rs files: {}",
+        files.len()
+    );
     for f in &files {
         let src = std::fs::read_to_string(f).expect("read generated .rs");
         // `syn` with `full` parses a whole file — a parse error is malformed codegen.
         if let Err(e) = syn::parse_file(&src) {
-            panic!("generated Rust is not syntactically valid: {}\n{e}", f.display());
+            panic!(
+                "generated Rust is not syntactically valid: {}\n{e}",
+                f.display()
+            );
         }
     }
 }
