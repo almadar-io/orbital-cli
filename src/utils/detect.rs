@@ -100,7 +100,12 @@ pub fn parse_schema_auto_typed(
         }
         InputSyntax::OrbJson => {
             let translated = translate_schema_content(content);
-            parse_schema(&translated).map_err(|e| TypedParseError::Json(e.to_string()))
+            parse_schema(&translated)
+                .map(|mut schema| {
+                    orbital_core::stamp::ensure_stamped(&mut schema);
+                    schema
+                })
+                .map_err(|e| TypedParseError::Json(e.to_string()))
         }
     }
 }
