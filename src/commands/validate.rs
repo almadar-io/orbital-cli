@@ -192,33 +192,53 @@ fn validate_schema_json(
         });
     }
 
-    // Step 3: Try to compile to OIR for additional validation
+    // Step 3: Try to compile to OIR for additional validation.
+    // The `Err` arm must surface — the plain-text path (`run_full_validation`)
+    // pushes `Compilation error: {e}` into its errors, so an `if let Ok`
+    // here silently dropped compile/resolve failures and let `--json` report
+    // `valid:true` on a schema plain `orb validate` rejects (same class of
+    // --json/plain divergence the inline `from_env` note above documents).
     let options = CompilerOptions::from_env();
-    if let Ok(module) = compile_schema(schema, &options) {
-        let validator = OirValidator::new(&module);
-        let oir_result = validator.validate();
+    match compile_schema(schema, &options) {
+        Ok(module) => {
+            let validator = OirValidator::new(&module);
+            let oir_result = validator.validate();
 
-        for error in &oir_result.errors {
-            if error.severity == ValidationSeverity::Error {
-                all_errors.push(ValidationJsonError {
-                    code: "OIR_ERROR".to_string(),
-                    path: error.path.clone(),
-                    message: error.message.clone(),
-                    suggestion: None,
-                    fix_guidance: None,
-                    expected_shape: None,
-                    valid_values: None,
-                    line: None,
-                    column: None,
-                });
-            } else {
-                all_warnings.push(ValidationJsonWarning {
-                    code: "OIR_WARNING".to_string(),
-                    path: error.path.clone(),
-                    message: error.message.clone(),
-                    suggestion: None,
-                });
+            for error in &oir_result.errors {
+                if error.severity == ValidationSeverity::Error {
+                    all_errors.push(ValidationJsonError {
+                        code: "OIR_ERROR".to_string(),
+                        path: error.path.clone(),
+                        message: error.message.clone(),
+                        suggestion: None,
+                        fix_guidance: None,
+                        expected_shape: None,
+                        valid_values: None,
+                        line: None,
+                        column: None,
+                    });
+                } else {
+                    all_warnings.push(ValidationJsonWarning {
+                        code: "OIR_WARNING".to_string(),
+                        path: error.path.clone(),
+                        message: error.message.clone(),
+                        suggestion: None,
+                    });
+                }
             }
+        }
+        Err(e) => {
+            all_errors.push(ValidationJsonError {
+                code: "COMPILATION_ERROR".to_string(),
+                path: "".to_string(),
+                message: format!("Compilation error: {e}"),
+                suggestion: None,
+                fix_guidance: None,
+                expected_shape: None,
+                valid_values: None,
+                line: None,
+                column: None,
+            });
         }
     }
 
