@@ -63,6 +63,7 @@ pub(crate) fn find_agent_entry() -> anyhow::Result<PathBuf> {
 }
 
 pub(crate) fn spawn_agent(cli: &Cli) -> anyhow::Result<()> {
+    ensure_agent_delegation_allowed("interactive agent")?;
     let bun = find_bun()?;
     let entry = find_agent_entry()?;
 
@@ -111,7 +112,20 @@ pub(crate) fn spawn_agent(cli: &Cli) -> anyhow::Result<()> {
     std::process::exit(status.code().unwrap_or(1));
 }
 
+/// ALL agent delegation is opt-in (user decision 2026-07-17): runaway callers
+/// accumulated hundreds of hung bun agent processes overnight and OOM-crashed
+/// the machine twice. Nothing spawns the agent without ORB_AGENT_FALLBACK=1.
+fn ensure_agent_delegation_allowed(what: &str) -> anyhow::Result<()> {
+    if std::env::var("ORB_AGENT_FALLBACK").is_ok_and(|v| v == "1") {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "agent delegation is disabled (attempted: {what}). Set ORB_AGENT_FALLBACK=1 to opt in."
+    )
+}
+
 pub(crate) fn spawn_agent_with_args(args: &[&str]) -> anyhow::Result<()> {
+    ensure_agent_delegation_allowed(&args.join(" "))?;
     let bun = find_bun()?;
     let entry = find_agent_entry()?;
 
