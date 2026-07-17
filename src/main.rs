@@ -751,12 +751,19 @@ fn main() -> anyhow::Result<()> {
             map,
         }),
         Some(Commands::EmitTrace { position }) => emit::trace::run(&position),
-        // No subcommand: spawn the interactive agent
+        // No subcommand: the free-prompt agent fallback is DISABLED (user
+        // decision 2026-07-17) — unknown input must never silently spawn the
+        // agent. Set ORB_AGENT_FALLBACK=1 to opt back in explicitly.
         None => {
             if cli.list {
                 spawn_agent_with_args(&["status"])
-            } else {
+            } else if std::env::var("ORB_AGENT_FALLBACK").is_ok_and(|v| v == "1") {
                 spawn_agent(&cli)
+            } else {
+                anyhow::bail!(
+                    "unknown command{}. The free-prompt agent fallback is disabled — run `orb --help` for commands, or set ORB_AGENT_FALLBACK=1 to opt in.",
+                    if cli.prompt.is_empty() { String::new() } else { format!(" {:?}", cli.prompt.join(" ")) }
+                )
             }
         }
     }
