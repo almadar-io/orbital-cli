@@ -115,14 +115,45 @@ fn validate_schema_json(
         // get concrete coordinates instead of an empty string. Variants
         // without a path return "" — same as before.
         let inline_path = e.structured_path().to_string();
+        // Loader-ENVIRONMENT failures (std path / package roots unresolvable)
+        // are validator infrastructure, not schema authoring — a distinct code
+        // so downstream agents never treat them as fixable-by-editing. The
+        // message carries the effective loader env so an intermittent miss is
+        // diagnosable from the consumer's log alone.
+        use orbital_compiler::phases::inline::InlineError;
+        use orbital_compiler::loader::LoaderError;
+        let is_infra = matches!(
+            &e,
+            InlineError::Loader(LoaderError::StdLibNotConfigured)
+                | InlineError::Loader(LoaderError::ScopedPackageNotConfigured(_))
+        );
+        let mut inline_message = format!("Failed to resolve external references: {}", e);
+        if is_infra {
+            let lc = &inline_config.loader_config;
+            inline_message.push_str(&format!(
+                " [loader env: dev_workspace={}, registry_roots={}, std_lib_path_set={}, auto_discover={}, ALMADAR_DEV={}]",
+                lc.dev_workspace,
+                lc.behaviors_registry_roots.len(),
+                lc.std_lib_path.is_some(),
+                lc.auto_discover_registries,
+                std::env::var("ALMADAR_DEV").map(|v| !v.is_empty()).unwrap_or(false),
+            ));
+        }
         let output = ValidationJsonOutput {
             success: true,
             valid: false,
             errors: Some(vec![ValidationJsonError {
-                code: "INLINE_ERROR".to_string(),
+                code: if is_infra { "INLINE_INFRA_ERROR" } else { "INLINE_ERROR" }.to_string(),
                 path: inline_path,
-                message: format!("Failed to resolve external references: {}", e),
-                suggestion: Some("Check `uses:` imports resolve to known behaviors".to_string()),
+                message: inline_message,
+                suggestion: Some(
+                    if is_infra {
+                        "Validator environment error — the schema was NOT evaluated; retry, do not edit the schema"
+                    } else {
+                        "Check `uses:` imports resolve to known behaviors"
+                    }
+                    .to_string(),
+                ),
                 fix_guidance: None,
                 expected_shape: None,
                 valid_values: None,
