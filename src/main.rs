@@ -9,6 +9,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 use std::path::PathBuf;
 
+mod baked_engine_pins;
 mod commands;
 mod emit;
 mod i18n;
@@ -201,11 +202,16 @@ enum Commands {
         imports: Option<PathBuf>,
     },
 
-    /// Verify an app headlessly: Layer 1 (kernel circuit) + Layer 2 (client render).
-    /// Pass a FILE, or `--registry [--topic <t>]` to sweep the std/behaviors corpus.
+    /// Verify an app across up to three engines that play the SAME circuit:
+    /// `--rust` in-process (default when no engine flag is given, preserving
+    /// today's behavior exactly), `--runtime` (JS interpreter via playground),
+    /// `--compiled` (codegen'd TS app), or `--all` for all three. Pass a FILE, a
+    /// bare behavior NAME (resolved against the live registry), or `--registry
+    /// [--topic <t>]` to sweep the std/behaviors corpus.
     Verify {
-        /// Path to a single .orb schema file (omit to use --registry).
-        #[arg(value_name = "FILE")]
+        /// Path to a single .orb/.lolo schema file, or a bare behavior name
+        /// resolved against the registry corpus (omit to use --registry).
+        #[arg(value_name = "TARGET")]
         path: Option<PathBuf>,
 
         /// Verify across the almadar-std + almadar-behaviors registry corpus.
@@ -240,6 +246,51 @@ enum Commands {
         /// (Kotlin structural gate) | `ios` (Swift structural gate).
         #[arg(long, value_name = "SHELL")]
         shell: Option<String>,
+
+        /// Tier: seconds, no browser/node — parse + validate + Rust kernel
+        /// circuit walk only. Mutually exclusive with --deep.
+        #[arg(long, conflicts_with = "deep")]
+        smoke: bool,
+
+        /// Tier: everything the selected engines offer, including browser
+        /// layers (forces --server and a TypeScript --shell gate unless one was
+        /// already given). Mutually exclusive with --smoke.
+        #[arg(long, conflicts_with = "smoke")]
+        deep: bool,
+
+        /// Engine: orbital-rust in-process server+client (default when no
+        /// engine flag is given).
+        #[arg(long)]
+        rust: bool,
+
+        /// Engine: JS interpreter via playground — shells out to
+        /// tools/runtime-verify.
+        #[arg(long)]
+        runtime: bool,
+
+        /// Engine: emitted TS app, 4-phase pipeline — shells out to
+        /// orbital-verify-unified.
+        #[arg(long)]
+        compiled: bool,
+
+        /// Engine: run all three (rust + runtime + compiled).
+        #[arg(long)]
+        all: bool,
+
+        /// Print one unified report (circuit vocabulary, engine-tagged rows) to
+        /// stdout; all human-readable lines move to stderr.
+        #[arg(long)]
+        json: bool,
+
+        /// Base port for spawned node engines (runtime/compiled); each target
+        /// gets an offset so a multi-target sweep never collides.
+        #[arg(long, default_value = "4100")]
+        port: u16,
+
+        /// Minimum transition coverage ratio, forwarded to engines that
+        /// support it (today: --runtime).
+        #[arg(long, value_name = "RATIO")]
+        min_coverage: Option<f64>,
     },
 
     /// Compile an Orbital schema to generated code
@@ -616,16 +667,34 @@ fn main() -> anyhow::Result<()> {
             screenshot_frames,
             server,
             shell,
-        }) => commands::verify::run_verify(
+            smoke,
+            deep,
+            rust,
+            runtime,
+            compiled,
+            all,
+            json,
+            port,
+            min_coverage,
+        }) => commands::verify::run_verify(commands::verify::VerifyCliArgs {
             path,
             registry,
             topic,
             report_dir,
-            screenshot,
-            screenshot_frames,
+            screenshot_dir: screenshot,
+            frames_dir: screenshot_frames,
             server,
             shell,
-        ),
+            smoke,
+            deep,
+            rust,
+            runtime,
+            compiled,
+            all,
+            json,
+            port,
+            min_coverage,
+        }),
         Some(Commands::Format { path, write }) => format_schema(&path, write),
         Some(Commands::Compile {
             path,

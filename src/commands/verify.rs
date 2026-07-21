@@ -1,35 +1,120 @@
-//! `orb verify` — layered headless verification of an Orbital app.
+//! `orb verify` — layered headless verification of an Orbital app, played through
+//! up to three engines (`--rust` in-process, `--runtime` JS interpreter,
+//! `--compiled` codegen'd TS app) at one of three tiers (`--smoke`/standard/`--deep`).
 //!
-//! Layer 1 (kernel circuit, `orbital-verify`) + Layer 2 (client render contract,
-//! `orbital_client::render_probe`). Runs on a single `.orb` or across the
-//! `almadar-std`/`almadar-behaviors` registry corpus (`--registry [--topic <t>]`).
-//! Fail-closed: non-zero exit if any organism fails either layer.
+//! The flagless invocation (`orb verify FILE`) is EXACTLY today's Layer 1 (kernel
+//! circuit, `orbital-verify`) + Layer 2 (client render contract,
+//! `orbital_client::render_probe`) run — `run_verify_classic` below is that path,
+//! untouched. Requesting another engine, a non-standard tier, or `--json` routes
+//! through `run_verify_unified`, which folds every engine's findings into one
+//! `UnifiedVerifyReport` (`commands/engines.rs`). Fail-closed: non-zero exit if
+//! any organism fails any requested engine.
 
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn run_verify(
-    path: Option<PathBuf>,
-    registry: bool,
-    topic: Option<String>,
-    report_dir: Option<PathBuf>,
-    screenshot_dir: Option<PathBuf>,
-    frames_dir: Option<PathBuf>,
-    server: bool,
-    shell: Option<String>,
-) -> Result<()> {
-    // Map the `--shell` arg to the native compile gate once, up front, so an
-    // unknown value fails fast before any target is walked.
-    let shell_lang = shell.as_deref().map(parse_shell_lang).transpose()?;
-    let targets = collect_targets(path, registry, topic.as_deref());
-    if targets.is_empty() {
-        anyhow::bail!("no .orb targets (pass a FILE, or --registry [--topic <t>])");
-    }
+use super::engines::{self, Engine, Tier};
 
-    // Per-frame (state-transition) screenshot capture mode — drives each planned
-    // transition and writes PNGs + a frames.json manifest for the vision-review workflow.
+/// CLI-facing bundle for `orb verify` — built once in `main.rs` from the clap
+/// `Commands::Verify` variant so this function doesn't grow another arg on every
+/// new tier/engine/option.
+pub(crate) struct VerifyCliArgs {
+    pub path: Option<PathBuf>,
+    pub registry: bool,
+    pub topic: Option<String>,
+    pub report_dir: Option<PathBuf>,
+    pub screenshot_dir: Option<PathBuf>,
+    pub frames_dir: Option<PathBuf>,
+    pub server: bool,
+    pub shell: Option<String>,
+    pub smoke: bool,
+    pub deep: bool,
+    pub rust: bool,
+    pub runtime: bool,
+    pub compiled: bool,
+    pub all: bool,
+    pub json: bool,
+    pub port: u16,
+    pub min_coverage: Option<f64>,
+}
+
+/// Route a human-readable line to stdout, unless `--json` is active — the unified
+/// report must be the ONLY thing on stdout in that mode, so human lines move to stderr.
+fn emit(json_mode: bool, s: impl std::fmt::Display) {
+    if json_mode {
+        eprintln!("{s}");
+    } else {
+        println!("{s}");
+    }
+}
+
+fn resolve_engines(rust: bool, runtime: bool, compiled: bool, all: bool) -> Vec<Engine> {
+    if all {
+        return vec![Engine::Rust, Engine::Runtime, Engine::Compiled];
+    }
+    let mut v = Vec::new();
+    if rust {
+        v.push(Engine::Rust);
+    }
+    if runtime {
+        v.push(Engine::Runtime);
+    }
+    if compiled {
+        v.push(Engine::Compiled);
+    }
+    if v.is_empty() {
+        v.push(Engine::Rust);
+    }
+    v
+}
+
+pub(crate) fn run_verify(args: VerifyCliArgs) -> Result<()> {
+    let VerifyCliArgs {
+        path,
+        registry,
+        topic,
+        report_dir,
+        screenshot_dir,
+        frames_dir,
+        server,
+        shell,
+        smoke,
+        deep,
+        rust,
+        runtime,
+        compiled,
+        all,
+        json,
+        port,
+        min_coverage,
+    } = args;
+
+    // Map `--shell` up front so an unknown value fails fast before any target is walked.
+    let shell_lang = shell.as_deref().map(parse_shell_lang).transpose()?;
+    let tier = if smoke {
+        Tier::Smoke
+    } else if deep {
+        Tier::Deep
+    } else {
+        Tier::Standard
+    };
+    let engine_list = resolve_engines(rust, runtime, compiled, all);
+    let repo_root = repo_root();
+
+    let resolved_path = match path {
+        Some(p) => Some(resolve_target(p, &repo_root)?),
+        None => None,
+    };
+
+    // Per-frame (state-transition) screenshot capture mode — orthogonal to
+    // tier/engine, unchanged from before the unified CLI.
     if let Some(dir) = frames_dir {
+        let targets = collect_targets(resolved_path, registry, topic.as_deref());
+        if targets.is_empty() {
+            anyhow::bail!(
+                "no .orb targets (pass a FILE, a behavior NAME, or --registry [--topic <t>])"
+            );
+        }
         #[cfg(feature = "screenshot")]
         {
             let mut ok = true;
@@ -55,18 +140,66 @@ pub(crate) fn run_verify(
         }
     }
 
-    let mut passed = 0usize;
-    let mut failed = 0usize;
-    for target in &targets {
-        match verify_one(
-            target,
+    let targets = collect_targets(resolved_path, registry, topic.as_deref());
+    if targets.is_empty() {
+        anyhow::bail!(
+            "no .orb targets (pass a FILE, a behavior NAME, or --registry [--topic <t>])"
+        );
+    }
+
+    // Flagless (and today's already-existing-flag) invocations stay byte-for-byte
+    // identical: only the rust engine, standard tier, human output, no unified fold.
+    if engine_list == vec![Engine::Rust] && tier == Tier::Standard && !json {
+        return run_verify_classic(
+            &targets,
             report_dir.as_deref(),
             screenshot_dir.as_deref(),
             server,
             shell_lang,
+        );
+    }
+
+    run_verify_unified(
+        &targets,
+        tier,
+        &engine_list,
+        report_dir.as_deref(),
+        screenshot_dir.as_deref(),
+        server,
+        json,
+        port,
+        min_coverage,
+        shell_lang,
+        &repo_root,
+    )
+}
+
+fn run_verify_classic(
+    targets: &[PathBuf],
+    report_dir: Option<&Path>,
+    screenshot_dir: Option<&Path>,
+    server: bool,
+    shell_lang: Option<orbital_verify::shell::ShellLang>,
+) -> Result<()> {
+    let mut passed = 0usize;
+    let mut failed = 0usize;
+    for target in targets {
+        match verify_one(
+            target,
+            report_dir,
+            screenshot_dir,
+            server,
+            shell_lang,
+            Tier::Standard,
+            false,
         ) {
-            Ok(true) => passed += 1,
-            Ok(false) => failed += 1,
+            Ok(outcome) => {
+                if outcome.ok {
+                    passed += 1;
+                } else {
+                    failed += 1;
+                }
+            }
             Err(e) => {
                 failed += 1;
                 eprintln!("[ERROR] {}: {e}", display(target));
@@ -81,18 +214,172 @@ pub(crate) fn run_verify(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+fn run_verify_unified(
+    targets: &[PathBuf],
+    tier: Tier,
+    engine_list: &[Engine],
+    report_dir: Option<&Path>,
+    screenshot_dir: Option<&Path>,
+    server: bool,
+    json: bool,
+    port: u16,
+    min_coverage: Option<f64>,
+    shell_lang: Option<orbital_verify::shell::ShellLang>,
+    repo_root: &Path,
+) -> Result<()> {
+    let mut reports = Vec::with_capacity(targets.len());
+    let mut worst_exit = 0i32;
+
+    for (idx, target) in targets.iter().enumerate() {
+        let item = display(target);
+        let mut engine_reports = Vec::new();
+
+        if engine_list.contains(&Engine::Rust) {
+            match verify_one(
+                target,
+                report_dir,
+                screenshot_dir,
+                server,
+                shell_lang,
+                tier,
+                json,
+            ) {
+                Ok(outcome) => engine_reports.push(engines::fold_rust_report(&outcome)),
+                Err(e) => {
+                    engine_reports.push(engines::EngineReport::not_available(
+                        Engine::Rust,
+                        e.to_string(),
+                    ));
+                }
+            }
+        }
+
+        if engine_list.contains(&Engine::Runtime) {
+            let runtime_port = port.saturating_add(idx as u16);
+            engine_reports.push(engines::run_runtime_engine(
+                target,
+                tier,
+                repo_root,
+                runtime_port,
+                min_coverage,
+            ));
+        }
+
+        if engine_list.contains(&Engine::Compiled) {
+            let compiled_port = port.saturating_add(10).saturating_add(idx as u16);
+            let client_port = port.saturating_add(20).saturating_add(idx as u16);
+            engine_reports.push(engines::run_compiled_engine(
+                target,
+                tier,
+                repo_root,
+                compiled_port,
+                client_port,
+            ));
+        }
+
+        let unified = engines::UnifiedVerifyReport::new(item.clone(), tier, engine_reports);
+        worst_exit = worst_exit.max(unified.exit_code());
+
+        // Rust-engine lines are already printed by `verify_one` above (untouched
+        // per-item lines); only the node engines get a headline row here.
+        for er in unified
+            .engines
+            .iter()
+            .filter(|e| e.engine != Engine::Rust.as_str())
+        {
+            let status = if !er.ran {
+                "ERROR"
+            } else if er.failed == 0 {
+                "PASS"
+            } else {
+                "FAIL"
+            };
+            let cov = er
+                .coverage
+                .as_ref()
+                .map(|c| format!(", coverage {:.1}%", c.ratio * 100.0))
+                .unwrap_or_default();
+            let detail = er
+                .error
+                .as_deref()
+                .map(|e| format!(" — {e}"))
+                .unwrap_or_default();
+            emit(
+                json,
+                format!(
+                    "[{}] {status} {}/{} checks{cov}{detail}",
+                    er.engine, er.passed, er.checks
+                ),
+            );
+        }
+        emit(
+            json,
+            format!(
+                "verify: {item} — {}/{} engines green",
+                unified.summary.engines_green, unified.summary.engines_requested
+            ),
+        );
+
+        reports.push(unified);
+    }
+
+    if json {
+        let value = if reports.len() == 1 {
+            serde_json::to_value(&reports[0])?
+        } else {
+            serde_json::to_value(&reports)?
+        };
+        println!("{}", serde_json::to_string_pretty(&value)?);
+    }
+
+    if worst_exit != 0 {
+        std::process::exit(worst_exit);
+    }
+    Ok(())
+}
+
+/// Outcome of the in-process rust engine for one target — carries the underlying
+/// Reports (not just pass/fail) so `commands::engines::fold_rust_report` can build
+/// a `EngineReport` with real circuit findings instead of a bare bool.
+pub(crate) struct VerifyOneOutcome {
+    pub ok: bool,
+    pub l0_errors: Vec<String>,
+    pub l1: Option<orbital_verify::report::Report>,
+    pub l2: Option<orbital_client::render_probe::RenderReport>,
+    pub l2_server: Option<orbital_client::render_probe::RenderReport>,
+    pub shell: Option<orbital_verify::observers::Verdict>,
+}
+
 fn verify_one(
     path: &Path,
     report_dir: Option<&Path>,
     screenshot_dir: Option<&Path>,
     server: bool,
     shell_lang: Option<orbital_verify::shell::ShellLang>,
-) -> Result<bool> {
+    tier: Tier,
+    json_mode: bool,
+) -> Result<VerifyOneOutcome> {
     let item = path
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("unknown")
         .to_string();
+
+    // Tier gate: smoke = L0+L1 only (no client render, no server probe, no
+    // screenshots); deep forces the server probe + a TypeScript shell gate
+    // (unless the user already asked for a specific --shell); standard is
+    // today's behavior, unchanged.
+    let run_l2 = tier != Tier::Smoke;
+    let server_effective = match tier {
+        Tier::Smoke => false,
+        Tier::Standard => server,
+        Tier::Deep => true,
+    };
+    let shell_lang_effective = match tier {
+        Tier::Deep => shell_lang.or(Some(orbital_verify::shell::ShellLang::TypeScript)),
+        _ => shell_lang,
+    };
 
     // Layer 0 — static validation (the `orb validate` phase: structural + type +
     // config + OIR checks). verify is a strict superset of validate, so a schema
@@ -106,16 +393,26 @@ fn verify_one(
             crate::commands::validate::run_full_validation(path, extra_patterns, service_actions)?;
         let l0_ok = l0.errors.is_empty();
         let l0_icon = if l0_ok { "✓" } else { "✗" };
-        println!(
-            "[{l0_icon}] {item} — validate: {} error(s), {} warning(s)",
-            l0.errors.len(),
-            l0.warnings.len()
+        emit(
+            json_mode,
+            format!(
+                "[{l0_icon}] {item} — validate: {} error(s), {} warning(s)",
+                l0.errors.len(),
+                l0.warnings.len()
+            ),
         );
         if !l0_ok {
             for e in &l0.errors {
-                println!("    L0 FAIL {e}");
+                emit(json_mode, format!("    L0 FAIL {e}"));
             }
-            return Ok(false);
+            return Ok(VerifyOneOutcome {
+                ok: false,
+                l0_errors: l0.errors,
+                l1: None,
+                l2: None,
+                l2_server: None,
+                shell: None,
+            });
         }
     }
 
@@ -123,10 +420,10 @@ fn verify_one(
 
     // Layer 1 — kernel circuit.
     let l1 = orbital_verify::verify_schema(&item, schema.clone())?;
-    println!("{}", l1.headline());
+    emit(json_mode, l1.headline());
     for v in &l1.verdicts {
         if !v.passed {
-            println!("    L1 FAIL {} — {}", v.name, v.detail);
+            emit(json_mode, format!("    L1 FAIL {} — {}", v.name, v.detail));
         }
     }
 
@@ -135,68 +432,97 @@ fn verify_one(
     // `orbital_verify::shell`. This is the home of the Python `py_compile`
     // gate that used to live in `orbital-verify-unified`, plus android/ios.
     let mut shell_ok = true;
-    if let Some(lang) = shell_lang {
+    let mut shell_verdict: Option<orbital_verify::observers::Verdict> = None;
+    if let Some(lang) = shell_lang_effective {
         match emit_shell_to_tmp(path, lang) {
             Ok(tmp_dir) => {
                 let verdict = orbital_verify::shell::shell_compile_verdict(&tmp_dir, lang);
                 let icon = if verdict.passed { "✓" } else { "✗" };
-                println!(
-                    "  [{icon}] shell:{} — {}",
-                    lang.display_name(),
-                    verdict.detail
+                emit(
+                    json_mode,
+                    format!(
+                        "  [{icon}] shell:{} — {}",
+                        lang.display_name(),
+                        verdict.detail
+                    ),
                 );
                 if !verdict.passed {
                     shell_ok = false;
-                    println!("    SHELL FAIL {} — {}", verdict.name, verdict.detail);
+                    emit(
+                        json_mode,
+                        format!("    SHELL FAIL {} — {}", verdict.name, verdict.detail),
+                    );
                 }
                 std::fs::remove_dir_all(&tmp_dir).ok();
+                shell_verdict = Some(verdict);
             }
             Err(e) => {
                 shell_ok = false;
-                println!("    SHELL FAIL emit:{} — {e}", lang.display_name());
+                emit(
+                    json_mode,
+                    format!("    SHELL FAIL emit:{} — {e}", lang.display_name()),
+                );
+                shell_verdict = Some(orbital_verify::observers::Verdict::from_offenders(
+                    &format!("shell_emit_{}", lang.display_name()),
+                    vec![e.to_string()],
+                ));
             }
         }
     }
 
-    // Layer 2 — client render contract (enforces the bindings L1 deferred), in-process kernel.
-    let l2 = orbital_client::render_probe::probe_schema(&item, schema.clone())?;
-    println!("{}", l2.headline());
-    for v in &l2.verdicts {
-        if !v.passed {
-            println!("    L2 FAIL {} — {}", v.name, v.detail);
-        }
-    }
-
-    // Layer 2 (server) — the SAME render contract driven over real HTTP against a live
-    // `orbital-server`, verifying server routes + serialization + client together.
+    // Layer 2 — client render contract (enforces the bindings L1 deferred), in-process
+    // kernel. Skipped entirely at the smoke tier (no browser/client layer at all).
+    let mut l2: Option<orbital_client::render_probe::RenderReport> = None;
+    let mut l2_server: Option<orbital_client::render_probe::RenderReport> = None;
     let mut l2_server_ok = true;
-    if server {
-        let l2s = super::verify_server::probe_over_http(&item, schema.clone())?;
-        println!("{} [server]", l2s.headline());
-        for v in &l2s.verdicts {
+    if run_l2 {
+        let report = orbital_client::render_probe::probe_schema(&item, schema.clone())?;
+        emit(json_mode, report.headline());
+        for v in &report.verdicts {
             if !v.passed {
-                l2_server_ok = false;
-                println!("    L2/server FAIL {} — {}", v.name, v.detail);
+                emit(json_mode, format!("    L2 FAIL {} — {}", v.name, v.detail));
             }
         }
-    }
 
-    // Layer 3 — headless screenshot (opt-in; only when the binary was built with it).
-    if let Some(dir) = screenshot_dir {
-        #[cfg(feature = "screenshot")]
-        match orbital_client::screenshot::screenshot_schema(&item, schema.clone(), dir) {
-            Ok(paths) => {
-                for p in paths {
-                    println!("    📸 {}", p.display());
+        // Layer 2 (server) — the SAME render contract driven over real HTTP against a
+        // live `orbital-server`, verifying server routes + serialization + client together.
+        if server_effective {
+            let l2s = super::verify_server::probe_over_http(&item, schema.clone())?;
+            emit(json_mode, format!("{} [server]", l2s.headline()));
+            for v in &l2s.verdicts {
+                if !v.passed {
+                    l2_server_ok = false;
+                    emit(
+                        json_mode,
+                        format!("    L2/server FAIL {} — {}", v.name, v.detail),
+                    );
                 }
             }
-            Err(e) => println!("    📸 screenshot FAILED — {e}"),
+            l2_server = Some(l2s);
         }
-        #[cfg(not(feature = "screenshot"))]
-        {
-            let _ = dir;
-            println!("    📸 (rebuild orb with `--features screenshot` to capture)");
+
+        // Layer 3 — headless screenshot (opt-in; only when the binary was built with it).
+        if let Some(dir) = screenshot_dir {
+            #[cfg(feature = "screenshot")]
+            match orbital_client::screenshot::screenshot_schema(&item, schema.clone(), dir) {
+                Ok(paths) => {
+                    for p in paths {
+                        emit(json_mode, format!("    📸 {}", p.display()));
+                    }
+                }
+                Err(e) => emit(json_mode, format!("    📸 screenshot FAILED — {e}")),
+            }
+            #[cfg(not(feature = "screenshot"))]
+            {
+                let _ = dir;
+                emit(
+                    json_mode,
+                    "    📸 (rebuild orb with `--features screenshot` to capture)",
+                );
+            }
         }
+
+        l2 = Some(report);
     }
 
     if let Some(dir) = report_dir {
@@ -211,7 +537,16 @@ fn verify_one(
         }
     }
 
-    Ok(l1.ok() && l2.ok() && l2_server_ok && shell_ok)
+    let ok = l1.ok() && l2.as_ref().is_none_or(|r| r.ok()) && l2_server_ok && shell_ok;
+
+    Ok(VerifyOneOutcome {
+        ok,
+        l0_errors: Vec::new(),
+        l1: Some(l1),
+        l2,
+        l2_server,
+        shell: shell_verdict,
+    })
 }
 
 /// Map the `--shell` arg value to a native compile-gate language. Errors on an
@@ -415,6 +750,45 @@ pub(crate) fn run_screenshot_frames(path: &Path, out_dir: &Path) -> Result<bool>
     Ok(true)
 }
 
+/// Resolve a TARGET argument: an existing path is used as-is; an explicit
+/// `.lolo`/`.orb` path that doesn't exist is passed through unchanged (the normal
+/// L0/resolve failure downstream reports it, same as before name resolution
+/// existed); anything else is looked up by file stem across the registry corpus
+/// — a unique match resolves, zero or ambiguous matches are a hard error listing
+/// the candidates (deterministic order, since `discover_registry` sorts).
+fn resolve_target(raw: PathBuf, repo_root: &Path) -> Result<PathBuf> {
+    if raw.exists() {
+        return Ok(raw);
+    }
+    let ext = raw.extension().and_then(|e| e.to_str());
+    if matches!(ext, Some("lolo") | Some("orb")) {
+        return Ok(raw);
+    }
+
+    let stem = raw.to_string_lossy().into_owned();
+    let mut candidates: Vec<PathBuf> = orbital_verify::corpus::discover_registry(repo_root)
+        .into_iter()
+        .filter(|p| p.file_stem().and_then(|s| s.to_str()) == Some(stem.as_str()))
+        .collect();
+    candidates.sort();
+
+    match candidates.len() {
+        0 => anyhow::bail!(
+            "no behavior named {stem:?} found under {}",
+            orbital_verify::corpus::REGISTRY_ROOTS.join(" or ")
+        ),
+        1 => Ok(candidates.into_iter().next().expect("len checked")),
+        _ => {
+            let list: Vec<String> = candidates.iter().map(|p| p.display().to_string()).collect();
+            anyhow::bail!(
+                "ambiguous behavior name {stem:?} — {} matches:\n  {}",
+                list.len(),
+                list.join("\n  ")
+            )
+        }
+    }
+}
+
 fn collect_targets(path: Option<PathBuf>, registry: bool, topic: Option<&str>) -> Vec<PathBuf> {
     if let Some(p) = path {
         return vec![p];
@@ -443,4 +817,111 @@ fn display(p: &Path) -> String {
         .and_then(|s| s.to_str())
         .unwrap_or("?")
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmp_registry(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("orbital-verify-target-resolve-{name}"));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("packages/almadar-std/behaviors/registry/ui/atoms"))
+            .unwrap();
+        root
+    }
+
+    #[test]
+    fn resolve_target_existing_path_passes_through() {
+        let root = tmp_registry("existing-path");
+        let file = root.join("some-file.orb");
+        std::fs::write(&file, "{}").unwrap();
+        let resolved = resolve_target(file.clone(), &root).unwrap();
+        assert_eq!(resolved, file);
+    }
+
+    #[test]
+    fn resolve_target_missing_schema_extension_passes_through() {
+        let root = tmp_registry("missing-schema-ext");
+        let missing = root.join("does-not-exist.orb");
+        let resolved = resolve_target(missing.clone(), &root).unwrap();
+        assert_eq!(resolved, missing);
+    }
+
+    #[test]
+    fn resolve_target_unique_name_resolves() {
+        let root = tmp_registry("unique-name");
+        let file =
+            root.join("packages/almadar-std/behaviors/registry/ui/atoms/ui-timer-display.orb");
+        std::fs::write(&file, "{}").unwrap();
+        let resolved = resolve_target(PathBuf::from("ui-timer-display"), &root).unwrap();
+        assert_eq!(resolved, file);
+    }
+
+    #[test]
+    fn resolve_target_missing_name_errors() {
+        let root = tmp_registry("missing-name");
+        let err = resolve_target(PathBuf::from("no-such-behavior"), &root).unwrap_err();
+        assert!(err.to_string().contains("no behavior named"));
+    }
+
+    #[test]
+    fn resolve_target_ambiguous_name_errors_with_deterministic_candidates() {
+        let root = tmp_registry("ambiguous-name");
+        std::fs::create_dir_all(
+            root.join("packages/almadar-behaviors/behaviors/registry/ui/atoms"),
+        )
+        .unwrap();
+        let a = root.join("packages/almadar-std/behaviors/registry/ui/atoms/dupe-name.orb");
+        let b = root.join("packages/almadar-behaviors/behaviors/registry/ui/atoms/dupe-name.orb");
+        std::fs::write(&a, "{}").unwrap();
+        std::fs::write(&b, "{}").unwrap();
+        let err = resolve_target(PathBuf::from("dupe-name"), &root).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("ambiguous behavior name"));
+        // Deterministic order: candidates sorted lexicographically (almadar-behaviors < almadar-std).
+        let behaviors_idx = msg.find("almadar-behaviors").unwrap();
+        let std_idx = msg.find("almadar-std").unwrap();
+        assert!(behaviors_idx < std_idx);
+    }
+
+    #[test]
+    fn tier_gate_smoke_skips_l2_and_server() {
+        // Direct decision-table check (no schema execution needed): smoke never
+        // runs L2, regardless of --server; deep always forces it; standard mirrors
+        // the caller's flag.
+        let run_l2 = |tier: Tier| tier != Tier::Smoke;
+        assert!(!run_l2(Tier::Smoke));
+        assert!(run_l2(Tier::Standard));
+        assert!(run_l2(Tier::Deep));
+
+        let server_effective = |tier: Tier, server: bool| match tier {
+            Tier::Smoke => false,
+            Tier::Standard => server,
+            Tier::Deep => true,
+        };
+        assert!(!server_effective(Tier::Smoke, true));
+        assert!(!server_effective(Tier::Standard, false));
+        assert!(server_effective(Tier::Standard, true));
+        assert!(server_effective(Tier::Deep, false));
+    }
+
+    #[test]
+    fn tier_gate_deep_defaults_shell_to_typescript_unless_explicit() {
+        let shell_lang_effective =
+            |tier: Tier, shell: Option<orbital_verify::shell::ShellLang>| match tier {
+                Tier::Deep => shell.or(Some(orbital_verify::shell::ShellLang::TypeScript)),
+                _ => shell,
+            };
+        assert_eq!(
+            shell_lang_effective(Tier::Deep, None),
+            Some(orbital_verify::shell::ShellLang::TypeScript)
+        );
+        assert_eq!(
+            shell_lang_effective(Tier::Deep, Some(orbital_verify::shell::ShellLang::Python)),
+            Some(orbital_verify::shell::ShellLang::Python)
+        );
+        assert_eq!(shell_lang_effective(Tier::Standard, None), None);
+        assert_eq!(shell_lang_effective(Tier::Smoke, None), None);
+    }
 }

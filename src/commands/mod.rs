@@ -4,6 +4,7 @@
 pub(crate) mod compile;
 pub(crate) mod convert;
 pub(crate) mod dev;
+pub(crate) mod engines;
 pub(crate) mod parse;
 pub(crate) mod serve;
 pub(crate) mod simulate;
