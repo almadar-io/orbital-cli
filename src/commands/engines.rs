@@ -294,6 +294,7 @@ pub(crate) fn fold_rust_report(
 // Node engine resolution + spawn watchdog
 // ---------------------------------------------------------------------------
 
+#[derive(Debug)]
 enum ResolvedCommand {
     Node(PathBuf),
     Exe(PathBuf),
@@ -314,9 +315,11 @@ fn node_available() -> bool {
 /// wins (valid or not; an invalid override is a hard `Err`, never silently skipped),
 /// mirroring the existing `ORBITAL_BIN → PATH → …` precedent
 /// (`docs/Almadar_Verification.md`'s orbital-verify.sh resolution); (2) the dev
-/// workspace `tools/<pkg>/dist/index.js` when present; (3) `npx --no-install
-/// <pinned pkg>@<version>`. Never panics — an unresolvable engine is a plain
-/// `Err(reason)` the caller carries as `EngineReport::not_available`.
+/// workspace `tools/<pkg>/dist/index.js` when present; (3) `npx -y
+/// <pinned pkg>@<version>` — fetches the exact baked pin on first use (cached
+/// by npx afterwards), so developers need no manual engine install. Never
+/// panics — an unresolvable engine is a plain `Err(reason)` the caller carries
+/// as `EngineReport::not_available`.
 fn resolve_node_engine(
     engine: Engine,
     repo_root: &Path,
@@ -383,7 +386,7 @@ fn build_command(resolved: ResolvedCommand, args: &[String]) -> Command {
         ResolvedCommand::Exe(path) => Command::new(path),
         ResolvedCommand::Npx(pkg, ver) => {
             let mut c = Command::new("npx");
-            c.arg("--no-install").arg(format!("{pkg}@{ver}"));
+            c.arg("-y").arg(format!("{pkg}@{ver}"));
             c
         }
     };
@@ -953,5 +956,34 @@ mod tests {
             None => std::env::remove_var(key),
         }
         assert!(result.is_err());
+    }
+
+    /// Published mode (no override, no dev workspace): resolution falls to the
+    /// baked npx pin, and the spawned command fetches it (`npx -y pkg@ver`) so
+    /// developers need no manual engine install.
+    #[test]
+    fn resolve_node_engine_falls_to_npx_pin_and_fetches() {
+        let key = "ORB_RUNTIME_VERIFY_BIN";
+        let prev = std::env::var(key).ok();
+        std::env::remove_var(key);
+        let result = resolve_node_engine(Engine::Runtime, Path::new("/nonexistent/repo/root"));
+        match prev {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+        let (pkg, ver) = crate::baked_engine_pins::RUNTIME_VERIFY_ENGINE;
+        match result {
+            Ok(ResolvedCommand::Npx(p, v)) => {
+                assert_eq!(p, pkg);
+                assert_eq!(v, ver);
+                let cmd = build_command(ResolvedCommand::Npx(p, v), &[]);
+                let args: Vec<String> = cmd
+                    .get_args()
+                    .map(|a| a.to_string_lossy().into_owned())
+                    .collect();
+                assert_eq!(args, vec!["-y".to_string(), format!("{pkg}@{ver}")]);
+            }
+            other => panic!("expected npx fallback, got {other:?}"),
+        }
     }
 }
