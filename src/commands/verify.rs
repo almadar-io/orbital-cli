@@ -36,6 +36,7 @@ pub(crate) struct VerifyCliArgs {
     pub json: bool,
     pub port: u16,
     pub min_coverage: Option<f64>,
+    pub engine_timeout: Option<u64>,
 }
 
 /// Route a human-readable line to stdout, unless `--json` is active — the unified
@@ -87,7 +88,9 @@ pub(crate) fn run_verify(args: VerifyCliArgs) -> Result<()> {
         json,
         port,
         min_coverage,
+        engine_timeout,
     } = args;
+    let engine_timeout = engine_timeout.map(std::time::Duration::from_secs);
 
     // Map `--shell` up front so an unknown value fails fast before any target is walked.
     let shell_lang = shell.as_deref().map(parse_shell_lang).transpose()?;
@@ -169,6 +172,7 @@ pub(crate) fn run_verify(args: VerifyCliArgs) -> Result<()> {
         json,
         port,
         min_coverage,
+        engine_timeout,
         shell_lang,
         &repo_root,
     )
@@ -225,6 +229,7 @@ fn run_verify_unified(
     json: bool,
     port: u16,
     min_coverage: Option<f64>,
+    engine_timeout: Option<std::time::Duration>,
     shell_lang: Option<orbital_verify::shell::ShellLang>,
     repo_root: &Path,
 ) -> Result<()> {
@@ -263,6 +268,7 @@ fn run_verify_unified(
                 repo_root,
                 runtime_port,
                 min_coverage,
+                engine_timeout,
             ));
         }
 
@@ -275,6 +281,7 @@ fn run_verify_unified(
                 repo_root,
                 compiled_port,
                 client_port,
+                engine_timeout,
             ));
         }
 

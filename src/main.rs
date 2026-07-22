@@ -291,6 +291,12 @@ enum Commands {
         /// support it (today: --runtime).
         #[arg(long, value_name = "RATIO")]
         min_coverage: Option<f64>,
+
+        /// Watchdog budget in seconds for each spawned node engine
+        /// (runtime/compiled), overriding the tier default (120 smoke /
+        /// 600 standard / 1800 deep).
+        #[arg(long, value_name = "SECS")]
+        engine_timeout: Option<u64>,
     },
 
     /// Compile an Orbital schema to generated code
@@ -676,6 +682,7 @@ fn main() -> anyhow::Result<()> {
             json,
             port,
             min_coverage,
+            engine_timeout,
         }) => commands::verify::run_verify(commands::verify::VerifyCliArgs {
             path,
             registry,
@@ -694,6 +701,7 @@ fn main() -> anyhow::Result<()> {
             json,
             port,
             min_coverage,
+            engine_timeout,
         }),
         Some(Commands::Format { path, write }) => format_schema(&path, write),
         Some(Commands::Compile {

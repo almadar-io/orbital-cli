@@ -469,12 +469,24 @@ fn first_line(s: &str) -> &str {
 // Runtime engine (tools/runtime-verify)
 // ---------------------------------------------------------------------------
 
+/// Tier → runtime-verify walk flags. Smoke/standard ride the tool's
+/// frontier default (authored topology walked in full, imported topology
+/// verified at its source atom); deep requests the exhaustive DFS.
+fn runtime_tier_flags(tier: Tier) -> &'static [&'static str] {
+    match tier {
+        Tier::Smoke => &["--first-frame", "--fast"],
+        Tier::Standard => &["--fast"],
+        Tier::Deep => &["--full-walk"],
+    }
+}
+
 pub(crate) fn run_runtime_engine(
     target: &Path,
     tier: Tier,
     repo_root: &Path,
     port: u16,
     min_coverage: Option<f64>,
+    engine_timeout: Option<Duration>,
 ) -> EngineReport {
     let resolved = match resolve_node_engine(Engine::Runtime, repo_root) {
         Ok(r) => r,
@@ -506,13 +518,8 @@ pub(crate) fn run_runtime_engine(
         "--server-port".to_string(),
         port.to_string(),
     ];
-    match tier {
-        Tier::Smoke => {
-            args.push("--first-frame".to_string());
-            args.push("--fast".to_string());
-        }
-        Tier::Standard => args.push("--fast".to_string()),
-        Tier::Deep => {}
+    for flag in runtime_tier_flags(tier) {
+        args.push((*flag).to_string());
     }
     if let Some(mc) = min_coverage {
         args.push("--min-coverage".to_string());
@@ -522,7 +529,8 @@ pub(crate) fn run_runtime_engine(
     let mut cmd = build_command(resolved, &args);
     apply_shared_env(&mut cmd);
 
-    let outcome = match run_with_timeout(cmd, tier.timeout()) {
+    let budget = engine_timeout.unwrap_or_else(|| tier.timeout());
+    let outcome = match run_with_timeout(cmd, budget) {
         Ok(o) => o,
         Err(e) => {
             let _ = std::fs::remove_dir_all(&out_dir);
@@ -534,7 +542,7 @@ pub(crate) fn run_runtime_engine(
     if outcome.timed_out {
         return EngineReport::not_available(
             Engine::Runtime,
-            format!("timed out after {:?}", tier.timeout()),
+            format!("timed out after {budget:?} (override with --engine-timeout)"),
         );
     }
 
@@ -637,6 +645,7 @@ pub(crate) fn run_compiled_engine(
     repo_root: &Path,
     port: u16,
     client_port: u16,
+    engine_timeout: Option<Duration>,
 ) -> EngineReport {
     let resolved = match resolve_node_engine(Engine::Compiled, repo_root) {
         Ok(r) => r,
@@ -662,7 +671,8 @@ pub(crate) fn run_compiled_engine(
     let mut cmd = build_command(resolved, &args);
     apply_shared_env(&mut cmd);
 
-    let outcome = match run_with_timeout(cmd, tier.timeout()) {
+    let budget = engine_timeout.unwrap_or_else(|| tier.timeout());
+    let outcome = match run_with_timeout(cmd, budget) {
         Ok(o) => o,
         Err(e) => return EngineReport::not_available(Engine::Compiled, format!("{e}")),
     };
@@ -670,7 +680,7 @@ pub(crate) fn run_compiled_engine(
     if outcome.timed_out {
         return EngineReport::not_available(
             Engine::Compiled,
-            format!("timed out after {:?}", tier.timeout()),
+            format!("timed out after {budget:?} (override with --engine-timeout)"),
         );
     }
 
@@ -794,6 +804,13 @@ mod tests {
             translate_circuit_term("Coverage 87.5% (7/8)"),
             "Coverage 87.5% (7/8)"
         );
+    }
+
+    #[test]
+    fn runtime_tier_flags_deep_requests_full_walk() {
+        assert_eq!(runtime_tier_flags(Tier::Deep), ["--full-walk"]);
+        assert_eq!(runtime_tier_flags(Tier::Standard), ["--fast"]);
+        assert_eq!(runtime_tier_flags(Tier::Smoke), ["--first-frame", "--fast"]);
     }
 
     #[test]
