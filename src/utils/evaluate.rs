@@ -34,8 +34,14 @@ pub(crate) fn evaluate_sexpr(
     let expr: SExpression =
         serde_json::from_str(src).map_err(|e| anyhow::anyhow!("JSON parse error: {}", e))?;
 
-    // Build context
+    // Build context. The viewer comes from ALMADAR_PERSONA like every other
+    // headless surface, so `@user.role` can be probed from the CLI instead of
+    // silently evaluating against Null.
     let mut ctx = BindingContext::new();
+    ctx.set_user(
+        orbital_core::runtime::persona_from_env()
+            .map_err(|e| anyhow::anyhow!("{}", e))?,
+    );
 
     if let Some(json) = entity_json {
         let raw: serde_json::Value = serde_json::from_str(json)
