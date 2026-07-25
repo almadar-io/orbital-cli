@@ -109,13 +109,24 @@ pub(crate) fn load_services_registry(
             return HashMap::new();
         }
     } else {
-        // Auto-discover: check well-known location in the repo
-        let candidates = [std::path::PathBuf::from(
-            "packages/almadar-patterns/src/services-registry.json",
-        )];
+        // Auto-discover: check well-known locations in the repo. The
+        // registry moved when almadar-patterns was merged into
+        // @almadar/core; the old path is kept as a fallback for older
+        // trees that haven't picked up that merge yet.
+        let candidates = [
+            std::path::PathBuf::from("packages/almadar-core/src/patterns/services-registry.json"),
+            std::path::PathBuf::from("packages/almadar-patterns/src/services-registry.json"),
+        ];
         match candidates.into_iter().find(|p| p.exists()) {
             Some(p) => p,
-            None => return HashMap::new(),
+            None => {
+                eprintln!(
+                    "WARNING: services registry not found (looked for packages/almadar-core/src/patterns/services-registry.json and the legacy almadar-patterns path). \
+                     call-service validation will NOT check service/action names — this is a silent no-op, not a pass. \
+                     Pass --services explicitly if the registry lives elsewhere."
+                );
+                return HashMap::new();
+            }
         }
     };
 
@@ -157,7 +168,13 @@ pub(crate) fn load_services_registry(
         }
     }
 
-    if !service_actions.is_empty() {
+    if service_actions.is_empty() {
+        eprintln!(
+            "WARNING: services registry at {} loaded but contained no services with actions — \
+             call-service validation will NOT check service/action names.",
+            registry_path.display()
+        );
+    } else {
         eprintln!(
             "Loaded {} services from {}",
             service_actions.len(),
