@@ -962,8 +962,13 @@ mod tests {
         assert_eq!(mixed.exit_code(), 2);
     }
 
+    // Process env is shared across parallel test threads; every test that
+    // mutates ORB_RUNTIME_VERIFY_BIN must hold this lock for its full body.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn resolve_node_engine_env_override_nonexistent_is_not_available() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let key = "ORB_RUNTIME_VERIFY_BIN";
         let prev = std::env::var(key).ok();
         std::env::set_var(key, "/nonexistent/path/to/tool.js");
@@ -980,6 +985,7 @@ mod tests {
     /// developers need no manual engine install.
     #[test]
     fn resolve_node_engine_falls_to_npx_pin_and_fetches() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let key = "ORB_RUNTIME_VERIFY_BIN";
         let prev = std::env::var(key).ok();
         std::env::remove_var(key);
