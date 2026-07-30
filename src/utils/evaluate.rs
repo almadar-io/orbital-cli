@@ -36,12 +36,21 @@ pub(crate) fn evaluate_sexpr(
 
     // Build context. The viewer comes from ALMADAR_PERSONA like every other
     // headless surface, so `@user.role` can be probed from the CLI instead of
-    // silently evaluating against Null.
+    // silently evaluating against Null. This probe holds no schema, so only the
+    // self-contained JSON persona form resolves — a bare id/role would need an
+    // app's declared [identity] roster and is rejected with that explanation.
     let mut ctx = BindingContext::new();
-    ctx.set_user(
-        orbital_core::runtime::persona_from_env()
-            .map_err(|e| anyhow::anyhow!("{}", e))?,
-    );
+    ctx.set_user(match orbital_core::runtime::persona_from_env_spec()
+        .map_err(|e| anyhow::anyhow!("{}", e))?
+    {
+        orbital_core::runtime::EnvPersona::Resolved(user) => user,
+        orbital_core::runtime::EnvPersona::None => orbital_core::Value::Null,
+        orbital_core::runtime::EnvPersona::Bare(spec) => {
+            return Err(anyhow::anyhow!(
+                "Persona \"{spec}\" is a bare id/role, which resolves against an app's declared [identity] roster — this schema-less probe accepts only the JSON persona form (e.g. {{\"id\":\"member-1\",\"role\":\"member\"}})."
+            ));
+        }
+    });
 
     if let Some(json) = entity_json {
         let raw: serde_json::Value = serde_json::from_str(json)
