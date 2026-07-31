@@ -297,6 +297,18 @@ enum Commands {
         /// 600 standard / 1800 deep).
         #[arg(long, value_name = "SECS")]
         engine_timeout: Option<u64>,
+
+        /// Walk the target's declared `[identity]` roster (task #129):
+        /// re-runs the L1 kernel circuit once per persona, binding `@user` to
+        /// each in turn, and reports a per-persona pass/fail with declared
+        /// access-policy denials bucketed separately from genuine failures —
+        /// no more manually re-running with one ALMADAR_PERSONA at a time and
+        /// eyeballing which denial was expected. Targets with no `[identity]`
+        /// entity fall back to today's single env-driven run. Only supported
+        /// with the default engine/tier (no --runtime/--compiled/--all/
+        /// --smoke/--deep/--json).
+        #[arg(long)]
+        all_personas: bool,
     },
 
     /// Compile an Orbital schema to generated code
@@ -683,6 +695,7 @@ fn main() -> anyhow::Result<()> {
             port,
             min_coverage,
             engine_timeout,
+            all_personas,
         }) => commands::verify::run_verify(commands::verify::VerifyCliArgs {
             path,
             registry,
@@ -702,6 +715,7 @@ fn main() -> anyhow::Result<()> {
             port,
             min_coverage,
             engine_timeout,
+            all_personas,
         }),
         Some(Commands::Format { path, write }) => format_schema(&path, write),
         Some(Commands::Compile {

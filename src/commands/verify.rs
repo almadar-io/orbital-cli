@@ -37,6 +37,7 @@ pub(crate) struct VerifyCliArgs {
     pub port: u16,
     pub min_coverage: Option<f64>,
     pub engine_timeout: Option<u64>,
+    pub all_personas: bool,
 }
 
 /// Route a human-readable line to stdout, unless `--json` is active — the unified
@@ -89,6 +90,7 @@ pub(crate) fn run_verify(args: VerifyCliArgs) -> Result<()> {
         port,
         min_coverage,
         engine_timeout,
+        all_personas,
     } = args;
     let engine_timeout = engine_timeout.map(std::time::Duration::from_secs);
 
@@ -148,6 +150,16 @@ pub(crate) fn run_verify(args: VerifyCliArgs) -> Result<()> {
         anyhow::bail!(
             "no .orb targets (pass a FILE, a behavior NAME, or --registry [--topic <t>])"
         );
+    }
+
+    if all_personas {
+        if engine_list != vec![Engine::Rust] || tier != Tier::Standard || json {
+            anyhow::bail!(
+                "--all-personas is only supported with the default L1 kernel walk \
+                 (no --runtime/--compiled/--all/--smoke/--deep/--json)"
+            );
+        }
+        return run_verify_all_personas(&targets);
     }
 
     // Flagless (and today's already-existing-flag) invocations stay byte-for-byte
@@ -216,6 +228,97 @@ fn run_verify_classic(
         std::process::exit(1);
     }
     Ok(())
+}
+
+/// `--all-personas`: walk the target's declared `[identity]` roster, driving one
+/// full L1 kernel circuit per persona and reporting a per-persona pass/fail with
+/// declared access-policy denials bucketed separately from genuine failures
+/// (task #129). A target with no `[identity]` entity falls back to today's
+/// single env-driven run (`ALMADAR_PERSONA`, or none).
+fn run_verify_all_personas(targets: &[PathBuf]) -> Result<()> {
+    let mut overall_ok = true;
+    for target in targets {
+        let item = display(target);
+        let schema = match orbital_verify::corpus::resolve_file(target) {
+            Ok(s) => s,
+            Err(e) => {
+                overall_ok = false;
+                eprintln!("[ERROR] {item}: {e}");
+                continue;
+            }
+        };
+
+        let roster = orbital_core::runtime::identity_roster(
+            &schema,
+            orbital_core::runtime::DEFAULT_IDENTITY_ROSTER_COUNT,
+        );
+        if roster.is_empty() {
+            match orbital_verify::verify_schema(&item, schema) {
+                Ok(l1) => {
+                    let ok = l1.ok();
+                    overall_ok &= ok;
+                    println!(
+                        "{item}: no [identity] roster declared — single run, {}",
+                        if ok { "PASS" } else { "FAIL" }
+                    );
+                }
+                Err(e) => {
+                    overall_ok = false;
+                    eprintln!("[ERROR] {item}: {e}");
+                }
+            }
+            continue;
+        }
+
+        println!("\n{item} --all-personas ({} declared persona(s)):", roster.len());
+        let mut item_ok = true;
+        for persona in &roster {
+            let label = persona_label(persona);
+            match orbital_verify::verify_schema_as(&item, schema.clone(), persona.clone()) {
+                Ok(l1) => {
+                    let breakdown = l1.classify_persona_failures();
+                    item_ok &= breakdown.ok();
+                    println!(
+                        "  {label}: {} — {}/{} checks, {} frames",
+                        if breakdown.ok() { "PASS" } else { "FAIL" },
+                        l1.summary.passed,
+                        l1.summary.total_checks,
+                        l1.summary.frames,
+                    );
+                    if !breakdown.access_denied.is_empty() {
+                        println!(
+                            "    ({} access-denied, bucketed not FAILed: {})",
+                            breakdown.access_denied.len(),
+                            breakdown.access_denied.join("; ")
+                        );
+                    }
+                    for g in &breakdown.genuine {
+                        println!("    FAIL {g}");
+                    }
+                }
+                Err(e) => {
+                    item_ok = false;
+                    eprintln!("  {label}: [ERROR] {e}");
+                }
+            }
+        }
+        println!("  overall: {}", if item_ok { "PASS" } else { "FAIL" });
+        overall_ok &= item_ok;
+    }
+
+    if !overall_ok {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+/// `"<id>/<role>"`, or just `<id>` when the roster row declares no role.
+fn persona_label(persona: &orbital_core::Value) -> String {
+    let id = persona.get_path("id").and_then(|v| v.as_str()).unwrap_or("?");
+    match persona.get_path("role").and_then(|v| v.as_str()) {
+        Some(role) => format!("{id}/{role}"),
+        None => id.to_string(),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
