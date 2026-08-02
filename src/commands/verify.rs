@@ -285,6 +285,30 @@ fn run_verify_all_personas(targets: &[PathBuf]) -> Result<()> {
                         l1.summary.total_checks,
                         l1.summary.frames,
                     );
+                    // Denial buckets alone cannot see OWNERSHIP scoping: read
+                    // filtering shrinks the row set silently and denies nothing, so
+                    // a correctly owner-scoped organism reports empty buckets and
+                    // reads exactly like an un-retrofitted one
+                    // (S-C2-ASYMMETRY-BLIND-TO-OWNERSHIP-ONLY-SCOPING). Visible row
+                    // counts are what actually differ per persona, so print them.
+                    let mut visible: std::collections::BTreeMap<&str, usize> =
+                        std::collections::BTreeMap::new();
+                    for f in &l1.frames {
+                        for (entity, n) in &f.entity_counts {
+                            let slot = visible.entry(entity.as_str()).or_insert(*n);
+                            *slot = (*slot).max(*n);
+                        }
+                    }
+                    if !visible.is_empty() {
+                        println!(
+                            "    visible rows: {}",
+                            visible
+                                .iter()
+                                .map(|(e, n)| format!("{e}={n}"))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        );
+                    }
                     if !breakdown.access_denied.is_empty() {
                         println!(
                             "    ({} access-denied, bucketed not FAILed: {})",
@@ -398,12 +422,12 @@ fn run_verify_unified(
             .iter()
             .filter(|e| e.engine != Engine::Rust.as_str())
         {
-            let status = if !er.ran {
-                "ERROR"
-            } else if er.failed == 0 {
-                "PASS"
+            let unaccounted = unaccounted_checks(er);
+            let status = engine_status(er);
+            let unresolved = if unaccounted > 0 {
+                format!(", {unaccounted} neither passed nor failed")
             } else {
-                "FAIL"
+                String::new()
             };
             let cov = er
                 .coverage
@@ -418,7 +442,7 @@ fn run_verify_unified(
             emit(
                 json,
                 format!(
-                    "[{}] {status} {}/{} checks{cov}{detail}",
+                    "[{}] {status} {}/{} checks{unresolved}{cov}{detail}",
                     er.engine, er.passed, er.checks
                 ),
             );
@@ -530,9 +554,36 @@ fn verify_one(
 
     // Layer 1 — kernel circuit.
     let l1 = orbital_verify::verify_schema(&item, schema.clone())?;
-    emit(json_mode, l1.headline());
+    // A transition the app's OWN `@create`/`@update`/`@delete` policy denied is
+    // declared behavior, not a defect — `--all-personas` has always bucketed it
+    // (`classify_persona_failures`). The default single run did not, so every
+    // organism that declares directives reported FAIL for doing exactly what it
+    // was told to do. Same bucketing, same helper, both paths.
+    let l1_breakdown = l1.classify_persona_failures();
+    let l1_ok = l1.ok() || l1_breakdown.ok();
+    // `headline()` reports the raw verdict, which reads "[FAIL] … " on a run the
+    // bucketing then passes — contradictory next to "verify: 1/1 passed". Restate
+    // the status when the only failures were declared denials.
+    emit(
+        json_mode,
+        if !l1.ok() && l1_ok {
+            l1.headline().replacen("[FAIL]", "[PASS]", 1)
+        } else {
+            l1.headline()
+        },
+    );
+    if !l1.ok() && l1_ok {
+        emit(
+            json_mode,
+            format!(
+                "    ({} access-denied, bucketed not FAILed: {})",
+                l1_breakdown.access_denied.len(),
+                l1_breakdown.access_denied.join("; ")
+            ),
+        );
+    }
     for v in &l1.verdicts {
-        if !v.passed {
+        if !v.passed && !l1_ok {
             emit(json_mode, format!("    L1 FAIL {} — {}", v.name, v.detail));
         }
     }
@@ -593,6 +644,16 @@ fn verify_one(
                 emit(json_mode, format!("    L2 FAIL {} — {}", v.name, v.detail));
             }
         }
+        if !report.access_scoped_empty.is_empty() {
+            emit(
+                json_mode,
+                format!(
+                    "    ({} empty by declared @read, bucketed not FAILed: {})",
+                    report.access_scoped_empty.len(),
+                    report.access_scoped_empty.join("; ")
+                ),
+            );
+        }
 
         // Layer 2 (server) — the SAME render contract driven over real HTTP against a
         // live `orbital-server`, verifying server routes + serialization + client together.
@@ -647,7 +708,7 @@ fn verify_one(
         }
     }
 
-    let ok = l1.ok() && l2.as_ref().is_none_or(|r| r.ok()) && l2_server_ok && shell_ok;
+    let ok = l1_ok && l2.as_ref().is_none_or(|r| r.ok()) && l2_server_ok && shell_ok;
 
     Ok(VerifyOneOutcome {
         ok,
@@ -782,7 +843,8 @@ pub(crate) fn run_screenshot_frames(path: &Path, out_dir: &Path) -> Result<bool>
         anyhow::bail!("no inline traits to walk");
     };
     let trait_name = td.name.clone();
-    let steps = orbital_verify::planner::plan_trait(td);
+    let wl_entities = orbital_verify::planner::entity_names(&schema);
+    let steps = orbital_verify::planner::plan_trait(td, &wl_entities);
 
     let mut frames = Vec::new();
     let mut idx = 0usize;
@@ -829,7 +891,7 @@ pub(crate) fn run_screenshot_frames(path: &Path, out_dir: &Path) -> Result<bool>
     // One hermetic frame per planned transition (replay to `from`, then fire the event).
     for step in steps.iter().take(10) {
         let mut app = build_app()?;
-        if let Some(path) = orbital_verify::planner::replay_path(td, &step.from) {
+        if let Some(path) = orbital_verify::planner::replay_path(td, &step.from, &wl_entities) {
             for (ev, pl) in path {
                 let v = serde_json::from_value(pl).unwrap_or(orbital_core::Value::Null);
                 app.drive_blocking(&ev, Some(&trait_name), v);
@@ -1033,5 +1095,81 @@ mod tests {
         );
         assert_eq!(shell_lang_effective(Tier::Standard, None), None);
         assert_eq!(shell_lang_effective(Tier::Smoke, None), None);
+    }
+}
+
+/// Checks an engine reported that were neither passed nor failed.
+///
+/// `runtime-verify` buckets every result as `pass` / `error` / **`warning`**
+/// (`buildJsonReport`), and `total` counts all three — so a warning-only run
+/// arrives here as `passed 0, failed 0, checks 1`.
+fn unaccounted_checks(er: &engines::EngineReport) -> usize {
+    er.checks.saturating_sub(er.passed + er.failed)
+}
+
+/// The verdict word for one engine's row.
+///
+/// `failed == 0` alone used to print `PASS`, so a warning-only run said
+/// `PASS 0/1 checks` — nothing passed, nothing failed, and the word said green
+/// (`V-RUNTIME-ZERO-CHECK-VERDICT-INCONSISTENT`). A warning is still not a
+/// failure: `engines_green` and the exit code are unchanged, and only the
+/// verdict stops claiming a pass it does not have.
+fn engine_status(er: &engines::EngineReport) -> &'static str {
+    if !er.ran {
+        "ERROR"
+    } else if er.failed > 0 {
+        "FAIL"
+    } else if unaccounted_checks(er) > 0 {
+        "WARN"
+    } else {
+        "PASS"
+    }
+}
+
+#[cfg(test)]
+mod verdict_tests {
+    use super::*;
+
+    fn report(ran: bool, passed: usize, failed: usize, checks: usize) -> engines::EngineReport {
+        engines::EngineReport {
+            engine: "runtime".to_string(),
+            ran,
+            passed,
+            failed,
+            checks,
+            coverage: None,
+            circuit_findings: Vec::new(),
+            error: None,
+        }
+    }
+
+    #[test]
+    fn every_check_passed_is_a_pass() {
+        assert_eq!(engine_status(&report(true, 3, 0, 3)), "PASS");
+        assert_eq!(unaccounted_checks(&report(true, 3, 0, 3)), 0);
+    }
+
+    #[test]
+    fn any_failure_is_a_fail_even_beside_unaccounted_checks() {
+        assert_eq!(engine_status(&report(true, 0, 1, 3)), "FAIL");
+    }
+
+    /// The regression: nothing passed, nothing failed, one check reported.
+    #[test]
+    fn a_warning_only_run_is_warn_not_a_silent_pass() {
+        let er = report(true, 0, 0, 1);
+        assert_eq!(engine_status(&er), "WARN");
+        assert_eq!(unaccounted_checks(&er), 1);
+    }
+
+    #[test]
+    fn an_engine_that_never_ran_outranks_everything() {
+        assert_eq!(engine_status(&report(false, 0, 0, 0)), "ERROR");
+    }
+
+    /// A zero-check run that RAN is vacuously green — no result was withheld.
+    #[test]
+    fn zero_checks_is_not_a_warning() {
+        assert_eq!(engine_status(&report(true, 0, 0, 0)), "PASS");
     }
 }
