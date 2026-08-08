@@ -61,12 +61,15 @@ pub(crate) fn detect_syntax(content: &str) -> InputSyntax {
 }
 
 /// Parse a schema from its raw content, auto-detecting LOLO vs Orb JSON syntax.
-/// For Orb JSON, i18n translation is applied before parsing.
+/// For Orb JSON, i18n translation is applied before parsing. `source_path`
+/// tags `.lolo` parse errors with the real file path (or `"<stdin>"` /
+/// `"<input>"` for callers with no path) instead of a placeholder.
 /// Returns the parsed `OrbitalSchema`.
 pub(crate) fn parse_schema_auto(
     content: &str,
+    source_path: &str,
 ) -> anyhow::Result<orbital_core::schema::OrbitalSchema> {
-    parse_schema_auto_typed(content).map_err(|e| anyhow::anyhow!("{}", e.describe()))
+    parse_schema_auto_typed(content, source_path).map_err(|e| anyhow::anyhow!("{}", e.describe()))
 }
 
 /// Typed parse-error for use by callers that want to map to structured
@@ -81,7 +84,7 @@ impl TypedParseError {
     /// Human-readable single-line message for CLI stderr or anyhow wrappers.
     pub fn describe(&self) -> String {
         match self {
-            TypedParseError::Lolo(e) => format!("LOLO parse error: {}", e.render()),
+            TypedParseError::Lolo(e) => format!("LOLO parse error: {}", e.render_with_hint()),
             TypedParseError::Json(msg) => format!("JSON parse error: {msg}"),
         }
     }
@@ -92,11 +95,12 @@ impl TypedParseError {
 /// when the lowerer's resolver rejected a `::` annotation).
 pub fn parse_schema_auto_typed(
     content: &str,
+    source_path: &str,
 ) -> Result<orbital_core::schema::OrbitalSchema, TypedParseError> {
     use orbital_core::schema::parse_schema;
     match detect_syntax(content) {
         InputSyntax::Lolo => {
-            orbital_lolo::parse_and_lower_str(content).map_err(TypedParseError::Lolo)
+            orbital_lolo::parse_and_lower_str_at(content, source_path).map_err(TypedParseError::Lolo)
         }
         InputSyntax::OrbJson => {
             let translated = translate_schema_content(content);
@@ -108,6 +112,49 @@ pub fn parse_schema_auto_typed(
                 .map_err(|e| TypedParseError::Json(e.to_string()))
         }
     }
+}
+
+/// [`parse_schema_auto_typed`] additionally returning the L2 source map (see
+/// [`orbital_lolo::source_map::LoloSourceMap`]) on the `.lolo` branch; `None`
+/// for `.orb` JSON input (there's no `.lolo` source to map back to).
+pub fn parse_schema_auto_typed_with_map(
+    content: &str,
+    source_path: &str,
+) -> Result<
+    (
+        orbital_core::schema::OrbitalSchema,
+        Option<orbital_lolo::LoloSourceMap>,
+    ),
+    TypedParseError,
+> {
+    use orbital_core::schema::parse_schema;
+    match detect_syntax(content) {
+        InputSyntax::Lolo => orbital_lolo::parse_and_lower_str_with_map(content, source_path)
+            .map(|(schema, map)| (schema, Some(map)))
+            .map_err(TypedParseError::Lolo),
+        InputSyntax::OrbJson => {
+            let translated = translate_schema_content(content);
+            parse_schema(&translated)
+                .map(|mut schema| {
+                    orbital_core::stamp::ensure_stamped(&mut schema);
+                    (schema, None)
+                })
+                .map_err(|e| TypedParseError::Json(e.to_string()))
+        }
+    }
+}
+
+/// [`parse_schema_auto`] additionally returning the L2 source map. See
+/// [`parse_schema_auto_typed_with_map`].
+pub(crate) fn parse_schema_auto_with_map(
+    content: &str,
+    source_path: &str,
+) -> anyhow::Result<(
+    orbital_core::schema::OrbitalSchema,
+    Option<orbital_lolo::LoloSourceMap>,
+)> {
+    parse_schema_auto_typed_with_map(content, source_path)
+        .map_err(|e| anyhow::anyhow!("{}", e.describe()))
 }
 
 /// Map a `TypedParseError` into one or more `ValidationJsonError` rows so
@@ -232,5 +279,35 @@ pub(crate) fn typed_parse_error_to_json(e: &TypedParseError) -> Vec<ValidationJs
             line: None,
             column: None,
         }],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A `.lolo` parse error tagged with the real caller-supplied path must
+    /// render `path:line:col:` (not the `<input>` placeholder), and
+    /// `describe()` must carry the 💡 teaching hint through to CLI stderr.
+    #[test]
+    fn parse_error_renders_with_real_path_and_hint() {
+        // Semicolon comments aren't `.lolo` syntax — a reliable parse error
+        // with a known hint (see LexError::hint).
+        let bad = "orbital X {\n  entity X [runtime] { id : string! } ; oops\n}\n";
+        let err = parse_schema_auto_typed(bad, "foo/bar.lolo")
+            .expect_err("semicolon comment must fail to parse");
+        let TypedParseError::Lolo(lolo_err) = &err else {
+            panic!("expected a Lolo parse error, got: {}", err.describe());
+        };
+        assert!(
+            lolo_err.render().starts_with("foo/bar.lolo:"),
+            "expected real path in render(), got: {}",
+            lolo_err.render()
+        );
+        assert!(
+            err.describe().contains("\u{1f4a1}"),
+            "describe() must carry the teaching hint: {}",
+            err.describe()
+        );
     }
 }

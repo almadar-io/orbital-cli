@@ -8,7 +8,7 @@ pub(crate) fn parse_schema(path: &PathBuf) -> anyhow::Result<()> {
     println!("Parsing schema: {}", path.display());
 
     let content_raw = std::fs::read_to_string(path)?;
-    let schema = parse_schema_auto(&content_raw)?;
+    let schema = parse_schema_auto(&content_raw, &path.display().to_string())?;
 
     println!("\nSchema: {}", schema.name);
     if let Some(version) = &schema.version {
@@ -63,7 +63,7 @@ pub(crate) fn resolve_schema_cli(
 
     let content = std::fs::read_to_string(path)
         .map_err(|e| anyhow::anyhow!("Failed to read {}: {}", path.display(), e))?;
-    let schema = parse_schema_auto(&content)
+    let schema = parse_schema_auto(&content, &path.display().to_string())
         .map_err(|e| anyhow::anyhow!("Failed to parse {}: {}", path.display(), e))?;
     let resolved = resolve_schema_with_path(schema, &options, Some(path))
         .map_err(|e| anyhow::anyhow!("Failed to resolve {}: {}", path.display(), e))?;

@@ -13,7 +13,7 @@ pub(crate) fn simulate_render(
     use std::collections::{HashSet, VecDeque};
 
     let content_raw = std::fs::read_to_string(path)?;
-    let schema = parse_schema_auto(&content_raw)?;
+    let schema = parse_schema_auto(&content_raw, &path.display().to_string())?;
 
     println!("\n🔍 Render Simulation");
     println!("{}", "=".repeat(60));

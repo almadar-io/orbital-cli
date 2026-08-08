@@ -64,12 +64,15 @@ pub(crate) fn compile_schema(
     let compile_path: PathBuf = if is_lolo {
         let schema = if is_lolo_ext {
             // .lolo extension: go straight to the parser, no detection
-            orbital_lolo::parse_and_lower(path)
-                .map_err(|e| anyhow::anyhow!("Failed to compile .lolo source: {}", e.render()))?
+            orbital_lolo::parse_and_lower(path).map_err(|e| {
+                anyhow::anyhow!("Failed to compile .lolo source: {}", e.render_with_hint())
+            })?
         } else {
             // .orb file with LOLO syntax: parse from the already-read content
-            orbital_lolo::parse_and_lower_str(&source_content)
-                .map_err(|e| anyhow::anyhow!("Failed to compile LOLO source: {}", e.render()))?
+            orbital_lolo::parse_and_lower_str_at(&source_content, &path.display().to_string())
+                .map_err(|e| {
+                    anyhow::anyhow!("Failed to compile LOLO source: {}", e.render_with_hint())
+                })?
         };
         if verbose {
             println!(
@@ -348,8 +351,10 @@ fn compile_mixed(
 
     let compile_path = if matches!(detect_syntax(&content_raw), InputSyntax::Lolo) {
         // LOLO syntax in .orb file — lower to JSON temp file
-        let schema = orbital_lolo::parse_and_lower_str(&content_raw)
-            .map_err(|e| anyhow::anyhow!("Failed to compile LOLO source: {}", e.render()))?;
+        let schema = orbital_lolo::parse_and_lower_str_at(&content_raw, &path.display().to_string())
+            .map_err(|e| {
+                anyhow::anyhow!("Failed to compile LOLO source: {}", e.render_with_hint())
+            })?;
         let value = serde_json::to_value(&schema)
             .map_err(|e| anyhow::anyhow!("Failed to serialize lowered schema: {}", e))?;
         let cleaned = strip_json_nulls(value);

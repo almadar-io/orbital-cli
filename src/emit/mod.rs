@@ -81,10 +81,15 @@ pub struct EmitOptions {
 /// Run the emit pipeline end-to-end.
 pub fn run(opts: EmitOptions) -> Result<()> {
     let source = read_input(opts.path.as_deref())?;
+    let source_path = opts
+        .path
+        .as_deref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "<stdin>".to_string());
 
     match opts.target {
-        EmitTarget::Orb => emit_orb(&source, opts.output.as_deref()),
-        EmitTarget::Ts | EmitTarget::Py => emit_code(opts, &source),
+        EmitTarget::Orb => emit_orb(&source, opts.output.as_deref(), &source_path),
+        EmitTarget::Ts | EmitTarget::Py => emit_code(opts, &source, &source_path),
     }
 }
 
@@ -120,7 +125,7 @@ fn write_output(rendered: &str, output: Option<&Path>) -> Result<()> {
 
 // --- Target: orb -----------------------------------------------------------
 
-fn emit_orb(source: &str, output: Option<&Path>) -> Result<()> {
+fn emit_orb(source: &str, output: Option<&Path>, source_path: &str) -> Result<()> {
     // Parse whichever surface the file uses. Mirrors parse_schema_auto_typed
     // from main.rs but reimplemented here to avoid a circular import; the
     // logic is ~5 lines and we want this module to stand on its own.
@@ -133,7 +138,7 @@ fn emit_orb(source: &str, output: Option<&Path>) -> Result<()> {
         .filter(|p| p.exists())
         .and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|s| orbital_core::schema::parse_schema(&s).ok());
-    let schema = parse_any_syntax_with_prior(source, prior.as_ref())?;
+    let schema = parse_any_syntax_with_prior(source, prior.as_ref(), source_path)?;
     let value =
         serde_json::to_value(&schema).map_err(|e| anyhow!("Failed to serialize schema: {}", e))?;
     let cleaned = crate::strip_json_nulls(value);
@@ -144,8 +149,11 @@ fn emit_orb(source: &str, output: Option<&Path>) -> Result<()> {
 
 /// Parse either `.lolo` surface syntax or `.orb` JSON based on first
 /// non-whitespace character. Shared helper; mirrors main.rs's dispatch.
-fn parse_any_syntax(source: &str) -> Result<orbital_core::schema::OrbitalSchema> {
-    parse_any_syntax_with_prior(source, None)
+fn parse_any_syntax(
+    source: &str,
+    source_path: &str,
+) -> Result<orbital_core::schema::OrbitalSchema> {
+    parse_any_syntax_with_prior(source, None, source_path)
 }
 
 /// [`parse_any_syntax`] with a prior schema anchoring id reuse on the `.lolo`
@@ -153,6 +161,7 @@ fn parse_any_syntax(source: &str) -> Result<orbital_core::schema::OrbitalSchema>
 fn parse_any_syntax_with_prior(
     source: &str,
     prior: Option<&orbital_core::schema::OrbitalSchema>,
+    source_path: &str,
 ) -> Result<orbital_core::schema::OrbitalSchema> {
     let first = source
         .trim_start_matches('\u{FEFF}')
@@ -164,15 +173,15 @@ fn parse_any_syntax_with_prior(
         orbital_core::schema::parse_schema(source).map_err(|e| anyhow!("JSON parse error: {}", e))
     } else {
         // Assume `.lolo` surface syntax.
-        orbital_lolo::parse_and_lower_str_with_prior(source, prior)
-            .map_err(|e| anyhow!("LOLO parse error: {}", e.render()))
+        orbital_lolo::parse_and_lower_str_with_prior_at(source, prior, source_path)
+            .map_err(|e| anyhow!("LOLO parse error: {}", e.render_with_hint()))
     }
 }
 
 // --- Target: ts | py -------------------------------------------------------
 
-fn emit_code(opts: EmitOptions, source: &str) -> Result<()> {
-    let schema = parse_any_syntax(source)?;
+fn emit_code(opts: EmitOptions, source: &str, source_path: &str) -> Result<()> {
+    let schema = parse_any_syntax(source, source_path)?;
     let compiler_options = CompilerOptions::from_env();
     let module = compile_schema(schema, &compiler_options)
         .map_err(|e| anyhow!("Schema compilation failed: {}", e))?;

@@ -1,8 +1,8 @@
 //! `orb validate` — native Rust schema validation (text + JSON output).
 
 use crate::utils::{
-    detect_language, load_extra_patterns, load_services_registry, parse_schema_auto,
-    parse_schema_auto_typed, typed_parse_error_to_json,
+    detect_language, load_extra_patterns, load_services_registry, parse_schema_auto_with_map,
+    parse_schema_auto_typed_with_map, typed_parse_error_to_json,
 };
 use crate::{ValidationJsonError, ValidationJsonOutput, ValidationJsonWarning, ValidationStats};
 use std::path::PathBuf;
@@ -68,7 +68,10 @@ fn validate_schema_json(
         }
     };
 
-    let mut schema = match parse_schema_auto_typed(&content_raw) {
+    let (mut schema, source_map) = match parse_schema_auto_typed_with_map(
+        &content_raw,
+        &path.display().to_string(),
+    ) {
         Ok(s) => s,
         Err(e) => {
             // Map parse/lower/type errors into typed `ValidationJsonError`
@@ -199,8 +202,13 @@ fn validate_schema_json(
     let mut all_errors: Vec<ValidationJsonError> = Vec::new();
     let mut all_warnings: Vec<ValidationJsonWarning> = Vec::new();
 
-    // Convert comprehensive validation errors
+    // Convert comprehensive validation errors. When the schema came from
+    // `.lolo`, `source_map` resolves `error.path` (an L2 JSON-pointer-style
+    // path) back to the originating `.lolo` line:col — best-effort (see
+    // `LoloSourceMap::lookup`'s longest-prefix fallback); `.orb` JSON input
+    // carries no map, so line/column stay `None` there.
     for error in &comprehensive_result.errors {
+        let resolved = source_map.as_ref().and_then(|m| m.lookup(&error.path));
         all_errors.push(ValidationJsonError {
             code: error.code.to_string(),
             path: error.path.clone(),
@@ -209,8 +217,8 @@ fn validate_schema_json(
             fix_guidance: error.fix_guidance.clone(),
             expected_shape: error.expected_shape.clone(),
             valid_values: error.valid_values.clone(),
-            line: None,
-            column: None,
+            line: resolved.map(|s| s.line),
+            column: resolved.map(|s| s.col),
         });
     }
 
@@ -324,7 +332,8 @@ pub(crate) fn run_full_validation(
         Some(lang) if lang != "en" => SchemaLanguage::NonLatin(lang),
         _ => SchemaLanguage::English,
     };
-    let mut schema = parse_schema_auto(&content_raw)?;
+    let (mut schema, source_map) =
+        parse_schema_auto_with_map(&content_raw, &path.display().to_string())?;
 
     // Inline + enrich before validation so `uses`-based trait/entity/page refs
     // resolve (otherwise validate_comprehensive_full false-positives on every
@@ -347,11 +356,17 @@ pub(crate) fn run_full_validation(
         &trait_ref_config_diagnostics,
     ));
 
+    // Human path: append ` @ line:col` when the L2 path resolves to a
+    // `.lolo` span (`source_map` is `None` for `.orb` JSON input, and a miss
+    // just leaves the message as-is — same degradations as the `--json` path).
     let mut errors: Vec<String> = comprehensive_result
         .errors
         .iter()
         .map(|e| {
             let mut s = format!("[{}] {}: {}", e.code, e.path, e.message);
+            if let Some(span) = source_map.as_ref().and_then(|m| m.lookup(&e.path)) {
+                s.push_str(&format!(" @ {}:{}", span.line, span.col));
+            }
             if let Some(sug) = &e.suggestion {
                 s.push_str(&format!(" \u{1f4a1} {sug}"));
             }
@@ -363,6 +378,9 @@ pub(crate) fn run_full_validation(
         .iter()
         .map(|w| {
             let mut s = format!("[{}] {}: {}", w.code, w.path, w.message);
+            if let Some(span) = source_map.as_ref().and_then(|m| m.lookup(&w.path)) {
+                s.push_str(&format!(" @ {}:{}", span.line, span.col));
+            }
             if let Some(sug) = &w.suggestion {
                 s.push_str(&format!(" \u{1f4a1} {sug}"));
             }
