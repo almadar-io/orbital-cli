@@ -82,7 +82,7 @@ fn validate_schema_json(
             let output = ValidationJsonOutput {
                 success: true,
                 valid: false,
-                errors: Some(typed_parse_error_to_json(&e)),
+                errors: Some(typed_parse_error_to_json(&e, Some(&content_raw))),
                 warnings: None,
                 stats: None,
             };

@@ -160,7 +160,10 @@ pub(crate) fn parse_schema_auto_with_map(
 /// Map a `TypedParseError` into one or more `ValidationJsonError` rows so
 /// `orbital validate --json` can surface typed codes. The hint format
 /// matches the 💡-style suggestion column used by the rest of the validator.
-pub(crate) fn typed_parse_error_to_json(e: &TypedParseError) -> Vec<ValidationJsonError> {
+pub(crate) fn typed_parse_error_to_json(
+    e: &TypedParseError,
+    source: Option<&str>,
+) -> Vec<ValidationJsonError> {
     use orbital_lolo::error::TypeError;
     use orbital_lolo::{LoloError, LowerError};
 
@@ -189,7 +192,35 @@ pub(crate) fn typed_parse_error_to_json(e: &TypedParseError) -> Vec<ValidationJs
         }],
         TypedParseError::Lolo(LoloError::Parse { path, inner }) => {
             let span = inner.span();
-            let (suggestion, fix_guidance) = inner.hint();
+            // A `//` "comment" is not lexable: the lexer walks INTO the
+            // comment text and reports the first illegal character it meets
+            // (an apostrophe in prose, a `?`, …) — a token-level hint about
+            // THAT character misdirects (observed: the single-quote hint sent
+            // a model rewriting comment prose instead of the `//`). When the
+            // error line itself is a `//` comment, the line-grounded fact
+            // outranks any token hint.
+            let source_grounded = source.and_then(|s| {
+                let msg = format!("{inner}");
+                slash_comment_line_hint(s, span.line as usize)
+                    .or_else(|| {
+                        if msg.contains("object key expected, got LParen") {
+                            js_call_syntax_hint(s, span.line as usize, span.col as usize)
+                        } else {
+                            None
+                        }
+                    })
+                    .or_else(|| {
+                        if msg.contains("unexpected token in s-expression: Colon") {
+                            swallowed_block_entry_hint(s, span.line as usize)
+                        } else {
+                            None
+                        }
+                    })
+            });
+            let (suggestion, fix_guidance) = match source_grounded {
+                Some((s, f)) => (Some(s), Some(f)),
+                None => inner.hint(),
+            };
             vec![ValidationJsonError {
                 code: "LOLO_PARSE_ERROR".to_string(),
                 path: format!("{path}:{}:{}", span.line, span.col),
@@ -209,9 +240,15 @@ pub(crate) fn typed_parse_error_to_json(e: &TypedParseError) -> Vec<ValidationJs
             let span = te.span();
             let path_loc = format!("{path}:{}:{}", span.line, span.col);
             let (code, suggestion) = match te {
-                TypeError::UnknownType { suggestion, .. } => (
+                TypeError::UnknownType { suggestion, name, .. } => (
                     "ORB_T_TYPE_UNKNOWN",
-                    suggestion.as_ref().map(|s| format!("did you mean {s:?}?")),
+                    Some(match (suggestion, foreign_type_translation(name)) {
+                        (Some(s), _) => format!("did you mean {s:?}?"),
+                        (None, Some(t)) => t.to_string(),
+                        (None, None) => format!(
+                            "no type named {name:?} is declared — declare it at orbital level (`type {name} = {{ field : type … }}`), or use a primitive (string/number/boolean/any) or a declared type/entity name"
+                        ),
+                    }),
                 ),
                 TypeError::CircularType { .. } => (
                     "ORB_T_TYPE_CYCLE",
@@ -309,5 +346,84 @@ mod tests {
             "describe() must carry the teaching hint: {}",
             err.describe()
         );
+    }
+}
+
+/// Deterministic translation for type names imported from mainstream
+/// languages — the constructive declare-it fallback is wrong advice for
+/// these (a model writing `array` wants `[ElementType]`, not a new alias).
+fn foreign_type_translation(name: &str) -> Option<&'static str> {
+    match name {
+        "array" | "Array" | "list" | "List" => {
+            Some("a list type is written `[ElementType]` — e.g. `[string]`, `[number]`, or `[MyType]`")
+        }
+        "int" | "integer" | "Int" | "float" | "double" | "Number" => {
+            Some("numeric fields use the `number` type")
+        }
+        "bool" | "Bool" | "Boolean" => Some("use `boolean`"),
+        "str" | "String" => Some("use `string`"),
+        "object" | "Object" | "dict" | "Dict" | "map" | "Map" | "Record" => {
+            Some("declare a shaped type at orbital level (`type Name = { field : type … }`) and use it, or use `any`")
+        }
+        _ => None,
+    }
+}
+
+/// When the parse/lex error's line is itself a `//` comment, the real defect
+/// is the comment marker, not whatever character the lexer tripped on inside
+/// the comment prose. Line-grounded and deterministic: reads the exact line.
+fn slash_comment_line_hint(source: &str, line: usize) -> Option<(String, String)> {
+    let text = source.lines().nth(line.checked_sub(1)?)?;
+    if text.trim_start().starts_with("//") {
+        Some((
+            "this line is a `//` comment — `.lolo` has no `//` comments; they start with `;;`"
+                .to_string(),
+            "replace the leading `//` with `;;` on every comment line (or delete the comment)"
+                .to_string(),
+        ))
+    } else {
+        None
+    }
+}
+
+/// `uuid()` / `now()` — JS call syntax in value position. The discriminator is
+/// textual and exact: the reported column points at the `(`, and an identifier
+/// character immediately before it means a glued `name(...)` call (a legal
+/// `.lolo` `(operator …)` always has whitespace, `{`, `[`, or `(` before its
+/// opening paren).
+fn js_call_syntax_hint(source: &str, line: usize, col: usize) -> Option<(String, String)> {
+    let text = source.lines().nth(line.checked_sub(1)?)?;
+    let before = text.chars().nth(col.checked_sub(2)?)?;
+    if before.is_ascii_alphanumeric() || before == '_' {
+        Some((
+            "`name(…)` is JS call syntax — `.lolo` operators are prefix s-expressions: `(operator arg …)`"
+                .to_string(),
+            "write `(time/now)` not `now()`; entity ids are auto-generated — omit `id:` from `persist create` payloads (idiom: `persist create Entity ?data { emit: { … } }`)"
+                .to_string(),
+        ))
+    } else {
+        None
+    }
+}
+
+/// A colon inside an s-expression, where the error LINE is itself a plain
+/// `key: value` block entry (config/object member): an earlier `(` is missing
+/// its `)`, so the parser consumed past the effect into the next block — the
+/// reported line is the victim, not the culprit. Gated on the line shape so a
+/// genuine in-call colon (named-argument habit) never gets this hint.
+fn swallowed_block_entry_hint(source: &str, line: usize) -> Option<(String, String)> {
+    let text = source.lines().nth(line.checked_sub(1)?)?;
+    let trimmed = text.trim_start();
+    let ident_len = trimmed
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .count();
+    if ident_len > 0 && trimmed[ident_len..].trim_start().starts_with(':') {
+        Some((
+            "this `key: value` line is fine — the parser was still INSIDE an s-expression when it got here, because an earlier `(` above is missing its `)`".to_string(),
+            "re-count parens in the effect ABOVE this line and add the missing `)` there".to_string(),
+        ))
+    } else {
+        None
     }
 }

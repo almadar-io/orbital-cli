@@ -68,13 +68,104 @@ fn semicolon_comment_gets_hint() {
     let result = validate_lolo(lolo, "semicolon");
     let err = first_parse_error(&result);
     assert_eq!(err["code"], "LOLO_PARSE_ERROR");
-    assert!(err["suggestion"].as_str().unwrap().contains("`;`"));
+    assert!(err["suggestion"].as_str().unwrap().contains("`;;`"));
     assert!(err["fixGuidance"]
         .as_str()
         .unwrap()
-        .contains("trailing text"));
+        .contains("stray `;`"));
     assert_eq!(err["line"], 7);
     assert!(err["column"].as_u64().unwrap() > 0);
+}
+
+#[test]
+fn lex_error_inside_slash_comment_gets_comment_hint() {
+    // The lexer dies on the apostrophe INSIDE the comment prose; the
+    // single-quote hint ("strings are double-quoted") misdirects — the
+    // line-grounded `//`-comment hint must win (C-COMMENT-SLASH lex shape).
+    let lolo = r#"orbital X {
+  entity X [runtime] { id : string! }
+  trait T -> X [interaction] {
+    initial: idle
+    state idle {
+      // We'll assume the graph can handle it.
+      INIT -> idle
+        (set @entity.id "a")
+    }
+  }
+  page "/" as P -> T
+}"#;
+
+    let result = validate_lolo(lolo, "slash-comment-lex");
+    let err = first_parse_error(&result);
+    assert_eq!(err["code"], "LOLO_PARSE_ERROR");
+    assert!(err["suggestion"].as_str().unwrap().contains("`;;`"));
+    assert!(err["fixGuidance"]
+        .as_str()
+        .unwrap()
+        .contains("replace the leading `//` with `;;`"));
+    assert_eq!(err["line"], 6);
+}
+
+#[test]
+fn js_call_syntax_in_object_value_gets_prefix_operator_hint() {
+    // `id: uuid(), timestamp: now()` — JS call syntax in value position. The
+    // parser reports "object key expected, got LParen", whose default hint
+    // (brace-lambda-body) misdirects; the identifier char glued to the `(`
+    // disambiguates (C-CALL-SYNTAX).
+    let lolo = r#"orbital X {
+  entity X [runtime] { id : string! }
+  trait T -> X [interaction] {
+    initial: idle
+    state idle {
+      INIT -> idle
+        (persist create X { id: uuid(), ts: now() } {
+          emit: { success: Saved }
+        })
+    }
+  }
+  page "/" as P -> T
+}"#;
+
+    let result = validate_lolo(lolo, "js-call-syntax");
+    let err = first_parse_error(&result);
+    assert_eq!(err["code"], "LOLO_PARSE_ERROR");
+    assert!(err["suggestion"]
+        .as_str()
+        .unwrap()
+        .contains("prefix s-expressions"));
+    assert!(err["fixGuidance"].as_str().unwrap().contains("(time/now)"));
+}
+
+#[test]
+fn colon_after_unclosed_paren_gets_swallowed_block_hint() {
+    // The object value's s-expression is missing its `)`, so the parser
+    // consumes the next `key: value` line and dies on its colon — the victim
+    // line, not the culprit (Run 19). (With a `}` between, UnclosedDelimiter
+    // fires instead — that shape has its own hint.)
+    let lolo = r#"orbital X {
+  entity X [runtime] { id : string! }
+  trait T -> X [interaction] {
+    initial: idle
+    state idle {
+      INIT -> idle
+        (render-ui main {
+          type: stack
+          gap: (array/len @entity.id
+          title: "Edit Topic"
+        })
+    }
+  }
+  page "/" as P -> T
+}"#;
+
+    let result = validate_lolo(lolo, "swallowed-block");
+    let err = first_parse_error(&result);
+    assert_eq!(err["code"], "LOLO_PARSE_ERROR");
+    assert!(err["suggestion"]
+        .as_str()
+        .unwrap()
+        .contains("missing its `)`"));
+    assert!(err["fixGuidance"].as_str().unwrap().contains("ABOVE"));
 }
 
 #[test]
