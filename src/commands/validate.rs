@@ -142,6 +142,37 @@ fn validate_schema_json(
                 std::env::var("ALMADAR_DEV").map(|v| !v.is_empty()).unwrap_or(false),
             ));
         }
+        // Import-carrying loader errors have no spans, but the failing
+        // import string appears verbatim on a `uses` line — locate it so
+        // the agent has an edit anchor (run 36: an invented import stalled
+        // 4 repair rounds at line null).
+        let import_needle = match &e {
+            InlineError::Loader(LoaderError::InvalidPrimitiveImport(s)) => Some(s.clone()),
+            InlineError::Loader(LoaderError::StdImportNotCanonical { given, .. }) => {
+                Some(given.clone())
+            }
+            _ => None,
+        };
+        let (inline_line, inline_column) = import_needle
+            .and_then(|needle| {
+                let src = std::fs::read_to_string(&path).ok()?;
+                let find = |n: &str| {
+                    src.lines().enumerate().find_map(|(i, l)| {
+                        l.find(n).map(|c| (Some((i + 1) as u32), Some((c + 1) as u32)))
+                    })
+                };
+                // The loader may have normalized the path before failing
+                // (`@std/graphs/X` reported as `std/behaviors/X`), so fall
+                // back to the last path segment, which survives rewriting.
+                find(&needle).or_else(|| {
+                    needle
+                        .rsplit('/')
+                        .next()
+                        .filter(|seg| !seg.is_empty())
+                        .and_then(|seg| find(seg))
+                })
+            })
+            .unwrap_or((None, None));
         let output = ValidationJsonOutput {
             success: true,
             valid: false,
@@ -160,8 +191,8 @@ fn validate_schema_json(
                 fix_guidance: None,
                 expected_shape: None,
                 valid_values: None,
-                line: None,
-                column: None,
+                line: inline_line,
+                column: inline_column,
             }]),
             warnings: None,
             stats: None,
@@ -207,18 +238,67 @@ fn validate_schema_json(
     // path) back to the originating `.lolo` line:col — best-effort (see
     // `LoloSourceMap::lookup`'s longest-prefix fallback); `.orb` JSON input
     // carries no map, so line/column stay `None` there.
+    let source_text: Option<String> = source_map
+        .as_ref()
+        .and_then(|_| std::fs::read_to_string(&path).ok());
     for error in &comprehensive_result.errors {
-        let resolved = source_map.as_ref().and_then(|m| m.lookup(&error.path));
+        let resolved = source_map
+            .as_ref()
+            .and_then(|m| m.lookup_detailed(&error.path));
+        // Last-resort anchor when the path has no map entry at all (config
+        // referrer chains, cross-orbital codes — run 37: ORB_CONFIG_DANGLING_REF
+        // at line null stalled a session; C-LINE-BLIND family): our messages
+        // quote the offending token in backticks, and its first source
+        // occurrence is a deterministic edit anchor.
+        let quoted_anchor = if resolved.is_none() {
+            source_text.as_ref().and_then(|src| {
+                let msg = &error.message;
+                let start = msg.find('`')? + 1;
+                let end = start + msg[start..].find('`')?;
+                let token = &msg[start..end];
+                if token.is_empty() {
+                    return None;
+                }
+                src.lines().enumerate().find_map(|(i, l)| {
+                    l.find(token).map(|c| (i as u32 + 1, c as u32 + 1))
+                })
+            })
+        } else {
+            None
+        };
+        // A longest-prefix fallback span points at the nearest tracked
+        // ancestor — for expressions spliced in by the inline phase (config
+        // defaults, `@trait.X` references) that line contains only the
+        // REFERENCE, not the failing expression, and an agent staring at it
+        // spins (C-INLINE-SPLICE-LOCATION). Say so instead of implying
+        // exactness.
+        let fix_guidance = match resolved {
+            Some((_, false)) => {
+                let note = "Location is approximate (nearest tracked source line). If the shown line only references a config knob or another trait, the failing expression lives where that value is DECLARED (e.g. the trait's config block default) — search the file for the expression named in the message.";
+                Some(match &error.fix_guidance {
+                    Some(existing) => format!("{existing} {note}"),
+                    None => note.to_string(),
+                })
+            }
+            None if quoted_anchor.is_some() => {
+                let note = "Line points at the FIRST occurrence of the quoted token — other occurrences may need the same fix.";
+                Some(match &error.fix_guidance {
+                    Some(existing) => format!("{existing} {note}"),
+                    None => note.to_string(),
+                })
+            }
+            _ => error.fix_guidance.clone(),
+        };
         all_errors.push(ValidationJsonError {
             code: error.code.to_string(),
             path: error.path.clone(),
             message: error.message.clone(),
             suggestion: error.suggestion.clone(),
-            fix_guidance: error.fix_guidance.clone(),
+            fix_guidance,
             expected_shape: error.expected_shape.clone(),
             valid_values: error.valid_values.clone(),
-            line: resolved.map(|s| s.line),
-            column: resolved.map(|s| s.col),
+            line: resolved.map(|(s, _)| s.line).or(quoted_anchor.map(|(l, _)| l)),
+            column: resolved.map(|(s, _)| s.col).or(quoted_anchor.map(|(_, c)| c)),
         });
     }
 
