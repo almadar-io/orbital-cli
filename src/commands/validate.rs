@@ -177,7 +177,11 @@ fn validate_schema_json(
             success: true,
             valid: false,
             errors: Some(vec![ValidationJsonError {
-                code: if is_infra { "INLINE_INFRA_ERROR" } else { "INLINE_ERROR" }.to_string(),
+                code: if is_infra {
+                    "INLINE_INFRA_ERROR".to_string()
+                } else {
+                    e.structured_code().to_string()
+                },
                 path: inline_path,
                 message: inline_message,
                 suggestion: Some(
@@ -422,12 +426,30 @@ pub(crate) fn run_full_validation(
     // rebuild + rebake.
     let default_opts = CompilerOptions::from_env();
     let mut trait_ref_config_diagnostics = Vec::new();
-    let _ = inline_schema_with_config_diagnostics(
+    // An inline failure is FATAL for this run: validators index Inline traits
+    // only, so validating the half-inlined schema manufactures spurious
+    // ORB_T_UNDEFINED_TRAIT / ORB_X_LISTEN_SOURCE_UNRESOLVED findings that
+    // bury the real cause. Report the one true error and stop.
+    if let Err(e) = inline_schema_with_config_diagnostics(
         &mut schema,
         &default_opts.inline,
         Some(path),
         &mut trait_ref_config_diagnostics,
-    );
+    ) {
+        let path_part = match e.structured_path() {
+            "" => String::new(),
+            p => format!(" {p}:"),
+        };
+        return Ok(ValidationDiagnostics {
+            errors: vec![format!(
+                "[{}]{} {} (schema not fully resolved — downstream validation suppressed until this is fixed)",
+                e.structured_code(),
+                path_part,
+                e
+            )],
+            warnings: Vec::new(),
+        });
+    }
     enrich_schema(&mut schema, &default_opts.enrichment);
 
     let mut comprehensive_result =
