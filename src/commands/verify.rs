@@ -270,7 +270,10 @@ fn run_verify_all_personas(targets: &[PathBuf]) -> Result<()> {
             continue;
         }
 
-        println!("\n{item} --all-personas ({} declared persona(s)):", roster.len());
+        println!(
+            "\n{item} --all-personas ({} declared persona(s)):",
+            roster.len()
+        );
         let mut item_ok = true;
         for persona in &roster {
             let label = persona_label(persona);
@@ -338,7 +341,10 @@ fn run_verify_all_personas(targets: &[PathBuf]) -> Result<()> {
 
 /// `"<id>/<role>"`, or just `<id>` when the roster row declares no role.
 fn persona_label(persona: &orbital_core::Value) -> String {
-    let id = persona.get_path("id").and_then(|v| v.as_str()).unwrap_or("?");
+    let id = persona
+        .get_path("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("?");
     match persona.get_path("role").and_then(|v| v.as_str()) {
         Some(role) => format!("{id}/{role}"),
         None => id.to_string(),
@@ -755,6 +761,9 @@ fn emit_shell_to_tmp(path: &Path, lang: orbital_verify::shell::ShellLang) -> Res
     std::fs::create_dir_all(&tmp_dir)?;
 
     let options = GenerateOptions {
+        // from_env, not Default — same dev-registry rule as `orb compile`
+        // (C-COMPILE-IGNORES-DEV-REGISTRIES).
+        compiler: orbital_compiler::CompilerOptions::from_env(),
         copy_template: true,
         clean: false,
         verbose: false,

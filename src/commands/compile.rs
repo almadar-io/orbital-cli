@@ -131,6 +131,11 @@ pub(crate) fn compile_schema(
         .map_err(|e| anyhow::anyhow!("Failed to read schema file: {}", e))?;
 
     let options = GenerateOptions {
+        // from_env, not Default: `orb compile` must honor the ALMADAR_DEV
+        // live-workspace registries exactly like `orb emit` — a Default here
+        // silently compiled against the STALE baked registries in dev
+        // (C-COMPILE-IGNORES-DEV-REGISTRIES).
+        compiler: orbital_compiler::CompilerOptions::from_env(),
         copy_template: true,
         clean: false,
         verbose,
@@ -351,10 +356,11 @@ fn compile_mixed(
 
     let compile_path = if matches!(detect_syntax(&content_raw), InputSyntax::Lolo) {
         // LOLO syntax in .orb file — lower to JSON temp file
-        let schema = orbital_lolo::parse_and_lower_str_at(&content_raw, &path.display().to_string())
-            .map_err(|e| {
-                anyhow::anyhow!("Failed to compile LOLO source: {}", e.render_with_hint())
-            })?;
+        let schema =
+            orbital_lolo::parse_and_lower_str_at(&content_raw, &path.display().to_string())
+                .map_err(|e| {
+                    anyhow::anyhow!("Failed to compile LOLO source: {}", e.render_with_hint())
+                })?;
         let value = serde_json::to_value(&schema)
             .map_err(|e| anyhow::anyhow!("Failed to serialize lowered schema: {}", e))?;
         let cleaned = strip_json_nulls(value);
@@ -391,6 +397,7 @@ fn compile_mixed(
         );
 
         let options = GenerateOptions {
+            compiler: orbital_compiler::CompilerOptions::from_env(),
             copy_template: true,
             clean: false,
             verbose,
@@ -488,6 +495,7 @@ fn compile_mixed(
         );
 
         let options = GenerateOptions {
+            compiler: orbital_compiler::CompilerOptions::from_env(),
             copy_template: true,
             clean: false,
             verbose,
