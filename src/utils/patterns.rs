@@ -101,12 +101,18 @@ pub(crate) fn load_services_registry(
 ) -> std::collections::HashMap<String, std::collections::HashSet<String>> {
     use std::collections::{HashMap, HashSet};
 
+    // Precedence: --services > live CWD registry (in-repo dev picks up a fresh
+    // `almadar-sync services` with no rebuild) > baked copy in the binary
+    // (itself overridable via ORBITAL_SERVICES_JSON / ORBITAL_BAKED_DIR).
     let registry_path = if let Some(p) = explicit_path {
         if p.exists() {
-            p.to_path_buf()
+            Some(p.to_path_buf())
         } else {
-            eprintln!("Warning: services registry not found: {}", p.display());
-            return HashMap::new();
+            eprintln!(
+                "Warning: services registry not found: {} — falling back to the baked registry",
+                p.display()
+            );
+            None
         }
     } else {
         // Auto-discover: check well-known locations in the repo. The
@@ -117,24 +123,24 @@ pub(crate) fn load_services_registry(
             std::path::PathBuf::from("packages/almadar-core/src/patterns/services-registry.json"),
             std::path::PathBuf::from("packages/almadar-patterns/src/services-registry.json"),
         ];
-        match candidates.into_iter().find(|p| p.exists()) {
-            Some(p) => p,
-            None => {
-                eprintln!(
-                    "WARNING: services registry not found (looked for packages/almadar-core/src/patterns/services-registry.json and the legacy almadar-patterns path). \
-                     call-service validation will NOT check service/action names — this is a silent no-op, not a pass. \
-                     Pass --services explicitly if the registry lives elsewhere."
-                );
-                return HashMap::new();
-            }
-        }
+        candidates.into_iter().find(|p| p.exists())
+    };
+
+    let Some(registry_path) = registry_path else {
+        let baked = orbital_compiler::embedded::baked_service_actions().clone();
+        eprintln!("Loaded {} services from the baked registry", baked.len());
+        return baked;
     };
 
     let content = match std::fs::read_to_string(&registry_path) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("Warning: could not read {}: {}", registry_path.display(), e);
-            return HashMap::new();
+            eprintln!(
+                "Warning: could not read {}: {} — falling back to the baked registry",
+                registry_path.display(),
+                e
+            );
+            return orbital_compiler::embedded::baked_service_actions().clone();
         }
     };
 
@@ -142,11 +148,11 @@ pub(crate) fn load_services_registry(
         Ok(v) => v,
         Err(e) => {
             eprintln!(
-                "Warning: invalid JSON in {}: {}",
+                "Warning: invalid JSON in {}: {} — falling back to the baked registry",
                 registry_path.display(),
                 e
             );
-            return HashMap::new();
+            return orbital_compiler::embedded::baked_service_actions().clone();
         }
     };
 
@@ -162,25 +168,25 @@ pub(crate) fn load_services_registry(
                     }
                 }
             }
-            if !actions.is_empty() {
-                service_actions.insert(service_name.clone(), actions);
-            }
+            // Declared-only services (host-injected handlers, no static
+            // contract) carry an EMPTY set: name known, actions unchecked.
+            service_actions.insert(service_name.clone(), actions);
         }
     }
 
     if service_actions.is_empty() {
         eprintln!(
-            "WARNING: services registry at {} loaded but contained no services with actions — \
-             call-service validation will NOT check service/action names.",
+            "Warning: services registry at {} loaded but contained no services — falling back to the baked registry",
             registry_path.display()
         );
-    } else {
-        eprintln!(
-            "Loaded {} services from {}",
-            service_actions.len(),
-            registry_path.display()
-        );
+        return orbital_compiler::embedded::baked_service_actions().clone();
     }
+
+    eprintln!(
+        "Loaded {} services from {}",
+        service_actions.len(),
+        registry_path.display()
+    );
 
     service_actions
 }
