@@ -18,23 +18,23 @@ pub(crate) fn validate_schema(
     let extra_patterns = load_extra_patterns(path, patterns_path);
 
     // Load services registry (explicit path or auto-discover)
-    let service_actions = load_services_registry(services_path);
+    let service_registry = load_services_registry(services_path);
 
     if json_output {
-        return validate_schema_json(path, extra_patterns, service_actions);
+        return validate_schema_json(path, extra_patterns, service_registry);
     }
 
     println!("Validating schema: {}", path.display());
 
     // Use native Rust validation only
-    validate_schema_native(path, extra_patterns, service_actions)
+    validate_schema_native(path, extra_patterns, service_registry)
 }
 
 /// Validate schema with JSON output (for programmatic consumption by DeepAgent)
 fn validate_schema_json(
     path: &PathBuf,
     extra_patterns: Option<orbital_compiler::ExtraPatterns>,
-    service_actions: std::collections::HashMap<String, std::collections::HashSet<String>>,
+    service_registry: orbital_compiler::embedded::ServiceRegistryData,
 ) -> anyhow::Result<()> {
     use orbital_compiler::phases::inline::inline_schema_with_config_diagnostics;
     use orbital_compiler::phases::validation::trait_ref_config::validate_trait_ref_config_diagnostics;
@@ -229,7 +229,7 @@ fn validate_schema_json(
         _ => orbital_compiler::SchemaLanguage::English,
     };
     let mut comprehensive_result =
-        validate_comprehensive_full(&schema, extra_patterns, schema_language, service_actions);
+        validate_comprehensive_full(&schema, extra_patterns, schema_language, service_registry);
     comprehensive_result.merge(validate_trait_ref_config_diagnostics(
         &trait_ref_config_diagnostics,
     ));
@@ -397,11 +397,11 @@ pub(crate) struct ValidationDiagnostics {
 /// `orb validate` runs: parse -> inline -> enrich -> `validate_comprehensive_full`
 /// -> compile to OIR -> `OirValidator`. Returns collected diagnostics; never
 /// bails on validation errors (those live in `errors`), only on I/O failures.
-/// `extra_patterns` / `service_actions` mirror the `orb validate` inputs.
+/// `extra_patterns` / `service_registry` mirror the `orb validate` inputs.
 pub(crate) fn run_full_validation(
     path: &std::path::Path,
     extra_patterns: Option<orbital_compiler::ExtraPatterns>,
-    service_actions: std::collections::HashMap<String, std::collections::HashSet<String>>,
+    service_registry: orbital_compiler::embedded::ServiceRegistryData,
 ) -> anyhow::Result<ValidationDiagnostics> {
     use orbital_compiler::phases::enrich_schema;
     use orbital_compiler::phases::inline::inline_schema_with_config_diagnostics;
@@ -453,7 +453,7 @@ pub(crate) fn run_full_validation(
     enrich_schema(&mut schema, &default_opts.enrichment);
 
     let mut comprehensive_result =
-        validate_comprehensive_full(&schema, extra_patterns, schema_language, service_actions);
+        validate_comprehensive_full(&schema, extra_patterns, schema_language, service_registry);
     comprehensive_result.merge(validate_trait_ref_config_diagnostics(
         &trait_ref_config_diagnostics,
     ));
@@ -522,9 +522,9 @@ pub(crate) fn run_full_validation(
 fn validate_schema_native(
     path: &PathBuf,
     extra_patterns: Option<orbital_compiler::ExtraPatterns>,
-    service_actions: std::collections::HashMap<String, std::collections::HashSet<String>>,
+    service_registry: orbital_compiler::embedded::ServiceRegistryData,
 ) -> anyhow::Result<()> {
-    let diags = run_full_validation(path, extra_patterns, service_actions)?;
+    let diags = run_full_validation(path, extra_patterns, service_registry)?;
 
     if !diags.errors.is_empty() {
         eprintln!("Schema validation errors:");

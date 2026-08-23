@@ -95,12 +95,11 @@ pub(crate) fn load_extra_patterns(
 }
 
 /// Load services registry from services-registry.json.
-/// Returns a HashMap mapping service name → set of valid action names.
+/// Returns both validation projections (action names + per-action param
+/// contracts) parsed from ONE source, so they can never drift.
 pub(crate) fn load_services_registry(
     explicit_path: Option<&std::path::Path>,
-) -> std::collections::HashMap<String, std::collections::HashSet<String>> {
-    use std::collections::{HashMap, HashSet};
-
+) -> orbital_compiler::embedded::ServiceRegistryData {
     // Precedence: --services > live CWD registry (in-repo dev picks up a fresh
     // `almadar-sync services` with no rebuild) > baked copy in the binary
     // (itself overridable via ORBITAL_SERVICES_JSON / ORBITAL_BAKED_DIR).
@@ -127,8 +126,8 @@ pub(crate) fn load_services_registry(
     };
 
     let Some(registry_path) = registry_path else {
-        let baked = orbital_compiler::embedded::baked_service_actions().clone();
-        eprintln!("Loaded {} services from the baked registry", baked.len());
+        let baked = orbital_compiler::embedded::baked_service_registry().clone();
+        eprintln!("Loaded {} services from the baked registry", baked.actions.len());
         return baked;
     };
 
@@ -140,55 +139,37 @@ pub(crate) fn load_services_registry(
                 registry_path.display(),
                 e
             );
-            return orbital_compiler::embedded::baked_service_actions().clone();
+            return orbital_compiler::embedded::baked_service_registry().clone();
         }
     };
 
-    let json: serde_json::Value = match serde_json::from_str(&content) {
-        Ok(v) => v,
+    let data = match orbital_compiler::embedded::parse_service_registry_data(&content) {
+        Ok(d) => d,
         Err(e) => {
             eprintln!(
                 "Warning: invalid JSON in {}: {} — falling back to the baked registry",
                 registry_path.display(),
                 e
             );
-            return orbital_compiler::embedded::baked_service_actions().clone();
+            return orbital_compiler::embedded::baked_service_registry().clone();
         }
     };
 
-    let mut service_actions: HashMap<String, HashSet<String>> = HashMap::new();
-
-    if let Some(services) = json.get("services").and_then(|v| v.as_object()) {
-        for (service_name, service_def) in services {
-            let mut actions = HashSet::new();
-            if let Some(action_list) = service_def.get("actions").and_then(|v| v.as_array()) {
-                for action in action_list {
-                    if let Some(name) = action.get("name").and_then(|v| v.as_str()) {
-                        actions.insert(name.to_string());
-                    }
-                }
-            }
-            // Declared-only services (host-injected handlers, no static
-            // contract) carry an EMPTY set: name known, actions unchecked.
-            service_actions.insert(service_name.clone(), actions);
-        }
-    }
-
-    if service_actions.is_empty() {
+    if data.actions.is_empty() {
         eprintln!(
             "Warning: services registry at {} loaded but contained no services — falling back to the baked registry",
             registry_path.display()
         );
-        return orbital_compiler::embedded::baked_service_actions().clone();
+        return orbital_compiler::embedded::baked_service_registry().clone();
     }
 
     eprintln!(
         "Loaded {} services from {}",
-        service_actions.len(),
+        data.actions.len(),
         registry_path.display()
     );
 
-    service_actions
+    data
 }
 
 /// Load project-specific component mappings from patterns.json for code generation.

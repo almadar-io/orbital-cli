@@ -528,9 +528,9 @@ fn verify_one(
     // (`run_full_validation`) with `orb validate`; the two can never diverge.
     {
         let extra_patterns = crate::utils::load_extra_patterns(path, None);
-        let service_actions = crate::utils::load_services_registry(None);
+        let service_registry = crate::utils::load_services_registry(None);
         let l0 =
-            crate::commands::validate::run_full_validation(path, extra_patterns, service_actions)?;
+            crate::commands::validate::run_full_validation(path, extra_patterns, service_registry)?;
         let l0_ok = l0.errors.is_empty();
         let l0_icon = if l0_ok { "✓" } else { "✗" };
         emit(
