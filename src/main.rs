@@ -842,18 +842,22 @@ fn main() -> anyhow::Result<()> {
             map,
         }),
         Some(Commands::EmitTrace { position }) => emit::trace::run(&position),
-        // No subcommand: the free-prompt agent fallback is DISABLED (user
-        // decision 2026-07-17) — unknown input must never silently spawn the
-        // agent. Set ORB_AGENT_FALLBACK=1 to opt back in explicitly.
+        // No subcommand: a truly bare `orb` (no trailing words) spawns the
+        // interactive agent again (user decision 2026-08-27, reversing part
+        // of 2026-07-17's blanket disable). Unmatched/typo'd input (non-empty
+        // `cli.prompt`) still must never silently become an agent prompt —
+        // that case stays gated behind ORB_AGENT_FALLBACK=1.
         None => {
             if cli.list {
                 spawn_agent_with_args(&["status"])
-            } else if std::env::var("ORB_AGENT_FALLBACK").is_ok_and(|v| v == "1") {
+            } else if cli.prompt.is_empty()
+                || std::env::var("ORB_AGENT_FALLBACK").is_ok_and(|v| v == "1")
+            {
                 spawn_agent(&cli)
             } else {
                 anyhow::bail!(
-                    "unknown command{}. The free-prompt agent fallback is disabled — run `orb --help` for commands, or set ORB_AGENT_FALLBACK=1 to opt in.",
-                    if cli.prompt.is_empty() { String::new() } else { format!(" {:?}", cli.prompt.join(" ")) }
+                    "unknown command {:?}. The free-prompt agent fallback is disabled for unmatched input — run `orb --help` for commands, or set ORB_AGENT_FALLBACK=1 to opt in.",
+                    cli.prompt.join(" ")
                 )
             }
         }
