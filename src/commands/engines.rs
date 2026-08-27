@@ -397,6 +397,14 @@ fn build_command(resolved: ResolvedCommand, args: &[String]) -> Command {
 /// `ORBITAL_BIN` points the node engines back at THIS binary (so they never shell
 /// out to a stale installed `orb`); `ALMADAR_DEV`/`ALMADAR_ROOT` are inherited so
 /// the dev-workspace registry resolution the two engines rely on stays in effect.
+///
+/// `NODE_OPTIONS` gets a heap floor because these engines parse the behavior
+/// corpus, which sits close enough to node's default old-space that a run dies
+/// with `Reached heap limit` before it verifies anything — and the death is
+/// invisible from here, surfacing only as an unparseable empty report
+/// (RV-CATALOG-LOAD-OOM). We spawn `node <engine>/dist/index.js` directly, so a
+/// heap default set in the engine's own package scripts never reaches it. An
+/// explicit caller value always wins.
 fn apply_shared_env(cmd: &mut Command) {
     if let Ok(exe) = std::env::current_exe() {
         cmd.env("ORBITAL_BIN", exe);
@@ -406,7 +414,16 @@ fn apply_shared_env(cmd: &mut Command) {
             cmd.env(var, v);
         }
     }
+    let node_options = match std::env::var("NODE_OPTIONS") {
+        Ok(v) if v.contains("--max-old-space-size") => v,
+        Ok(v) if !v.trim().is_empty() => format!("{v} {NODE_HEAP_FLOOR}"),
+        _ => NODE_HEAP_FLOOR.to_string(),
+    };
+    cmd.env("NODE_OPTIONS", node_options);
 }
+
+/// Heap floor handed to spawned node engines. See `apply_shared_env`.
+const NODE_HEAP_FLOOR: &str = "--max-old-space-size=8192";
 
 struct SpawnOutcome {
     timed_out: bool,
@@ -965,6 +982,54 @@ mod tests {
     // Process env is shared across parallel test threads; every test that
     // mutates ORB_RUNTIME_VERIFY_BIN must hold this lock for its full body.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn spawned_node_options(caller: Option<&str>) -> String {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let key = "NODE_OPTIONS";
+        let prev = std::env::var(key).ok();
+        match caller {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+        let mut cmd = Command::new("node");
+        apply_shared_env(&mut cmd);
+        let got = cmd
+            .get_envs()
+            .find(|(k, _)| *k == std::ffi::OsStr::new(key))
+            .and_then(|(_, v)| v)
+            .map(|v| v.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        match prev {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+        got
+    }
+
+    /// RV-CATALOG-LOAD-OOM: an engine spawned with no caller NODE_OPTIONS still
+    /// gets the heap floor, because the corpus parse overruns node's default.
+    #[test]
+    fn apply_shared_env_sets_heap_floor_when_unset() {
+        assert_eq!(spawned_node_options(None), NODE_HEAP_FLOOR);
+    }
+
+    /// A caller's unrelated flags are preserved, not clobbered.
+    #[test]
+    fn apply_shared_env_appends_heap_floor_to_caller_options() {
+        let got = spawned_node_options(Some("--enable-source-maps"));
+        assert!(got.contains("--enable-source-maps"), "caller flags dropped: {got}");
+        assert!(got.contains(NODE_HEAP_FLOOR), "heap floor missing: {got}");
+    }
+
+    /// An explicit caller heap wins outright — including a SMALLER one, so this
+    /// can never silently override a deliberate constraint.
+    #[test]
+    fn apply_shared_env_defers_to_explicit_caller_heap() {
+        assert_eq!(
+            spawned_node_options(Some("--max-old-space-size=2048")),
+            "--max-old-space-size=2048"
+        );
+    }
 
     #[test]
     fn resolve_node_engine_env_override_nonexistent_is_not_available() {
