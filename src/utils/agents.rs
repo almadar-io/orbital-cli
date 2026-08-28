@@ -63,7 +63,13 @@ pub(crate) fn find_agent_entry() -> anyhow::Result<PathBuf> {
 }
 
 pub(crate) fn spawn_agent(cli: &Cli) -> anyhow::Result<()> {
-    ensure_agent_delegation_allowed("interactive agent")?;
+    // A truly bare `orb` (no prompt words) is an attended, interactive
+    // invocation — not the unattended/scripted runaway pattern that OOM'd
+    // the machine (user decision 2026-08-27). Any prompt words still require
+    // ORB_AGENT_FALLBACK=1 as before.
+    if !cli.prompt.is_empty() {
+        ensure_agent_delegation_allowed("interactive agent")?;
+    }
     let bun = find_bun()?;
     let entry = find_agent_entry()?;
 
