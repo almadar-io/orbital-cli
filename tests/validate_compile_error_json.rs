@@ -57,7 +57,7 @@ const WELL_FORMED_PERSIST: &str = r#"{
         "fields": [
           { "name": "id", "required": true, "type": "string" },
           { "name": "body", "type": "string" },
-          { "items": { "type": "object" }, "name": "data", "type": "array" }
+          { "items": { "type": "object", "properties": { "id": { "type": "string" }, "body": { "type": "string" } } }, "name": "data", "type": "array" }
         ]
       },
       "traits": [
@@ -70,7 +70,7 @@ const WELL_FORMED_PERSIST: &str = r#"{
             { "event": "SAVE", "scope": "external", "tier": "domain", "payloadSchema": [{ "name": "body", "type": "string" }] },
             { "event": "SAVED", "scope": "external", "tier": "domain", "payloadSchema": [{ "name": "id", "type": "string" }] },
             { "event": "SAVE_FAILED", "scope": "external", "tier": "internal", "payloadSchema": [{ "name": "error", "type": "string" }] },
-            { "event": "LOADED", "scope": "external", "tier": "domain", "payloadSchema": [{ "name": "data", "type": "[json]" }] },
+            { "event": "LOADED", "scope": "external", "tier": "domain", "payloadSchema": [{ "name": "data", "type": "[object]", "properties": [{ "name": "id", "type": "string" }, { "name": "body", "type": "string" }] }] },
             { "event": "LOAD_FAILED", "scope": "external", "tier": "internal", "payloadSchema": [{ "name": "error", "type": "string" }] }
           ],
           "stateMachine": {
@@ -79,7 +79,7 @@ const WELL_FORMED_PERSIST: &str = r#"{
               { "key": "SAVE", "name": "Save", "payloadSchema": [{ "name": "body", "type": "string" }] },
               { "key": "SAVED", "name": "Saved", "payloadSchema": [{ "name": "id", "type": "string" }] },
               { "key": "SAVE_FAILED", "name": "Save Failed", "payloadSchema": [{ "name": "error", "type": "string" }] },
-              { "key": "LOADED", "name": "Loaded", "payloadSchema": [{ "name": "data", "type": "[json]" }] },
+              { "key": "LOADED", "name": "Loaded", "payloadSchema": [{ "name": "data", "type": "[object]", "properties": [{ "name": "id", "type": "string" }, { "name": "body", "type": "string" }] }] },
               { "key": "LOAD_FAILED", "name": "Load Failed", "payloadSchema": [{ "name": "error", "type": "string" }] }
             ],
             "states": [

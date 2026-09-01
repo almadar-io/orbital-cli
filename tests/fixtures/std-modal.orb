@@ -63,7 +63,29 @@
                 {
                   "name": "data",
                   "type": "object",
-                  "required": true
+                  "required": true,
+                  "properties": [
+                    {
+                      "name": "id",
+                      "type": "string"
+                    },
+                    {
+                      "name": "name",
+                      "type": "string"
+                    },
+                    {
+                      "name": "description",
+                      "type": "string"
+                    },
+                    {
+                      "name": "status",
+                      "type": "string"
+                    },
+                    {
+                      "name": "createdAt",
+                      "type": "string"
+                    }
+                  ]
                 }
               ]
             },
@@ -153,7 +175,29 @@
                   {
                     "name": "data",
                     "type": "object",
-                    "required": true
+                    "required": true,
+                    "properties": [
+                      {
+                        "name": "id",
+                        "type": "string"
+                      },
+                      {
+                        "name": "name",
+                        "type": "string"
+                      },
+                      {
+                        "name": "description",
+                        "type": "string"
+                      },
+                      {
+                        "name": "status",
+                        "type": "string"
+                      },
+                      {
+                        "name": "createdAt",
+                        "type": "string"
+                      }
+                    ]
                   }
                 ]
               },
@@ -315,7 +359,7 @@
               "type": "string",
               "default": "create",
               "label": "Form mode",
-              "description": "create or edit — controls submit-button copy and validation",
+              "description": "create or edit \u2014 controls submit-button copy and validation",
               "tier": "presentation"
             },
             "icon": {
