@@ -3,7 +3,7 @@
 //! Source: installed-package identity (or workspace package.json fallback in
 //! dev checkouts) for @almadar-io/runtime-verify-tool and @almadar-io/verify-tool.
 //!
-//! Last synced: 2026-08-31
+//! Last synced: 2026-09-01
 //! To regenerate: npx almadar-sync engine-pins (also runs as one step of `npx almadar-sync rust`)
 //!
 //! DO NOT EDIT MANUALLY - changes will be overwritten on next sync.
