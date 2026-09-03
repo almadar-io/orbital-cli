@@ -1017,7 +1017,10 @@ mod tests {
     #[test]
     fn apply_shared_env_appends_heap_floor_to_caller_options() {
         let got = spawned_node_options(Some("--enable-source-maps"));
-        assert!(got.contains("--enable-source-maps"), "caller flags dropped: {got}");
+        assert!(
+            got.contains("--enable-source-maps"),
+            "caller flags dropped: {got}"
+        );
         assert!(got.contains(NODE_HEAP_FLOOR), "heap floor missing: {got}");
     }
 

@@ -127,7 +127,10 @@ pub(crate) fn load_services_registry(
 
     let Some(registry_path) = registry_path else {
         let baked = orbital_compiler::embedded::baked_service_registry().clone();
-        eprintln!("Loaded {} services from the baked registry", baked.actions.len());
+        eprintln!(
+            "Loaded {} services from the baked registry",
+            baked.actions.len()
+        );
         return baked;
     };
 

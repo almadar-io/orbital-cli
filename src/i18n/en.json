@@ -109,7 +109,6 @@
     "call-service": "call-service",
     "ceil": "ceil",
     "clamp": "clamp",
-    "concat": "concat",
     "contains": "contains",
     "count": "count",
     "despawn": "despawn",

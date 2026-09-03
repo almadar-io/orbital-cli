@@ -99,9 +99,8 @@ pub fn parse_schema_auto_typed(
 ) -> Result<orbital_core::schema::OrbitalSchema, TypedParseError> {
     use orbital_core::schema::parse_schema;
     match detect_syntax(content) {
-        InputSyntax::Lolo => {
-            orbital_lolo::parse_and_lower_str_at(content, source_path).map_err(TypedParseError::Lolo)
-        }
+        InputSyntax::Lolo => orbital_lolo::parse_and_lower_str_at(content, source_path)
+            .map_err(TypedParseError::Lolo),
         InputSyntax::OrbJson => {
             let translated = translate_schema_content(content);
             parse_schema(&translated)
@@ -571,7 +570,7 @@ pub(crate) fn typed_parse_error_to_json(
                         (Some(s), _) => format!("did you mean {s:?}?"),
                         (None, Some(t)) => t.to_string(),
                         (None, None) => format!(
-                            "no type named {name:?} is declared — declare it at orbital level (`type {name} = {{ field : type … }}`), or use a primitive (string/number/boolean/any) or a declared type/entity name"
+                            "no type named {name:?} is declared — declare it at orbital level (`type {name} = {{ field : type … }}`), or use a primitive (string/number/boolean/scalar) or a declared type/entity name"
                         ),
                     }),
                 ),
@@ -615,6 +614,12 @@ pub(crate) fn typed_parse_error_to_json(
                     "ORB_T_EVENT_TYPE_WRONG_KIND",
                     Some(format!(
                         "declare {name:?} with `type {name} = Event<...>`, got a {actual} instead"
+                    )),
+                ),
+                TypeError::GenericTypeForbidden { name, .. } => (
+                    "ORB_T_GENERIC_TYPE_DEPRECATED",
+                    Some(format!(
+                        "replace `{name}`: renderable content → `node`; structured data → an inline shape, a named `type` alias, or `Map K V`; a single primitive of unknown kind → `scalar`; genuinely open data → `opaque`"
                     )),
                 ),
             };
@@ -869,8 +874,10 @@ fn event_name_space_hint(source: &str, line: usize) -> Option<(String, String)> 
     let arrow = line_text.find("->")?;
     let before = line_text[..arrow].trim();
     let words: Vec<&str> = before.split_whitespace().collect();
-    let is_event_word =
-        |w: &str| w.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
+    let is_event_word = |w: &str| {
+        w.chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+    };
     if words.len() < 2 || !words.iter().all(|w| is_event_word(w)) {
         return None;
     }
@@ -973,12 +980,7 @@ fn jsx_markup_in_object_hint(source: &str, line: usize, col: usize) -> Option<(S
 /// `name={expr}` / `name="str"`, never `name: value` (run 40: ministral).
 fn jsx_attr_colon_hint(source: &str, line: usize) -> Option<(String, String)> {
     let line_text = source.lines().nth(line.checked_sub(1)?)?;
-    let name = line_text
-        .trim_start()
-        .split(':')
-        .next()?
-        .trim()
-        .to_string();
+    let name = line_text.trim_start().split(':').next()?.trim().to_string();
     if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
         return None;
     }
@@ -1170,8 +1172,17 @@ fn value_continued_past_first_term_hint(source: &str, line: usize) -> Option<(St
 }
 
 const EFFECT_HEADS: [&str; 11] = [
-    "render-ui", "set", "emit", "persist", "fetch", "fetch-stream", "navigate", "notify",
-    "log", "call-service", "send-server",
+    "render-ui",
+    "set",
+    "emit",
+    "persist",
+    "fetch",
+    "fetch-stream",
+    "navigate",
+    "notify",
+    "log",
+    "call-service",
+    "send-server",
 ];
 
 /// A bare effect keyword where TRAIT members are expected — `render-ui main {`
@@ -1195,9 +1206,11 @@ fn parenless_effect_at_trait_level_hint(msg: &str) -> Option<(String, String)> {
 fn parenless_effect_in_tree_hint(source: &str, line: usize) -> Option<(String, String)> {
     let text = source.lines().nth(line.checked_sub(1)?)?;
     let trimmed = text.trim_start();
-    let head = EFFECT_HEADS
-        .iter()
-        .find(|h| trimmed.strip_prefix(*h).is_some_and(|rest| rest.starts_with([' ', '\t'])))?;
+    let head = EFFECT_HEADS.iter().find(|h| {
+        trimmed
+            .strip_prefix(*h)
+            .is_some_and(|rest| rest.starts_with([' ', '\t']))
+    })?;
     Some((
         format!(
             "`{head}` is an EFFECT — it is written as a parenthesized call `({head} …)`, never as a bare `{head} …` line"
@@ -1292,11 +1305,12 @@ fn replay_delimiters(
 ) -> (Vec<(char, usize, usize)>, Option<(char, usize, usize)>) {
     let mut stack: Vec<(char, usize, usize)> = Vec::new();
     let mut first_mismatch: Option<(char, usize, usize)> = None;
-    let mut record_mismatch = |c: char, l: usize, co: usize, fm: &mut Option<(char, usize, usize)>| {
-        if fm.is_none() {
-            *fm = Some((c, l, co));
-        }
-    };
+    let mut record_mismatch =
+        |c: char, l: usize, co: usize, fm: &mut Option<(char, usize, usize)>| {
+            if fm.is_none() {
+                *fm = Some((c, l, co));
+            }
+        };
     for (li, text) in source.lines().enumerate() {
         let lineno = li + 1;
         let mut in_str = false;
@@ -1345,6 +1359,13 @@ fn replay_delimiters(
     (stack, first_mismatch)
 }
 
-fn innermost_open_delimiter(source: &str, err_line: usize, err_col: usize) -> Option<(char, usize, usize)> {
-    replay_delimiters(source, err_line, err_col).0.last().copied()
+fn innermost_open_delimiter(
+    source: &str,
+    err_line: usize,
+    err_col: usize,
+) -> Option<(char, usize, usize)> {
+    replay_delimiters(source, err_line, err_col)
+        .0
+        .last()
+        .copied()
 }

@@ -69,10 +69,7 @@ fn semicolon_comment_gets_hint() {
     let err = first_parse_error(&result);
     assert_eq!(err["code"], "LOLO_PARSE_ERROR");
     assert!(err["suggestion"].as_str().unwrap().contains("`;;`"));
-    assert!(err["fixGuidance"]
-        .as_str()
-        .unwrap()
-        .contains("stray `;`"));
+    assert!(err["fixGuidance"].as_str().unwrap().contains("stray `;`"));
     assert_eq!(err["line"], 7);
     assert!(err["column"].as_u64().unwrap() > 0);
 }
@@ -546,7 +543,8 @@ fn generic_type_syntax_gets_hint() {
     let err = first_parse_error(&result);
     let sugg = err["suggestion"].as_str().unwrap();
     assert!(
-        sugg.contains("`map[…]` is not `.lolo` type syntax") && sugg.contains("Map KeyType ValueType"),
+        sugg.contains("`map[…]` is not `.lolo` type syntax")
+            && sugg.contains("Map KeyType ValueType"),
         "suggestion must teach both array and Map forms: {sugg}"
     );
 }

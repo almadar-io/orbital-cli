@@ -63,13 +63,19 @@ fn emit_without_event_name_is_a_coded_validate_error_not_a_resolve_crash() {
         .unwrap()
         .contains("(emit EVENT_NAME { … })"));
     // Located via the L2 source map — the effect's own line, not null.
-    assert!(emit_err["line"].as_u64().is_some(), "line missing: {emit_err:?}");
+    assert!(
+        emit_err["line"].as_u64().is_some(),
+        "line missing: {emit_err:?}"
+    );
 
     // The resolve phase must no longer be the reporter for this shape: any
     // residual COMPILATION_ERROR would be the old opaque path.
     assert!(
         !errors.iter().any(|e| e["code"] == "COMPILATION_ERROR"
-            && e["message"].as_str().unwrap_or("").contains("Expected string")),
+            && e["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("Expected string")),
         "opaque resolve error still present: {errors:?}"
     );
 }

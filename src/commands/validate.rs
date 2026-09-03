@@ -1,8 +1,8 @@
 //! `orb validate` — native Rust schema validation (text + JSON output).
 
 use crate::utils::{
-    detect_language, load_extra_patterns, load_services_registry, parse_schema_auto_with_map,
-    parse_schema_auto_typed_with_map, typed_parse_error_to_json,
+    detect_language, load_extra_patterns, load_services_registry, parse_schema_auto_typed_with_map,
+    parse_schema_auto_with_map, typed_parse_error_to_json,
 };
 use crate::{ValidationJsonError, ValidationJsonOutput, ValidationJsonWarning, ValidationStats};
 use std::path::PathBuf;
@@ -68,28 +68,26 @@ fn validate_schema_json(
         }
     };
 
-    let (mut schema, source_map) = match parse_schema_auto_typed_with_map(
-        &content_raw,
-        &path.display().to_string(),
-    ) {
-        Ok(s) => s,
-        Err(e) => {
-            // Map parse/lower/type errors into typed `ValidationJsonError`
-            // rows — includes the `ORB_T_TYPE_*` family for `.lolo` type
-            // check failures so consumers (agent retry loops, editor
-            // tooling) can switch on the code instead of regexing a
-            // human-readable string.
-            let output = ValidationJsonOutput {
-                success: true,
-                valid: false,
-                errors: Some(typed_parse_error_to_json(&e, Some(&content_raw))),
-                warnings: None,
-                stats: None,
-            };
-            println!("{}", serde_json::to_string_pretty(&output)?);
-            return Ok(());
-        }
-    };
+    let (mut schema, source_map) =
+        match parse_schema_auto_typed_with_map(&content_raw, &path.display().to_string()) {
+            Ok(s) => s,
+            Err(e) => {
+                // Map parse/lower/type errors into typed `ValidationJsonError`
+                // rows — includes the `ORB_T_TYPE_*` family for `.lolo` type
+                // check failures so consumers (agent retry loops, editor
+                // tooling) can switch on the code instead of regexing a
+                // human-readable string.
+                let output = ValidationJsonOutput {
+                    success: true,
+                    valid: false,
+                    errors: Some(typed_parse_error_to_json(&e, Some(&content_raw))),
+                    warnings: None,
+                    stats: None,
+                };
+                println!("{}", serde_json::to_string_pretty(&output)?);
+                return Ok(());
+            }
+        };
 
     // Run the inline phase BEFORE validation. Composed .orb files carry
     // `uses:` imports and `ref:` strings; without inlining, the validator
@@ -123,8 +121,8 @@ fn validate_schema_json(
         // so downstream agents never treat them as fixable-by-editing. The
         // message carries the effective loader env so an intermittent miss is
         // diagnosable from the consumer's log alone.
-        use orbital_compiler::phases::inline::InlineError;
         use orbital_compiler::loader::LoaderError;
+        use orbital_compiler::phases::inline::InlineError;
         let is_infra = matches!(
             &e,
             InlineError::Loader(LoaderError::StdLibNotConfigured)
@@ -158,7 +156,8 @@ fn validate_schema_json(
                 let src = std::fs::read_to_string(&path).ok()?;
                 let find = |n: &str| {
                     src.lines().enumerate().find_map(|(i, l)| {
-                        l.find(n).map(|c| (Some((i + 1) as u32), Some((c + 1) as u32)))
+                        l.find(n)
+                            .map(|c| (Some((i + 1) as u32), Some((c + 1) as u32)))
                     })
                 };
                 // The loader may have normalized the path before failing
@@ -263,9 +262,9 @@ fn validate_schema_json(
                 if token.is_empty() {
                     return None;
                 }
-                src.lines().enumerate().find_map(|(i, l)| {
-                    l.find(token).map(|c| (i as u32 + 1, c as u32 + 1))
-                })
+                src.lines()
+                    .enumerate()
+                    .find_map(|(i, l)| l.find(token).map(|c| (i as u32 + 1, c as u32 + 1)))
             })
         } else {
             None
@@ -301,8 +300,12 @@ fn validate_schema_json(
             fix_guidance,
             expected_shape: error.expected_shape.clone(),
             valid_values: error.valid_values.clone(),
-            line: resolved.map(|(s, _)| s.line).or(quoted_anchor.map(|(l, _)| l)),
-            column: resolved.map(|(s, _)| s.col).or(quoted_anchor.map(|(_, c)| c)),
+            line: resolved
+                .map(|(s, _)| s.line)
+                .or(quoted_anchor.map(|(l, _)| l)),
+            column: resolved
+                .map(|(s, _)| s.col)
+                .or(quoted_anchor.map(|(_, c)| c)),
         });
     }
 

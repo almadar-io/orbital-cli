@@ -134,8 +134,8 @@ const WELL_FORMED_PERSIST: &str = r#"{
 fn malformed_persist_schema() -> String {
     let mut schema: serde_json::Value =
         serde_json::from_str(WELL_FORMED_PERSIST).expect("fixture parses");
-    let effect = &mut schema["orbitals"][0]["traits"][0]["stateMachine"]["transitions"][3]
-        ["effects"][0];
+    let effect =
+        &mut schema["orbitals"][0]["traits"][0]["stateMachine"]["transitions"][3]["effects"][0];
     let arr = effect.as_array_mut().expect("persist effect is an array");
     assert_eq!(arr[1], "create");
     arr.remove(1);
@@ -153,13 +153,11 @@ fn malformed_persist_effect_reports_invalid_via_json() {
         .as_array()
         .expect("errors array present on invalid schema");
     assert!(
-        errors
-            .iter()
-            .any(|e| e["code"] == "COMPILATION_ERROR"
-                && e["message"]
-                    .as_str()
-                    .map(|m| m.starts_with("Compilation error:"))
-                    .unwrap_or(false)),
+        errors.iter().any(|e| e["code"] == "COMPILATION_ERROR"
+            && e["message"]
+                .as_str()
+                .map(|m| m.starts_with("Compilation error:"))
+                .unwrap_or(false)),
         "expected a COMPILATION_ERROR row, got: {errors:#?}"
     );
 }
