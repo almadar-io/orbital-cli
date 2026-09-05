@@ -1,47 +1,33 @@
 //! i18n helpers: language detection, locale copying, schema translation.
+//! Both detection and translation are structural (JSON-key-based for `.orb`,
+//! parser-driven for `.lolo`) — owned by `orbital_core::i18n` /
+//! `orbital_lolo::detect_language`, never string/substring heuristics.
 
-use std::path::PathBuf;
+use std::path::Path;
 
-/// Heuristic to detect language from content
+/// Detect the language of `content`. `.lolo` source is detected by the
+/// parser itself (`orbital_lolo::detect_language`, always returns a code,
+/// `"en"` by default). `.orb` JSON is detected structurally from its
+/// top-level keys (`Lang::for_orb_top_level_keys`); returns `None` when the
+/// content isn't valid JSON or no non-English language's `orbitals` key is
+/// present among the top-level keys (i.e. English / undetected).
 pub(crate) fn detect_language(content: &str) -> Option<String> {
-    let definitions = crate::i18n::get_definitions();
-
-    // Check purely based on unique keyword presence
-    // This is a simple heuristic. A more robust way would be score-based.
-    for (code, def) in definitions {
-        if code == "en" {
-            continue;
-        }
-
-        // check for "orbitals" keyword first (most common root key)
-        if let Some(kw) = def.keywords.get("orbitals") {
-            if content.contains(&format!("\"{}\"", kw)) {
-                return Some(code);
-            }
-        }
-
-        // check for "entity" keyword
-        if let Some(kw) = def.keywords.get("entity") {
-            if content.contains(&format!("\"{}\"", kw)) {
-                return Some(code);
-            }
-        }
-
-        // check for "orbital" keyword
-        if let Some(kw) = def.keywords.get("orbital") {
-            if content.contains(&format!("\"{}\"", kw)) {
-                return Some(code);
-            }
+    match crate::utils::detect_syntax(content) {
+        crate::utils::InputSyntax::Lolo => Some(orbital_lolo::detect_language(content).to_string()),
+        crate::utils::InputSyntax::OrbJson => {
+            let value: serde_json::Value = serde_json::from_str(content).ok()?;
+            let map = value.as_object()?;
+            let lang =
+                orbital_core::i18n::lang::for_orb_top_level_keys(map.keys().map(String::as_str))?;
+            Some(lang.code.to_string())
         }
     }
-
-    None
 }
 
 /// Copy locale JSON files from {schema_dir}/locales/ into {output}/locales/.
 /// The generated App.tsx imports from '../../../locales/{locale}.json' which resolves
 /// to {output}/locales/ (3 levels up from packages/client/src/).
-pub(crate) fn copy_locales(schema_path: &PathBuf, output: &PathBuf) {
+pub(crate) fn copy_locales(schema_path: &Path, output: &Path) {
     let schema_dir = match schema_path.parent() {
         Some(d) => d.to_path_buf(),
         None => return,
@@ -85,74 +71,25 @@ pub(crate) fn copy_locales(schema_path: &PathBuf, output: &PathBuf) {
     }
 }
 
-/// Translate schema content from native language to English
+/// Translate `.orb` JSON content from a native language to English via the
+/// structural translator (`orbital_core::i18n::translate::translate_orb_value`).
+/// Non-JSON content (`.lolo` source — the parser handles that natively, no
+/// translation needed) and already-English/undetected JSON pass through
+/// byte-identical.
 pub(crate) fn translate_schema_content(content: &str) -> String {
-    if let Some(lang) = detect_language(content) {
-        let definitions = crate::i18n::get_definitions();
-        if let Some(def) = definitions.get(&lang) {
-            eprintln!("Detected language: {} ({})", def.meta.name, lang);
-            let mut translated = content.to_string();
-
-            // 1. Translate Keys
-            for (eng_key, native_key) in &def.keywords {
-                let target = format!("\"{}\":", eng_key);
-                let source = format!("\"{}\":", native_key);
-                translated = translated.replace(&source, &target);
-            }
-
-            // 2. Translate Operators (e.g. "يساوي" -> "eq")
-            if let Some(ops) = &def.operators {
-                for (eng_op, native_op) in ops {
-                    let target = format!("\"{}\"", eng_op);
-                    let source = format!("\"{}\"", native_op);
-                    translated = translated.replace(&source, &target);
-                }
-            }
-
-            // 3. Translate Bindings (e.g. "@كيان" -> "@entity")
-            // This must handle path access like @كيان.رسالة -> @entity.message
-            // But we only translate the ROOT binding name. The fields remain as defined in schema?
-            // Actually, the schema fields might be localized too if "name" is localized.
-            // But for now, let's just translate the root binding prefixes.
-            if let Some(bindings) = &def.bindings {
-                for (eng_binding, native_binding) in bindings {
-                    // We must be careful not to replace partial matches if prefixes overlap (e.g. @ent vs @entity)
-                    // But these designated bindings start with @ so it's safer.
-                    // We simply replace all occurrences of the native binding prefix.
-                    translated = translated.replace(native_binding, eng_binding);
-                }
-            }
-
-            // 2. Translate Types (e.g. "type": "نص" -> "type": "string")
-            // This is trickier because we need to match the value.
-            // We can iterate over types and replace generic string matches if they look like types?
-            // Or better: iterate over the *English* type names, finding their native equivalents and replacing them *only if* they appear as values for "type".
-            // That requires parsing... which we can't do if it's mixed language.
-            // Let's do a rigorous string replacement for types appearing in quotes.
-            for (eng_type, native_type) in &def.types {
-                // "type": "نص" -> "type": "string"
-                // We can't rely on whitespace.
-                // Let's just replacing the value string itself if it's unique enough?
-                // "نص" is short. Might clobber user data.
-                // SAFE APPROACH: We only translate keys for now as proof of concept.
-                // Types might need to be exact matches.
-
-                // Let's try replacing `"type": "NATIVE"` with `"type": "ENG"`
-                // We need to account for possible whitespace.
-                let patterns = vec![
-                    format!("\"type\": \"{}\"", native_type),
-                    format!("\"type\":  \"{}\"", native_type), // double space
-                    format!("\"type\" : \"{}\"", native_type),
-                ];
-
-                for p in patterns {
-                    translated = translated.replace(&p, &format!("\"type\": \"{}\"", eng_type));
-                }
-            }
-
-            return translated;
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(content) else {
+        return content.to_string();
+    };
+    let lang = match &value {
+        serde_json::Value::Object(map) => {
+            orbital_core::i18n::lang::for_orb_top_level_keys(map.keys().map(String::as_str))
         }
-    }
-
-    content.to_string()
+        _ => None,
+    };
+    let Some(lang) = lang else {
+        return content.to_string();
+    };
+    eprintln!("Detected language: {} ({})", lang.def.meta.name, lang.code);
+    orbital_core::i18n::translate::translate_orb_value(&mut value, lang);
+    serde_json::to_string_pretty(&value).unwrap_or_else(|_| content.to_string())
 }

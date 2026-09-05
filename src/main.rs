@@ -12,12 +12,12 @@ use std::path::PathBuf;
 mod baked_engine_pins;
 mod commands;
 mod emit;
-mod i18n;
 mod utils;
 
 use commands::{
     compile_schema, format_schema, parse_schema, resolve_schema_cli, run_convert, run_dev_mode,
-    run_serve, run_tests, simulate_render, stamp_schema_cli, validate_schema,
+    run_i18n_check, run_i18n_vocab, run_serve, run_tests, simulate_render, stamp_schema_cli,
+    validate_schema,
 };
 use utils::{evaluate_sexpr, spawn_agent, spawn_agent_with_args};
 
@@ -612,6 +612,31 @@ enum Commands {
         #[arg(long, default_value = "value")]
         output: String,
     },
+
+    /// Language i18n vocabulary — inspect the baked `.lolo`/`.orb` vocabulary
+    /// tables and check translation coverage.
+    I18n {
+        #[command(subcommand)]
+        command: I18nCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum I18nCommand {
+    /// Print the `.lolo` parser vocabulary (keywords/shapes/tags/categories/
+    /// capabilities/annotations/sigils/effects/types/units/literals/
+    /// reservedEvents) plus the `.orb` structural key list and the operator
+    /// table.
+    Vocab {
+        /// Print as JSON instead of a human-readable listing.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Check translation coverage: every non-English language's tables
+    /// against `en` (missing/orphan/empty keys), and the `orbital-lolo`
+    /// parser vocabulary against `en`. Exits 1 and lists every problem when
+    /// any are found.
+    Check,
 }
 
 /// The lolo type-signature catalog, baked at compile time. Generated from the
@@ -800,6 +825,10 @@ fn main() -> anyhow::Result<()> {
             payload.as_deref(),
             &output,
         ),
+        Some(Commands::I18n { command }) => match command {
+            I18nCommand::Vocab { json } => run_i18n_vocab(json),
+            I18nCommand::Check => run_i18n_check(),
+        },
         // Agent-delegating commands
         Some(Commands::Fix { path }) => {
             spawn_agent_with_args(&["fix", &path.display().to_string()])

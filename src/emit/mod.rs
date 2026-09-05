@@ -126,9 +126,8 @@ fn write_output(rendered: &str, output: Option<&Path>) -> Result<()> {
 // --- Target: orb -----------------------------------------------------------
 
 fn emit_orb(source: &str, output: Option<&Path>, source_path: &str) -> Result<()> {
-    // Parse whichever surface the file uses. Mirrors parse_schema_auto_typed
-    // from main.rs but reimplemented here to avoid a circular import; the
-    // logic is ~5 lines and we want this module to stand on its own.
+    // Parse whichever surface the file uses (same dispatch as
+    // `utils::detect::parse_schema_auto_typed`, plus the prior-ledger anchor).
     //
     // Id stability: when emitting in place (the registry regen pattern —
     // `orb emit orb <lolo> --output <existing.orb>`), the existing output is
@@ -137,7 +136,9 @@ fn emit_orb(source: &str, output: Option<&Path>, source_path: &str) -> Result<()
     let prior = output
         .filter(|p| p.exists())
         .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|s| orbital_core::schema::parse_schema(&s).ok());
+        .and_then(|s| {
+            orbital_core::schema::parse_schema(&crate::utils::translate_schema_content(&s)).ok()
+        });
     let schema = parse_any_syntax_with_prior(source, prior.as_ref(), source_path)?;
     let value =
         serde_json::to_value(&schema).map_err(|e| anyhow!("Failed to serialize schema: {}", e))?;
@@ -169,8 +170,10 @@ fn parse_any_syntax_with_prior(
         .chars()
         .next();
     if matches!(first, Some('{')) {
-        // `.orb` JSON.
-        orbital_core::schema::parse_schema(source).map_err(|e| anyhow!("JSON parse error: {}", e))
+        // `.orb` JSON — native-language keys are translated first, as every other command does.
+        let translated = crate::utils::translate_schema_content(source);
+        orbital_core::schema::parse_schema(&translated)
+            .map_err(|e| anyhow!("JSON parse error: {}", e))
     } else {
         // Assume `.lolo` surface syntax.
         orbital_lolo::parse_and_lower_str_with_prior_at(source, prior, source_path)

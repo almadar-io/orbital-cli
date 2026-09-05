@@ -22,6 +22,7 @@ pub(crate) fn stamp_schema_cli(
 ) -> anyhow::Result<()> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| anyhow::anyhow!("Failed to read {}: {}", path.display(), e))?;
+    let content = crate::utils::translate_schema_content(&content);
     let mut schema = orbital_core::schema::parse_schema(&content)
         .map_err(|e| anyhow::anyhow!("Failed to parse {}: {}", path.display(), e))?;
 
@@ -30,6 +31,7 @@ pub(crate) fn stamp_schema_cli(
             Some(pp) => {
                 let pc = std::fs::read_to_string(pp)
                     .map_err(|e| anyhow::anyhow!("Failed to read prior {}: {}", pp.display(), e))?;
+                let pc = crate::utils::translate_schema_content(&pc);
                 Some(orbital_core::schema::parse_schema(&pc).map_err(|e| {
                     anyhow::anyhow!("Failed to parse prior {}: {}", pp.display(), e)
                 })?)
