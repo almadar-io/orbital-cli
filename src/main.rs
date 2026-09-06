@@ -15,9 +15,9 @@ mod emit;
 mod utils;
 
 use commands::{
-    compile_schema, format_schema, parse_schema, resolve_schema_cli, run_convert, run_dev_mode,
-    run_i18n_check, run_i18n_vocab, run_serve, run_tests, simulate_render, stamp_schema_cli,
-    validate_schema,
+    compile_schema, execute_schema_cli, format_schema, parse_schema, resolve_schema_cli,
+    run_convert, run_dev_mode, run_i18n_check, run_i18n_vocab, run_serve, run_tests,
+    simulate_render, stamp_schema_cli, validate_schema,
 };
 use utils::{evaluate_sexpr, spawn_agent, spawn_agent_with_args};
 
@@ -170,6 +170,40 @@ enum Commands {
         /// Verbose phase logging on stderr.
         #[arg(short, long)]
         verbose: bool,
+    },
+
+    /// Pure headless state-machine execution: fire one event through every
+    /// inline trait and report transitions/effects/guard evaluations as JSON.
+    ///
+    /// Effects are reported, never executed — this is the Rust-side twin of
+    /// `packages/almadar-parity`'s TypeScript harness (`ts-harness.ts`
+    /// `executeWithRuntime`), so the two can be diffed for cross-
+    /// implementation parity. Resolves imports/refs first (same as
+    /// `orb resolve`), so both harnesses see the identical inlined trait set.
+    Execute {
+        /// Path to the .orb schema file
+        #[arg(value_name = "FILE")]
+        path: PathBuf,
+
+        /// Event to fire (e.g. INIT)
+        #[arg(long)]
+        event: String,
+
+        /// Event payload as a JSON object (default: {})
+        #[arg(long)]
+        payload: Option<String>,
+
+        /// Initial entity data as a JSON object (default: {})
+        #[arg(long)]
+        entity: Option<String>,
+
+        /// Only execute the trait with this name
+        #[arg(long = "trait")]
+        trait_name: Option<String>,
+
+        /// Output the execution result DTO as JSON (for programmatic consumption)
+        #[arg(long)]
+        json: bool,
     },
 
     /// Stamp V4 identity (ids + ledger) onto a name-only `.orb` schema.
@@ -690,6 +724,21 @@ fn main() -> anyhow::Result<()> {
             output,
             verbose,
         }) => resolve_schema_cli(&path, output.as_deref(), verbose),
+        Some(Commands::Execute {
+            path,
+            event,
+            payload,
+            entity,
+            trait_name,
+            json,
+        }) => execute_schema_cli(
+            &path,
+            &event,
+            payload.as_deref(),
+            entity.as_deref(),
+            trait_name.as_deref(),
+            json,
+        ),
         Some(Commands::Stamp {
             path,
             prior,

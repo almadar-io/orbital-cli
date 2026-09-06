@@ -1,0 +1,331 @@
+//! `orb execute` — pure headless state-machine execution, JSON-DTO output.
+//!
+//! Mirrors the TypeScript parity harness's pure `processEvent` walk
+//! (`packages/almadar-parity/src/harness/ts-harness.ts` `executeWithRuntime`)
+//! field-for-field against `ExecutionResult`
+//! (`packages/almadar-parity/src/harness/types.ts:60`) — the two are the
+//! `rust-harness.ts`/`ts-harness.ts` pair `packages/almadar-parity` diffs to
+//! measure Rust/TypeScript parity. Effects are NOT executed here, only
+//! reported — this walks the same pure kernel
+//! (`orbital_core::StateMachineCore::process_event`) the exhaustive test
+//! generator uses, never the effect executor.
+
+use std::path::Path;
+use std::time::Instant;
+
+use orbital_core::{
+    BindingContext, EventPayload, SExpression, StateMachineCore, TraitDefinition, Value,
+};
+use orbital_verify::planner::{initial_state, inline_traits};
+use serde::Serialize;
+
+use crate::utils::parse_schema_auto;
+
+/// One fired transition — mirrors `harness/types.ts` `StateTransition`.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExecTransition {
+    from: String,
+    to: String,
+    event: String,
+    /// Always 0 — there is no wall clock here to compare against the
+    /// TypeScript side's `Date.now()`, and no parity comparison keys on it.
+    timestamp: i64,
+}
+
+/// One executed effect S-expression — mirrors `NormalizedEffect`.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExecEffect {
+    operator: String,
+    args: Vec<serde_json::Value>,
+    original: serde_json::Value,
+}
+
+fn to_exec_effect(expr: &SExpression) -> ExecEffect {
+    match expr.operator() {
+        Some(op) => ExecEffect {
+            operator: op.to_string(),
+            args: expr
+                .arguments()
+                .unwrap_or(&[])
+                .iter()
+                .map(SExpression::to_canonical_json)
+                .collect(),
+            original: expr.to_canonical_json(),
+        },
+        // Mirrors `normalizeEffect`'s fallback for a non-call-shaped effect.
+        None => ExecEffect {
+            operator: "unknown".to_string(),
+            args: vec![],
+            original: expr.to_canonical_json(),
+        },
+    }
+}
+
+/// Evaluation context echoed back on a guard evaluation — mirrors `EvalContext`.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExecGuardContext {
+    entity: serde_json::Value,
+    payload: serde_json::Value,
+    state: String,
+}
+
+/// One guard evaluation — mirrors `harness/types.ts` `GuardResult`.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExecGuardEvaluation {
+    guard: serde_json::Value,
+    context: ExecGuardContext,
+    result: bool,
+    path: String,
+}
+
+/// Execution DTO — field-for-field mirror of
+/// `packages/almadar-parity/src/harness/types.ts:60` `ExecutionResult`. Lives
+/// here (never on `orbital-core`) because parity JSON is a CLI-only concern:
+/// `StateMachineCore::process_event`'s own `TransitionResult`/`GuardResult`
+/// deliberately do not derive `Serialize`.
+///
+/// Two asymmetries are DELIBERATELY preserved to keep parity comparisons
+/// apples-to-apples with `ts-harness.ts` `executeWithRuntime` (same file,
+/// ~L279-335): (1) a guard evaluation is recorded only when SOME transition
+/// for the fired event actually matched the trait's current `from` state —
+/// an event nobody listens for from that state records no guard, even when
+/// a different `from` state declares a guarded transition on the same event
+/// name; (2) the guard EXPRESSION shown in that evaluation is looked up by
+/// event name alone, ignoring `from` (`ts-harness.ts` line ~319 finds the
+/// transition definition via `.find(t => t.event === normalizedEvent)`) — on
+/// a trait where two different `from` states share one event name and only
+/// one of them is guarded, the displayed `guard` can differ from the guard
+/// that actually fired even though `result` is always the real evaluated
+/// boolean from the transition that matched `from`.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ExecutionResultDto {
+    success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+    initial_state: String,
+    final_state: String,
+    transitions: Vec<ExecTransition>,
+    effects: Vec<ExecEffect>,
+    guard_evaluations: Vec<ExecGuardEvaluation>,
+    implementation: &'static str,
+    execution_time_ms: u128,
+    schema_path: String,
+}
+
+impl ExecutionResultDto {
+    fn failure(schema_path: &str, execution_time_ms: u128, error: String) -> Self {
+        Self {
+            success: false,
+            error: Some(error),
+            initial_state: String::new(),
+            final_state: String::new(),
+            transitions: vec![],
+            effects: vec![],
+            guard_evaluations: vec![],
+            implementation: "rust",
+            execution_time_ms,
+            schema_path: schema_path.to_string(),
+        }
+    }
+}
+
+/// `orb execute <FILE> --event E [--payload JSON] [--entity JSON] [--trait NAME] [--json]`
+pub(crate) fn execute_schema_cli(
+    path: &Path,
+    event: &str,
+    payload: Option<&str>,
+    entity: Option<&str>,
+    trait_filter: Option<&str>,
+    json: bool,
+) -> anyhow::Result<()> {
+    let start = Instant::now();
+    let schema_path = path.display().to_string();
+
+    let dto = match run_execute(path, event, payload, entity, trait_filter) {
+        Ok(mut dto) => {
+            dto.execution_time_ms = start.elapsed().as_millis();
+            dto
+        }
+        // Parse/resolve/argument failures are a DATA outcome, not a process
+        // failure — the caller (`rust-harness.ts`, this crate's own tests)
+        // always gets a well-formed DTO on stdout to parse, mirroring how
+        // `ts-harness.ts execute()` catches and returns `success:false`
+        // rather than throwing.
+        Err(e) => ExecutionResultDto::failure(&schema_path, start.elapsed().as_millis(), e.to_string()),
+    };
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&dto)?);
+    } else {
+        print_human(&dto);
+    }
+
+    Ok(())
+}
+
+fn print_human(dto: &ExecutionResultDto) {
+    println!("Execute: {}", dto.schema_path);
+    if !dto.success {
+        println!("  FAILED: {}", dto.error.as_deref().unwrap_or("unknown error"));
+        return;
+    }
+    println!("  {} -> {}", dto.initial_state, dto.final_state);
+    println!("  transitions: {}", dto.transitions.len());
+    for t in &dto.transitions {
+        println!("    {} --{}--> {}", t.from, t.event, t.to);
+    }
+    println!("  effects: {}", dto.effects.len());
+    for e in &dto.effects {
+        println!("    ({} {})", e.operator, e.args.len());
+    }
+    println!("  guard evaluations: {}", dto.guard_evaluations.len());
+    for g in &dto.guard_evaluations {
+        println!("    {} -> {}", g.path, g.result);
+    }
+}
+
+/// The value of an optional `--payload`/`--entity` CLI argument, parsed as
+/// JSON. Absent (matching `ts-harness.ts`'s `payload ?? {}` /
+/// `options?.entityState ?? {}`) defaults to an empty object.
+fn parse_json_arg(raw: Option<&str>) -> anyhow::Result<serde_json::Value> {
+    match raw {
+        Some(s) => serde_json::from_str(s)
+            .map_err(|e| anyhow::anyhow!("Invalid JSON: {}: {}", s, e)),
+        None => Ok(serde_json::json!({})),
+    }
+}
+
+fn to_core_value(json: &serde_json::Value) -> anyhow::Result<Value> {
+    serde_json::from_value(json.clone())
+        .map_err(|e| anyhow::anyhow!("Failed to convert JSON to evaluator value: {}", e))
+}
+
+/// The guard expression the TypeScript harness would display for this event,
+/// looked up by event name alone (ignoring `from`) — see the asymmetry note
+/// on [`ExecutionResultDto`].
+fn guard_for_event(td: &TraitDefinition, event: &str) -> serde_json::Value {
+    td.state_machine
+        .transitions
+        .iter()
+        .find(|t| t.event == event)
+        .and_then(|t| t.guard.as_ref())
+        .map(SExpression::to_canonical_json)
+        .unwrap_or(serde_json::Value::Array(vec![]))
+}
+
+fn run_execute(
+    path: &Path,
+    event: &str,
+    payload_arg: Option<&str>,
+    entity_arg: Option<&str>,
+    trait_filter: Option<&str>,
+) -> anyhow::Result<ExecutionResultDto> {
+    use orbital_compiler::{resolve_schema_with_path, CompilerOptions};
+
+    let schema_path = path.display().to_string();
+    let options = CompilerOptions::from_env();
+
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("Failed to read {}: {}", path.display(), e))?;
+    let schema = parse_schema_auto(&content, &schema_path)
+        .map_err(|e| anyhow::anyhow!("Failed to parse {}: {}", path.display(), e))?;
+    let resolved = resolve_schema_with_path(schema, &options, Some(path))
+        .map_err(|e| anyhow::anyhow!("Failed to resolve {}: {}", path.display(), e))?;
+
+    let payload_json = parse_json_arg(payload_arg)?;
+    let entity_json = parse_json_arg(entity_arg)?;
+    let payload_value = to_core_value(&payload_json)?;
+    let entity_value = to_core_value(&entity_json)?;
+
+    let mut traits = inline_traits(&resolved);
+    if let Some(name) = trait_filter {
+        traits.retain(|t| t.name == name);
+    }
+
+    if traits.is_empty() {
+        return Ok(ExecutionResultDto {
+            success: false,
+            error: Some("No inline traits with state machines found in schema".to_string()),
+            initial_state: String::new(),
+            final_state: String::new(),
+            transitions: vec![],
+            effects: vec![],
+            guard_evaluations: vec![],
+            implementation: "rust",
+            execution_time_ms: 0,
+            schema_path: schema_path.clone(),
+        });
+    }
+
+    let core = StateMachineCore::new();
+    let mut first_initial_state = String::new();
+    let mut last_final_state = String::new();
+    let mut all_transitions = Vec::new();
+    let mut all_effects = Vec::new();
+    let mut all_guards = Vec::new();
+
+    for td in &traits {
+        let current_state = initial_state(td).unwrap_or_else(|| "idle".to_string());
+        if first_initial_state.is_empty() {
+            first_initial_state = current_state.clone();
+        }
+
+        let event_payload = EventPayload::new(event, payload_value.clone());
+        let mut ctx = BindingContext::new();
+        ctx.set_entity(entity_value.clone());
+
+        let result = core.process_event(&td.state_machine, &current_state, &event_payload, &ctx)?;
+
+        let post_state = if result.executed {
+            let to = result
+                .new_state
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("executed transition carries no new_state"))?;
+            all_transitions.push(ExecTransition {
+                from: current_state.clone(),
+                to: to.clone(),
+                event: event.to_string(),
+                timestamp: 0,
+            });
+            for effect in &result.effects {
+                all_effects.push(to_exec_effect(effect));
+            }
+            to
+        } else {
+            current_state.clone()
+        };
+
+        if let Some(guard_result) = &result.guard_result {
+            all_guards.push(ExecGuardEvaluation {
+                guard: guard_for_event(td, event),
+                context: ExecGuardContext {
+                    entity: entity_json.clone(),
+                    payload: payload_json.clone(),
+                    state: post_state.clone(),
+                },
+                result: guard_result.passed,
+                path: format!("traits[{}].transitions[{}]", td.name, event),
+            });
+        }
+
+        last_final_state = post_state;
+    }
+
+    Ok(ExecutionResultDto {
+        success: true,
+        error: None,
+        initial_state: first_initial_state,
+        final_state: last_final_state,
+        transitions: all_transitions,
+        effects: all_effects,
+        guard_evaluations: all_guards,
+        implementation: "rust",
+        execution_time_ms: 0,
+        schema_path,
+    })
+}

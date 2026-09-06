@@ -1,0 +1,54 @@
+{
+  "name": "ExecuteGuardedFixture",
+  "version": "1.0.0",
+  "orbitals": [
+    {
+      "name": "Gate",
+      "entity": {
+        "name": "Gate",
+        "collection": "gates",
+        "persistence": "persistent",
+        "fields": [
+          { "name": "id", "required": true, "type": "string" },
+          { "name": "ready", "type": "boolean" },
+          { "name": "count", "type": "number" }
+        ]
+      },
+      "traits": [
+        {
+          "name": "GateSwitch",
+          "category": "interaction",
+          "linkedEntity": "Gate",
+          "scope": "collection",
+          "emits": [
+            { "event": "INIT", "scope": "external", "tier": "domain" }
+          ],
+          "stateMachine": {
+            "events": [
+              { "key": "INIT", "name": "Init" }
+            ],
+            "states": [
+              { "name": "idle", "isInitial": true },
+              { "name": "active" }
+            ],
+            "transitions": [
+              {
+                "event": "INIT",
+                "from": "idle",
+                "to": "active",
+                "guard": ["==", "@entity.ready", true],
+                "effects": [
+                  ["set", "@entity.count", 1],
+                  ["render-ui", "main", { "type": "typography", "content": "Active" }]
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "pages": [
+        { "name": "GatePage", "path": "/gate", "traits": [{ "ref": "GateSwitch" }] }
+      ]
+    }
+  ]
+}
