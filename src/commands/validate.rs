@@ -36,7 +36,10 @@ fn validate_schema_json(
     extra_patterns: Option<orbital_compiler::ExtraPatterns>,
     service_registry: orbital_compiler::embedded::ServiceRegistryData,
 ) -> anyhow::Result<()> {
-    use orbital_compiler::phases::inline::inline_schema_with_config_diagnostics;
+    use orbital_compiler::phases::inline::inline_schema_with_orbital_diagnostics;
+    use orbital_compiler::phases::validation::orbital_ref_config::{
+        validate_orbital_ref_diagnostics, validate_uses_config_diagnostics,
+    };
     use orbital_compiler::phases::validation::trait_ref_config::validate_trait_ref_config_diagnostics;
     use orbital_compiler::{compile_schema, validate_comprehensive_full, CompilerOptions};
     use orbital_core::ir::{OirValidator, ValidationSeverity};
@@ -96,6 +99,8 @@ fn validate_schema_json(
     // filesystem — same path `orb compile` uses. Validation-only mode used
     // to skip this and produced false positives on every multi-use schema.
     let mut trait_ref_config_diagnostics = Vec::new();
+    let mut orbital_ref_diagnostics = Vec::new();
+    let mut uses_config_diagnostics = Vec::new();
     // from_env, NOT default: the plain-text validate path resolves imports
     // through dev-workspace registries (ALMADAR_DEV) while this --json path
     // used InlineConfig::default() and silently inlined the STALE baked
@@ -103,11 +108,13 @@ fn validate_schema_json(
     // validateWithOrbitalCLI (--json) and a manual `orb validate` then
     // disagreed about the same schema.
     let inline_config = CompilerOptions::from_env().inline;
-    if let Err(e) = inline_schema_with_config_diagnostics(
+    if let Err(e) = inline_schema_with_orbital_diagnostics(
         &mut schema,
         &inline_config,
         Some(path.as_path()),
         &mut trait_ref_config_diagnostics,
+        &mut orbital_ref_diagnostics,
+        &mut uses_config_diagnostics,
     ) {
         // Source-tag from the inline-phase variant: when the producer
         // populated a structured path (e.g. DuplicateTraitName carries
@@ -232,6 +239,8 @@ fn validate_schema_json(
     comprehensive_result.merge(validate_trait_ref_config_diagnostics(
         &trait_ref_config_diagnostics,
     ));
+    comprehensive_result.merge(validate_orbital_ref_diagnostics(&orbital_ref_diagnostics));
+    comprehensive_result.merge(validate_uses_config_diagnostics(&uses_config_diagnostics));
 
     let mut all_errors: Vec<ValidationJsonError> = Vec::new();
     let mut all_warnings: Vec<ValidationJsonWarning> = Vec::new();
@@ -407,7 +416,10 @@ pub(crate) fn run_full_validation(
     service_registry: orbital_compiler::embedded::ServiceRegistryData,
 ) -> anyhow::Result<ValidationDiagnostics> {
     use orbital_compiler::phases::enrich_schema;
-    use orbital_compiler::phases::inline::inline_schema_with_config_diagnostics;
+    use orbital_compiler::phases::inline::inline_schema_with_orbital_diagnostics;
+    use orbital_compiler::phases::validation::orbital_ref_config::{
+        validate_orbital_ref_diagnostics, validate_uses_config_diagnostics,
+    };
     use orbital_compiler::phases::validation::trait_ref_config::validate_trait_ref_config_diagnostics;
     use orbital_compiler::{
         compile_schema, validate_comprehensive_full, CompilerOptions, SchemaLanguage,
@@ -429,15 +441,19 @@ pub(crate) fn run_full_validation(
     // rebuild + rebake.
     let default_opts = CompilerOptions::from_env();
     let mut trait_ref_config_diagnostics = Vec::new();
+    let mut orbital_ref_diagnostics = Vec::new();
+    let mut uses_config_diagnostics = Vec::new();
     // An inline failure is FATAL for this run: validators index Inline traits
     // only, so validating the half-inlined schema manufactures spurious
     // ORB_T_UNDEFINED_TRAIT / ORB_X_LISTEN_SOURCE_UNRESOLVED findings that
     // bury the real cause. Report the one true error and stop.
-    if let Err(e) = inline_schema_with_config_diagnostics(
+    if let Err(e) = inline_schema_with_orbital_diagnostics(
         &mut schema,
         &default_opts.inline,
         Some(path),
         &mut trait_ref_config_diagnostics,
+        &mut orbital_ref_diagnostics,
+        &mut uses_config_diagnostics,
     ) {
         let path_part = match e.structured_path() {
             "" => String::new(),
@@ -460,6 +476,8 @@ pub(crate) fn run_full_validation(
     comprehensive_result.merge(validate_trait_ref_config_diagnostics(
         &trait_ref_config_diagnostics,
     ));
+    comprehensive_result.merge(validate_orbital_ref_diagnostics(&orbital_ref_diagnostics));
+    comprehensive_result.merge(validate_uses_config_diagnostics(&uses_config_diagnostics));
 
     // Human path: append ` @ line:col` when the L2 path resolves to a
     // `.lolo` span (`source_map` is `None` for `.orb` JSON input, and a miss
