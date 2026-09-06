@@ -513,13 +513,47 @@ fn uses_inline_config_gets_hint() {
     let err = first_parse_error(&result);
     let sugg = err["suggestion"].as_str().unwrap();
     assert!(
-        sugg.contains("ONLY the import"),
-        "suggestion must name the uses-line rule: {sugg}"
+        sugg.contains("ONLY a `config { … }` block"),
+        "suggestion must name the uses-body rule: {sugg}"
     );
     let fix = err["fixGuidance"].as_str().unwrap();
     assert!(
+        fix.contains("{ config { dateField:"),
+        "fixGuidance must show the config-wrapped form: {fix}"
+    );
+    assert!(
         fix.contains("reference site"),
-        "fixGuidance must point at the reference-site override: {fix}"
+        "fixGuidance must keep the per-trait reference-site override: {fix}"
+    );
+}
+
+#[test]
+fn uses_config_block_parses() {
+    // The wrapped form the hint above teaches must be accepted (orbital-import
+    // Stage A: `uses … { config { … } }` sets organism-wide knobs).
+    let lolo = r#"orbital X {
+  uses ReminderScheduler from "std/behaviors/std-reminder-scheduler" { config { dateField: "nextReviewDate" } }
+  entity X [runtime] { id : string! }
+  trait T -> X [interaction] {
+    initial: idle
+    state idle {
+      CLICK -> idle
+    }
+  }
+}
+"#;
+    let result = validate_lolo(lolo, "uses-config-block");
+    let parse_errors: Vec<&serde_json::Value> = result["errors"]
+        .as_array()
+        .map(|errs| {
+            errs.iter()
+                .filter(|e| e["code"] == "LOLO_PARSE_ERROR")
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        parse_errors.is_empty(),
+        "config-wrapped uses body must parse: {parse_errors:?}"
     );
 }
 

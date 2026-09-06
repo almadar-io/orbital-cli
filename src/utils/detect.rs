@@ -269,11 +269,11 @@ pub(crate) fn typed_parse_error_to_json(
                         }
                     })
                     .or_else(|| {
-                        // `uses X from "path" { config }` — call-site config
-                        // bolted onto the import line (run 36: ReviewScheduler
-                        // gave up on this repeatedly; the bare token error
-                        // named neither the rule nor where config goes).
-                        if msg.contains("got LBrace") {
+                        // `uses X from "path" { dateField: … }` — bare knobs on
+                        // the import line. The parser opens the `{ … }` body
+                        // (orbital-import Stage A) and then wants `config` or
+                        // `}`, so the token error lands on the first knob.
+                        if msg.contains("expected }, got Identifier") {
                             uses_inline_config_hint(s, span.line as usize)
                         } else {
                             None
@@ -494,7 +494,7 @@ pub(crate) fn typed_parse_error_to_json(
                         // FLAT app file with no `orbital { … }` wrapper (run
                         // 39: granite ×2) — the surplus-brace variant hint
                         // misdirects when no orbital block exists at all.
-                        if msg.contains("expected type or orbital") {
+                        if msg.contains("expected type, uses, or orbital") {
                             no_orbital_block_hint(s, span.line as usize)
                         } else {
                             None
@@ -785,16 +785,18 @@ fn braced_lambda_body_hint(source: &str, line: usize, col: usize) -> Option<(Str
     ))
 }
 
-/// `uses X from "path" { dateField: … }` — a config block on the import
-/// line. The import is bare; overrides live on a trait REFERENCE.
+/// `uses X from "path" { dateField: … }` — knobs written directly in the
+/// import's `{ … }` body. The body takes ONE `config { … }` block (the
+/// imported behavior's organism-wide knobs, orbital-import Stage A);
+/// per-trait overrides still live on the trait REFERENCE.
 fn uses_inline_config_hint(source: &str, line: usize) -> Option<(String, String)> {
     let line_text = source.lines().nth(line.checked_sub(1)?)?;
     if !line_text.trim_start().starts_with("uses ") {
         return None;
     }
     Some((
-        "a `uses` line is ONLY the import — it takes no `{ … }` config block".to_string(),
-        "keep the import bare (`uses Name from \"std/behaviors/<name>\"`), then override at the reference site: `trait My = Name.traits.<TraitName> -> Entity { config { key: value … } }`".to_string(),
+        "a `uses` line's `{ … }` body holds ONLY a `config { … }` block — knobs cannot sit directly inside it".to_string(),
+        "wrap the knobs: `uses Name from \"std/behaviors/<name>\" { config { dateField: \"nextReviewDate\" } }` (organism-wide knobs), or override one trait at its reference site: `trait My = Name.traits.<TraitName> -> Entity { config { key: value … } }`".to_string(),
     ))
 }
 
