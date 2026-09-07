@@ -3,6 +3,7 @@
 
 pub(crate) mod agents;
 pub(crate) mod detect;
+pub(crate) mod diagnostics;
 pub(crate) mod evaluate;
 pub(crate) mod i18n;
 pub(crate) mod patterns;
@@ -15,6 +16,7 @@ pub(crate) use detect::{
     typed_parse_error_to_json, InputSyntax,
 };
 pub use detect::{parse_schema_auto_typed, parse_schema_auto_typed_with_map, TypedParseError};
+pub(crate) use diagnostics::merge_post_inline_diagnostics;
 pub(crate) use evaluate::evaluate_sexpr;
 pub(crate) use i18n::{copy_locales, detect_language, translate_schema_content};
 pub(crate) use patterns::{

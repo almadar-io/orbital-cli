@@ -988,6 +988,10 @@ pub(crate) struct ValidationJsonWarning {
     pub(crate) message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) suggestion: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) line: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) column: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]

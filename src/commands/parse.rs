@@ -67,7 +67,12 @@ pub(crate) fn resolve_schema_cli(
         .map_err(|e| anyhow::anyhow!("Failed to parse {}: {}", path.display(), e))?;
     let resolved = resolve_schema_with_path(schema, &options, Some(path))
         .map_err(|e| anyhow::anyhow!("Failed to resolve {}: {}", path.display(), e))?;
-    let json = serde_json::to_string_pretty(&resolved)
+    let resolved_value = serde_json::to_value(&resolved)
+        .map_err(|e| anyhow::anyhow!("Failed to serialize resolved schema: {}", e))?;
+    // Byte-identical `orb resolve` (owner ruling, Stage C): `preserve_order`
+    // means `to_string_pretty` alone reflects HashMap insertion order, which
+    // varies run to run for the same schema. Canonicalize before printing.
+    let json = serde_json::to_string_pretty(&orbital_core::util::canonical_json(&resolved_value))
         .map_err(|e| anyhow::anyhow!("Failed to serialize resolved schema: {}", e))?;
 
     match output {
@@ -98,7 +103,7 @@ pub(crate) fn format_schema(path: &PathBuf, write: bool) -> anyhow::Result<()> {
         InputSyntax::OrbJson => {
             let value: serde_json::Value = serde_json::from_str(&content)
                 .map_err(|e| anyhow::anyhow!("Invalid JSON in {}: {}", path.display(), e))?;
-            serde_json::to_string_pretty(&value)?
+            serde_json::to_string_pretty(&orbital_core::util::canonical_json(&value))?
         }
     };
 

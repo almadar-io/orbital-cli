@@ -156,7 +156,9 @@ pub(crate) fn execute_schema_cli(
         // always gets a well-formed DTO on stdout to parse, mirroring how
         // `ts-harness.ts execute()` catches and returns `success:false`
         // rather than throwing.
-        Err(e) => ExecutionResultDto::failure(&schema_path, start.elapsed().as_millis(), e.to_string()),
+        Err(e) => {
+            ExecutionResultDto::failure(&schema_path, start.elapsed().as_millis(), e.to_string())
+        }
     };
 
     if json {
@@ -171,7 +173,10 @@ pub(crate) fn execute_schema_cli(
 fn print_human(dto: &ExecutionResultDto) {
     println!("Execute: {}", dto.schema_path);
     if !dto.success {
-        println!("  FAILED: {}", dto.error.as_deref().unwrap_or("unknown error"));
+        println!(
+            "  FAILED: {}",
+            dto.error.as_deref().unwrap_or("unknown error")
+        );
         return;
     }
     println!("  {} -> {}", dto.initial_state, dto.final_state);
@@ -194,8 +199,9 @@ fn print_human(dto: &ExecutionResultDto) {
 /// `options?.entityState ?? {}`) defaults to an empty object.
 fn parse_json_arg(raw: Option<&str>) -> anyhow::Result<serde_json::Value> {
     match raw {
-        Some(s) => serde_json::from_str(s)
-            .map_err(|e| anyhow::anyhow!("Invalid JSON: {}: {}", s, e)),
+        Some(s) => {
+            serde_json::from_str(s).map_err(|e| anyhow::anyhow!("Invalid JSON: {}: {}", s, e))
+        }
         None => Ok(serde_json::json!({})),
     }
 }

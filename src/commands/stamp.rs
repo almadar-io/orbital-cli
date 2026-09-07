@@ -54,16 +54,18 @@ pub(crate) fn stamp_schema_cli(
             .map_err(|e| anyhow::anyhow!("Failed to resolve cross-file id edges: {}", e))?;
     }
 
-    // Serialize via `to_value` → strip nulls → pretty, IDENTICAL to `orb emit
-    // orb` (emit/mod.rs) — routes through `serde_json::Value` (a sorted
-    // BTreeMap, since preserve_order is off) so the output is the canonical
-    // sorted-key form the registry `.orb` files are stored in. Serializing the
-    // typed struct directly would use declaration/HashMap order (churn + non-
-    // deterministic), breaking byte-stability of a re-stamped registry file.
+    // Serialize via `to_value` → strip nulls → canonical_json → pretty,
+    // IDENTICAL to `orb emit orb` (emit/mod.rs). `preserve_order` is ON
+    // workspace-wide (`orbital-compiler/Cargo.toml`), so `serde_json::Map` is
+    // insertion-ordered, not a sorted BTreeMap — `canonical_json` is what
+    // makes the output the canonical sorted-key form the registry `.orb`
+    // files are stored in. Serializing the typed struct directly would use
+    // declaration/HashMap order (churn + non-deterministic), breaking
+    // byte-stability of a re-stamped registry file.
     let value = serde_json::to_value(&schema)
         .map_err(|e| anyhow::anyhow!("Failed to serialize stamped schema: {}", e))?;
     let cleaned = crate::strip_json_nulls(value);
-    let json = serde_json::to_string_pretty(&cleaned)
+    let json = serde_json::to_string_pretty(&orbital_core::util::canonical_json(&cleaned))
         .map_err(|e| anyhow::anyhow!("Failed to serialize stamped schema: {}", e))?;
     match output {
         Some(out) => std::fs::write(out, &json)

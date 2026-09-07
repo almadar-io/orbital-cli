@@ -69,7 +69,7 @@ orbital ModalRecordOrbital {
 
     emits {
       SAVE {
-        data : opaque!
+        data : @entity!
       }
         @description "Indicates a successful data save operation."
         @synonyms "submit, persist, confirm"
@@ -97,7 +97,7 @@ orbital ModalRecordOrbital {
         @synonyms "show, display, present, reveal"
         @tier "essential"
       SAVE {
-        data : opaque!
+        data : @entity!
       }
         @description "Indicates a successful data submission or confirmation."
         @synonyms "submit, confirm, accept, persist"

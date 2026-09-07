@@ -619,7 +619,13 @@ pub(crate) fn typed_parse_error_to_json(
                 TypeError::GenericTypeForbidden { name, .. } => (
                     "ORB_T_GENERIC_TYPE_DEPRECATED",
                     Some(format!(
-                        "replace `{name}`: renderable content → `node`; structured data → an inline shape, a named `type` alias, or `Map K V`; a single primitive of unknown kind → `scalar`; genuinely open data → `opaque`"
+                        "replace `{name}`: renderable content → `node`; structured data → an inline shape, a named `type` alias, or `Map K V`; a single primitive of unknown kind → `scalar`"
+                    )),
+                ),
+                TypeError::PayloadSiblingUnresolved { sibling, .. } => (
+                    "ELOLO_T_PAYLOAD_SIBLING",
+                    Some(format!(
+                        "declare a sibling field named {sibling:?} in the same struct, typed `event`"
                     )),
                 ),
             };
@@ -1307,12 +1313,11 @@ fn replay_delimiters(
 ) -> (Vec<(char, usize, usize)>, Option<(char, usize, usize)>) {
     let mut stack: Vec<(char, usize, usize)> = Vec::new();
     let mut first_mismatch: Option<(char, usize, usize)> = None;
-    let mut record_mismatch =
-        |c: char, l: usize, co: usize, fm: &mut Option<(char, usize, usize)>| {
-            if fm.is_none() {
-                *fm = Some((c, l, co));
-            }
-        };
+    let record_mismatch = |c: char, l: usize, co: usize, fm: &mut Option<(char, usize, usize)>| {
+        if fm.is_none() {
+            *fm = Some((c, l, co));
+        }
+    };
     for (li, text) in source.lines().enumerate() {
         let lineno = li + 1;
         let mut in_str = false;

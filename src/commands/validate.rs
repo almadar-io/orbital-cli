@@ -1,8 +1,8 @@
 //! `orb validate` — native Rust schema validation (text + JSON output).
 
 use crate::utils::{
-    detect_language, load_extra_patterns, load_services_registry, parse_schema_auto_typed_with_map,
-    parse_schema_auto_with_map, typed_parse_error_to_json,
+    detect_language, load_extra_patterns, load_services_registry, merge_post_inline_diagnostics,
+    parse_schema_auto_typed_with_map, parse_schema_auto_with_map, typed_parse_error_to_json,
 };
 use crate::{ValidationJsonError, ValidationJsonOutput, ValidationJsonWarning, ValidationStats};
 use std::path::PathBuf;
@@ -37,10 +37,6 @@ fn validate_schema_json(
     service_registry: orbital_compiler::embedded::ServiceRegistryData,
 ) -> anyhow::Result<()> {
     use orbital_compiler::phases::inline::inline_schema_with_orbital_diagnostics;
-    use orbital_compiler::phases::validation::orbital_ref_config::{
-        validate_orbital_ref_diagnostics, validate_uses_config_diagnostics,
-    };
-    use orbital_compiler::phases::validation::trait_ref_config::validate_trait_ref_config_diagnostics;
     use orbital_compiler::{compile_schema, validate_comprehensive_full, CompilerOptions};
     use orbital_core::ir::{OirValidator, ValidationSeverity};
 
@@ -236,11 +232,13 @@ fn validate_schema_json(
     };
     let mut comprehensive_result =
         validate_comprehensive_full(&schema, extra_patterns, schema_language, service_registry);
-    comprehensive_result.merge(validate_trait_ref_config_diagnostics(
+    merge_post_inline_diagnostics(
+        &mut comprehensive_result,
         &trait_ref_config_diagnostics,
-    ));
-    comprehensive_result.merge(validate_orbital_ref_diagnostics(&orbital_ref_diagnostics));
-    comprehensive_result.merge(validate_uses_config_diagnostics(&uses_config_diagnostics));
+        &orbital_ref_diagnostics,
+        &uses_config_diagnostics,
+        &schema,
+    );
 
     let mut all_errors: Vec<ValidationJsonError> = Vec::new();
     let mut all_warnings: Vec<ValidationJsonWarning> = Vec::new();
@@ -319,11 +317,17 @@ fn validate_schema_json(
     }
 
     for warning in &comprehensive_result.warnings {
+        let span = source_map
+            .as_ref()
+            .and_then(|m| m.lookup_detailed(&warning.path))
+            .map(|(s, _)| s);
         all_warnings.push(ValidationJsonWarning {
             code: warning.code.to_string(),
             path: warning.path.clone(),
             message: warning.message.clone(),
             suggestion: warning.suggestion.clone(),
+            line: span.map(|s| s.line),
+            column: span.map(|s| s.col),
         });
     }
 
@@ -333,9 +337,18 @@ fn validate_schema_json(
     // here silently dropped compile/resolve failures and let `--json` report
     // `valid:true` on a schema plain `orb validate` rejects (same class of
     // --json/plain divergence the inline `from_env` note above documents).
+    // One reporter: when validation already reported errors the compile step
+    // can only restate the same root cause as `COMPILATION_ERROR`, so it runs
+    // only on a schema validation accepted.
     let options = CompilerOptions::from_env();
-    match compile_schema(schema, &options) {
-        Ok(module) => {
+    let compile_result = if all_errors.is_empty() {
+        Some(compile_schema(schema, &options))
+    } else {
+        None
+    };
+    match compile_result {
+        None => {}
+        Some(Ok(module)) => {
             let validator = OirValidator::new(&module);
             let oir_result = validator.validate();
 
@@ -358,11 +371,13 @@ fn validate_schema_json(
                         path: error.path.clone(),
                         message: error.message.clone(),
                         suggestion: None,
+                        line: None,
+                        column: None,
                     });
                 }
             }
         }
-        Err(e) => {
+        Some(Err(e)) => {
             all_errors.push(ValidationJsonError {
                 code: "COMPILATION_ERROR".to_string(),
                 path: "".to_string(),
@@ -417,10 +432,6 @@ pub(crate) fn run_full_validation(
 ) -> anyhow::Result<ValidationDiagnostics> {
     use orbital_compiler::phases::enrich_schema;
     use orbital_compiler::phases::inline::inline_schema_with_orbital_diagnostics;
-    use orbital_compiler::phases::validation::orbital_ref_config::{
-        validate_orbital_ref_diagnostics, validate_uses_config_diagnostics,
-    };
-    use orbital_compiler::phases::validation::trait_ref_config::validate_trait_ref_config_diagnostics;
     use orbital_compiler::{
         compile_schema, validate_comprehensive_full, CompilerOptions, SchemaLanguage,
     };
@@ -473,11 +484,13 @@ pub(crate) fn run_full_validation(
 
     let mut comprehensive_result =
         validate_comprehensive_full(&schema, extra_patterns, schema_language, service_registry);
-    comprehensive_result.merge(validate_trait_ref_config_diagnostics(
+    merge_post_inline_diagnostics(
+        &mut comprehensive_result,
         &trait_ref_config_diagnostics,
-    ));
-    comprehensive_result.merge(validate_orbital_ref_diagnostics(&orbital_ref_diagnostics));
-    comprehensive_result.merge(validate_uses_config_diagnostics(&uses_config_diagnostics));
+        &orbital_ref_diagnostics,
+        &uses_config_diagnostics,
+        &schema,
+    );
 
     // Human path: append ` @ line:col` when the L2 path resolves to a
     // `.lolo` span (`source_map` is `None` for `.orb` JSON input, and a miss
@@ -514,8 +527,14 @@ pub(crate) fn run_full_validation(
     // Compile to OIR (schema already inlined+enriched above -> skip re-inline).
     let mut options = CompilerOptions::from_env();
     options.inline.skip_inline = true;
-    match compile_schema(schema, &options) {
-        Ok(module) => {
+    let compile_result = if errors.is_empty() {
+        Some(compile_schema(schema, &options))
+    } else {
+        None
+    };
+    match compile_result {
+        None => {}
+        Some(Ok(module)) => {
             let oir = OirValidator::new(&module).validate();
             for e in &oir.errors {
                 if e.severity == ValidationSeverity::Error {
@@ -531,7 +550,7 @@ pub(crate) fn run_full_validation(
                 warnings.push(w);
             }
         }
-        Err(e) => errors.push(format!("Compilation error: {e}")),
+        Some(Err(e)) => errors.push(format!("Compilation error: {e}")),
     }
 
     Ok(ValidationDiagnostics { errors, warnings })

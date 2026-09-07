@@ -90,7 +90,7 @@ pub(crate) fn compile_schema(
         let value = serde_json::to_value(&schema)
             .map_err(|e| anyhow::anyhow!("Failed to serialize lowered schema: {}", e))?;
         let cleaned = strip_json_nulls(value);
-        let json = serde_json::to_string_pretty(&cleaned)
+        let json = serde_json::to_string_pretty(&orbital_core::util::canonical_json(&cleaned))
             .map_err(|e| anyhow::anyhow!("Failed to serialize lowered schema: {}", e))?;
         let target = if let Some(emit) = emit_orb {
             emit.to_path_buf()
@@ -364,7 +364,7 @@ fn compile_mixed(
         let value = serde_json::to_value(&schema)
             .map_err(|e| anyhow::anyhow!("Failed to serialize lowered schema: {}", e))?;
         let cleaned = strip_json_nulls(value);
-        let json = serde_json::to_string_pretty(&cleaned)
+        let json = serde_json::to_string_pretty(&orbital_core::util::canonical_json(&cleaned))
             .map_err(|e| anyhow::anyhow!("Failed to serialize lowered schema: {}", e))?;
         let temp_dir = std::env::temp_dir();
         let temp_path = temp_dir.join("_orbital_lolo_lowered_mixed.orb");
