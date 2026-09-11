@@ -12,7 +12,7 @@
 
 use orbital_client::bridge::ServerBridge;
 use orbital_client::http::{BridgeError, SyncServerBridge};
-use orbital_client::render_probe::{probe_schema_with, RenderReport};
+use orbital_client::render_probe::{probe_schema_with_scoped, RenderReport};
 use orbital_core::{EventResponse, OrbitalSchema, Value};
 use orbital_server::{serve_background, BackgroundServer, InMemoryAdapter, OrbitalServerRuntime};
 use std::sync::Arc;
@@ -46,9 +46,24 @@ fn boot_http_bridge(schema: &OrbitalSchema) -> anyhow::Result<Arc<dyn ServerBrid
     runtime
         .register_schema(schema.clone())
         .map_err(|e| anyhow::anyhow!("register_schema: {e}"))?;
-    // SAME canonical seeder + count as the in-process probe — so any render difference is
-    // server/client logic, never seeding.
-    runtime.seed_sample(schema, 1);
+    // SAME default-persona binding as the in-process `KernelBridge` probe (identical
+    // seed count, same first-roster-persona rule) — without it the HTTP bridge evaluates
+    // every `@read`/guard anonymously while the in-process probe sees the bound viewer,
+    // and an ownership-scoped list parities as empty here but populated there.
+    match orbital_core::runtime::default_probe_persona(schema) {
+        Some(user) => {
+            let id = user
+                .get_path("id")
+                .and_then(|v| v.as_str().map(str::to_string));
+            runtime.set_current_user(user);
+            runtime.seed_sample_as(
+                schema,
+                orbital_core::runtime::DEFAULT_IDENTITY_ROSTER_COUNT,
+                id,
+            );
+        }
+        None => runtime.seed_sample(schema, 1),
+    }
 
     let server = serve_background(runtime)?;
     let inner = SyncServerBridge::new(server.base_url());
@@ -58,7 +73,12 @@ fn boot_http_bridge(schema: &OrbitalSchema) -> anyhow::Result<Arc<dyn ServerBrid
     }))
 }
 
-/// Run the L2 render contract driving a live HTTP server per orbital — server↔client parity.
-pub(crate) fn probe_over_http(item: &str, schema: OrbitalSchema) -> anyhow::Result<RenderReport> {
-    probe_schema_with(item, schema, |s, _idx| boot_http_bridge(s))
+/// Run the L2 render contract driving a live HTTP server per orbital — server↔client parity,
+/// restricted to `traits` when given (`--trait`) — see `render_probe::probe_schema_scoped`.
+pub(crate) fn probe_over_http(
+    item: &str,
+    schema: OrbitalSchema,
+    traits: Option<&[String]>,
+) -> anyhow::Result<RenderReport> {
+    probe_schema_with_scoped(item, schema, traits, |s, _idx| boot_http_bridge(s))
 }

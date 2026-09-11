@@ -343,6 +343,15 @@ enum Commands {
         /// --smoke/--deep/--json).
         #[arg(long)]
         all_personas: bool,
+
+        /// Verify only this trait's `(from, event)` pairs (repeatable or
+        /// comma-separated: `--trait A --trait B` / `--trait A,B`) instead of the
+        /// target's full walk. Matches both the compiled, possibly orbital-prefixed
+        /// name and the bare `.lolo`/import name a trait carries post-resolve.
+        /// Composes with --smoke/--deep/--server/--report-dir. A name matching no
+        /// trait in the target is an error listing every available trait name.
+        #[arg(long = "trait", value_name = "NAME", value_delimiter = ',')]
+        traits: Vec<String>,
     },
 
     /// Compile an Orbital schema to generated code
@@ -770,6 +779,7 @@ fn main() -> anyhow::Result<()> {
             min_coverage,
             engine_timeout,
             all_personas,
+            traits,
         }) => commands::verify::run_verify(commands::verify::VerifyCliArgs {
             path,
             registry,
@@ -790,6 +800,7 @@ fn main() -> anyhow::Result<()> {
             min_coverage,
             engine_timeout,
             all_personas,
+            traits,
         }),
         Some(Commands::Format { path, write }) => format_schema(&path, write),
         Some(Commands::Compile {

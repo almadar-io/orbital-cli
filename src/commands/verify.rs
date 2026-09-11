@@ -38,6 +38,9 @@ pub(crate) struct VerifyCliArgs {
     pub min_coverage: Option<f64>,
     pub engine_timeout: Option<u64>,
     pub all_personas: bool,
+    /// `--trait NAME` (repeatable/comma-separated): restrict the walk to one or more
+    /// named traits — empty means no filter (today's full walk).
+    pub traits: Vec<String>,
 }
 
 /// Route a human-readable line to stdout, unless `--json` is active — the unified
@@ -91,8 +94,10 @@ pub(crate) fn run_verify(args: VerifyCliArgs) -> Result<()> {
         min_coverage,
         engine_timeout,
         all_personas,
+        traits,
     } = args;
     let engine_timeout = engine_timeout.map(std::time::Duration::from_secs);
+    let traits: Option<&[String]> = if traits.is_empty() { None } else { Some(&traits) };
 
     // Map `--shell` up front so an unknown value fails fast before any target is walked.
     let shell_lang = shell.as_deref().map(parse_shell_lang).transpose()?;
@@ -104,6 +109,12 @@ pub(crate) fn run_verify(args: VerifyCliArgs) -> Result<()> {
         Tier::Standard
     };
     let engine_list = resolve_engines(rust, runtime, compiled, all);
+    if traits.is_some() && engine_list != vec![Engine::Rust] {
+        anyhow::bail!(
+            "--trait only scopes the in-process rust engine (L1 kernel + L2 client render); \
+             drop --runtime/--compiled/--all to use it"
+        );
+    }
     let repo_root = repo_root();
 
     let resolved_path = match path {
@@ -114,6 +125,9 @@ pub(crate) fn run_verify(args: VerifyCliArgs) -> Result<()> {
     // Per-frame (state-transition) screenshot capture mode — orthogonal to
     // tier/engine, unchanged from before the unified CLI.
     if let Some(dir) = frames_dir {
+        if traits.is_some() {
+            anyhow::bail!("--trait is not supported with --screenshot-frames");
+        }
         let targets = collect_targets(resolved_path, registry, topic.as_deref());
         if targets.is_empty() {
             anyhow::bail!(
@@ -153,10 +167,10 @@ pub(crate) fn run_verify(args: VerifyCliArgs) -> Result<()> {
     }
 
     if all_personas {
-        if engine_list != vec![Engine::Rust] || tier != Tier::Standard || json {
+        if engine_list != vec![Engine::Rust] || tier != Tier::Standard || json || traits.is_some() {
             anyhow::bail!(
                 "--all-personas is only supported with the default L1 kernel walk \
-                 (no --runtime/--compiled/--all/--smoke/--deep/--json)"
+                 (no --runtime/--compiled/--all/--smoke/--deep/--json/--trait)"
             );
         }
         return run_verify_all_personas(&targets);
@@ -171,6 +185,7 @@ pub(crate) fn run_verify(args: VerifyCliArgs) -> Result<()> {
             screenshot_dir.as_deref(),
             server,
             shell_lang,
+            traits,
         );
     }
 
@@ -187,6 +202,7 @@ pub(crate) fn run_verify(args: VerifyCliArgs) -> Result<()> {
         engine_timeout,
         shell_lang,
         &repo_root,
+        traits,
     )
 }
 
@@ -196,6 +212,7 @@ fn run_verify_classic(
     screenshot_dir: Option<&Path>,
     server: bool,
     shell_lang: Option<orbital_verify::shell::ShellLang>,
+    traits: Option<&[String]>,
 ) -> Result<()> {
     let mut passed = 0usize;
     let mut failed = 0usize;
@@ -208,6 +225,7 @@ fn run_verify_classic(
             shell_lang,
             Tier::Standard,
             false,
+            traits,
         ) {
             Ok(outcome) => {
                 if outcome.ok {
@@ -365,6 +383,7 @@ fn run_verify_unified(
     engine_timeout: Option<std::time::Duration>,
     shell_lang: Option<orbital_verify::shell::ShellLang>,
     repo_root: &Path,
+    traits: Option<&[String]>,
 ) -> Result<()> {
     let mut reports = Vec::with_capacity(targets.len());
     let mut worst_exit = 0i32;
@@ -382,6 +401,7 @@ fn run_verify_unified(
                 shell_lang,
                 tier,
                 json,
+                traits,
             ) {
                 Ok(outcome) => engine_reports.push(engines::fold_rust_report(&outcome)),
                 Err(e) => {
@@ -491,6 +511,7 @@ pub(crate) struct VerifyOneOutcome {
     pub shell: Option<orbital_verify::observers::Verdict>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn verify_one(
     path: &Path,
     report_dir: Option<&Path>,
@@ -499,6 +520,7 @@ fn verify_one(
     shell_lang: Option<orbital_verify::shell::ShellLang>,
     tier: Tier,
     json_mode: bool,
+    traits: Option<&[String]>,
 ) -> Result<VerifyOneOutcome> {
     let item = path
         .file_stem()
@@ -558,8 +580,15 @@ fn verify_one(
 
     let schema = orbital_verify::corpus::resolve_file(path)?;
 
+    // `--trait NAME`: resolve once against this schema (errors here list the schema's
+    // available trait names) and reuse the SAME canonical name(s) for L1 and L2, rather
+    // than each layer re-resolving (and potentially disagreeing).
+    let resolved_traits = traits
+        .map(|names| orbital_verify::planner::resolve_trait_names(&schema, names))
+        .transpose()?;
+
     // Layer 1 — kernel circuit.
-    let l1 = orbital_verify::verify_schema(&item, schema.clone())?;
+    let l1 = orbital_verify::verify_schema_scoped(&item, schema.clone(), resolved_traits.as_deref())?;
     // A transition the app's OWN `@create`/`@update`/`@delete` policy denied is
     // declared behavior, not a defect — `--all-personas` has always bucketed it
     // (`classify_persona_failures`). The default single run did not, so every
@@ -643,7 +672,11 @@ fn verify_one(
     let mut l2_server: Option<orbital_client::render_probe::RenderReport> = None;
     let mut l2_server_ok = true;
     if run_l2 {
-        let report = orbital_client::render_probe::probe_schema(&item, schema.clone())?;
+        let report = orbital_client::render_probe::probe_schema_scoped(
+            &item,
+            schema.clone(),
+            resolved_traits.as_deref(),
+        )?;
         emit(json_mode, report.headline());
         for v in &report.verdicts {
             if !v.passed {
@@ -664,7 +697,11 @@ fn verify_one(
         // Layer 2 (server) — the SAME render contract driven over real HTTP against a
         // live `orbital-server`, verifying server routes + serialization + client together.
         if server_effective {
-            let l2s = super::verify_server::probe_over_http(&item, schema.clone())?;
+            let l2s = super::verify_server::probe_over_http(
+                &item,
+                schema.clone(),
+                resolved_traits.as_deref(),
+            )?;
             emit(json_mode, format!("{} [server]", l2s.headline()));
             for v in &l2s.verdicts {
                 if !v.passed {
@@ -708,6 +745,7 @@ fn verify_one(
             "item": item,
             "layer1": l1.to_json(),
             "layer2": serde_json::to_value(&l2).unwrap_or(serde_json::Value::Null),
+            "traits": resolved_traits,
         });
         if let Ok(json) = serde_json::to_string_pretty(&report) {
             std::fs::write(dir.join(format!("{item}.verify-report.json")), json).ok();

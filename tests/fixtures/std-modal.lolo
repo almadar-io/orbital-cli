@@ -62,7 +62,7 @@ orbital ModalRecordOrbital {
     state open {
       CLOSE -> closed
         (render-ui @config.detailSlot null)
-        (notify Cancelled info)
+        (notify info Cancelled)
       SAVE -> closed
         (render-ui @config.detailSlot null)
     }

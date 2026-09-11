@@ -1,0 +1,217 @@
+{
+  "name": "OwnerScopedIdentityFixture",
+  "version": "1.0.0",
+  "orbitals": [
+    {
+      "name": "Membership",
+      "entity": {
+        "name": "ChannelMember",
+        "collection": "channelmembers",
+        "persistence": "persistent",
+        "fields": [
+          {
+            "name": "id",
+            "type": "string",
+            "required": true
+          },
+          {
+            "name": "member",
+            "type": "string",
+            "relation": {
+              "entity": "OnlineUser"
+            }
+          },
+          {
+            "name": "channelName",
+            "type": "string"
+          }
+        ]
+      },
+      "auxiliaryEntities": [
+        {
+          "name": "OnlineUser",
+          "collection": "onlineusers",
+          "persistence": "persistent",
+          "identity": true,
+          "fields": [
+            {
+              "name": "id",
+              "type": "string",
+              "required": true
+            },
+            {
+              "name": "role",
+              "type": "string"
+            }
+          ]
+        }
+      ],
+      "traits": [
+        {
+          "name": "ChannelRail",
+          "linkedEntity": "ChannelMember",
+          "emits": [
+            {
+              "event": "ChannelMemberLoaded",
+              "payloadSchema": [
+                {
+                  "name": "data",
+                  "type": "[ChannelMember]"
+                }
+              ]
+            },
+            {
+              "event": "ChannelMemberLoadFailed",
+              "payloadSchema": [
+                {
+                  "name": "error",
+                  "type": "string"
+                },
+                {
+                  "name": "code",
+                  "type": "string"
+                }
+              ]
+            }
+          ],
+          "stateMachine": {
+            "states": [
+              {
+                "name": "idle",
+                "isInitial": true
+              }
+            ],
+            "events": [
+              {
+                "key": "ChannelMemberLoaded",
+                "payloadSchema": [
+                  {
+                    "name": "data",
+                    "type": "[ChannelMember]"
+                  }
+                ]
+              },
+              {
+                "key": "ChannelMemberLoadFailed",
+                "payloadSchema": [
+                  {
+                    "name": "error",
+                    "type": "string"
+                  },
+                  {
+                    "name": "code",
+                    "type": "string"
+                  }
+                ]
+              },
+              {
+                "key": "VIEW",
+                "payloadSchema": [
+                  {
+                    "name": "id",
+                    "type": "string"
+                  }
+                ]
+              }
+            ],
+            "transitions": [
+              {
+                "from": "idle",
+                "to": "idle",
+                "event": "INIT",
+                "effects": [
+                  [
+                    "fetch",
+                    "ChannelMember",
+                    {
+                      "filter": [
+                        "=",
+                        [
+                          "object/get",
+                          "@entity",
+                          "member"
+                        ],
+                        "@user.id"
+                      ],
+                      "emit": {
+                        "success": "ChannelMemberLoaded",
+                        "failure": "ChannelMemberLoadFailed"
+                      }
+                    }
+                  ]
+                ]
+              },
+              {
+                "from": "idle",
+                "to": "idle",
+                "event": "ChannelMemberLoaded",
+                "effects": [
+                  [
+                    "render-ui",
+                    "main",
+                    {
+                      "type": "entity-list",
+                      "entity": "@payload.data",
+                      "fields": [
+                        "channelName"
+                      ],
+                      "itemActions": [
+                        {
+                          "event": "VIEW",
+                          "label": "View"
+                        }
+                      ]
+                    }
+                  ]
+                ]
+              },
+              {
+                "from": "idle",
+                "to": "idle",
+                "event": "ChannelMemberLoadFailed",
+                "effects": [
+                  [
+                    "render-ui",
+                    "toast",
+                    {
+                      "type": "alert",
+                      "variant": "error",
+                      "message": "Failed to load members"
+                    }
+                  ]
+                ]
+              },
+              {
+                "from": "idle",
+                "to": "idle",
+                "event": "VIEW",
+                "effects": [
+                  [
+                    "render-ui",
+                    "toast",
+                    {
+                      "type": "alert",
+                      "variant": "info",
+                      "message": "Viewed"
+                    }
+                  ]
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "pages": [
+        {
+          "name": "ChannelRailPage",
+          "path": "/channels",
+          "traits": [
+            {
+              "ref": "ChannelRail"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

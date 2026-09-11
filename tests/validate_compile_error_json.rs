@@ -57,7 +57,7 @@ const WELL_FORMED_PERSIST: &str = r#"{
         "fields": [
           { "name": "id", "required": true, "type": "string" },
           { "name": "body", "type": "string" },
-          { "items": { "type": "object", "properties": { "id": { "type": "string" }, "body": { "type": "string" } } }, "name": "data", "type": "array" }
+          { "items": { "type": "object", "properties": { "id": { "type": "string" }, "body": { "type": "string" } } }, "name": "data", "type": "array", "intrinsic": true }
         ]
       },
       "traits": [
