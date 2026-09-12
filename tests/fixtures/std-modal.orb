@@ -2,88 +2,97 @@
   "description": "std-modal as a Function",
   "ledger": {
     "entries": {
-      "ent_01M281A464TVRCM01WXQQVMC43": {
+      "ent_01KXG04GVS68RDSK2NDK0G2TT5": {
         "bakedName": "ModalRecord",
         "curName": "ModalRecord",
-        "id": "ent_01M281A464TVRCM01WXQQVMC43",
+        "id": "ent_01KXG04GVS68RDSK2NDK0G2TT5",
         "kind": "entity",
         "owner": "workspace",
         "renames": []
       },
-      "evt_01M281A4646ZXP6YW7MS5KQ47F": {
-        "bakedName": "INIT",
-        "curName": "INIT",
-        "id": "evt_01M281A4646ZXP6YW7MS5KQ47F",
-        "kind": "event",
-        "owner": "workspace",
-        "parent": "trt_01M281A46480RGYMX2WT1623HK",
-        "renames": []
-      },
-      "evt_01M281A464BMHMM9Z4601T2MEK": {
-        "bakedName": "ModalRecordLoaded",
-        "curName": "ModalRecordLoaded",
-        "id": "evt_01M281A464BMHMM9Z4601T2MEK",
-        "kind": "event",
-        "owner": "workspace",
-        "parent": "trt_01M281A46480RGYMX2WT1623HK",
-        "renames": []
-      },
-      "evt_01M281A464H4JZR88QQGE2FFVJ": {
-        "bakedName": "SAVE",
-        "curName": "SAVE",
-        "id": "evt_01M281A464H4JZR88QQGE2FFVJ",
-        "kind": "event",
-        "owner": "workspace",
-        "parent": "trt_01M281A46480RGYMX2WT1623HK",
-        "renames": []
-      },
-      "evt_01M281A464MAPRB44P5TVDXW76": {
+      "evt_01KXG04GVS0KS8WXT183DREMAC": {
         "bakedName": "ModalRecordLoadFailed",
         "curName": "ModalRecordLoadFailed",
-        "id": "evt_01M281A464MAPRB44P5TVDXW76",
+        "id": "evt_01KXG04GVS0KS8WXT183DREMAC",
         "kind": "event",
         "owner": "workspace",
-        "parent": "trt_01M281A46480RGYMX2WT1623HK",
+        "parent": "trt_01KXG04GVS1W2103BQKJT7KZRZ",
         "renames": []
       },
-      "evt_01M281A464S3DTRD3DGS41BAMK": {
-        "bakedName": "CLOSE",
-        "curName": "CLOSE",
-        "id": "evt_01M281A464S3DTRD3DGS41BAMK",
+      "evt_01KXG04GVS3BQFMQRN09N23MX6": {
+        "bakedName": "ModalRecordLoaded",
+        "curName": "ModalRecordLoaded",
+        "id": "evt_01KXG04GVS3BQFMQRN09N23MX6",
         "kind": "event",
         "owner": "workspace",
-        "parent": "trt_01M281A46480RGYMX2WT1623HK",
+        "parent": "trt_01KXG04GVS1W2103BQKJT7KZRZ",
         "renames": []
       },
-      "evt_01M281A464ZBACF6PGVY44S1J1": {
+      "evt_01KXG04GVS6WNYYGFS0H53BHKC": {
         "bakedName": "OPEN",
         "curName": "OPEN",
-        "id": "evt_01M281A464ZBACF6PGVY44S1J1",
+        "id": "evt_01KXG04GVS6WNYYGFS0H53BHKC",
         "kind": "event",
         "owner": "workspace",
-        "parent": "trt_01M281A46480RGYMX2WT1623HK",
+        "parent": "trt_01KXG04GVS1W2103BQKJT7KZRZ",
         "renames": []
       },
-      "orb_01M281A464XH0NKFZS7CZYTPDK": {
+      "evt_01KXG04GVSB8F2AS3XHMEZ69NW": {
+        "bakedName": "SAVE",
+        "curName": "SAVE",
+        "id": "evt_01KXG04GVSB8F2AS3XHMEZ69NW",
+        "kind": "event",
+        "owner": "workspace",
+        "parent": "trt_01KXG04GVS1W2103BQKJT7KZRZ",
+        "renames": []
+      },
+      "evt_01KXG04GVSBXP7PA6YXW44W87X": {
+        "bakedName": "CLOSE",
+        "curName": "CLOSE",
+        "id": "evt_01KXG04GVSBXP7PA6YXW44W87X",
+        "kind": "event",
+        "owner": "workspace",
+        "parent": "trt_01KXG04GVS1W2103BQKJT7KZRZ",
+        "renames": []
+      },
+      "evt_01KXG04GVSS6QBKSCYWMBQWZMS": {
+        "bakedName": "INIT",
+        "curName": "INIT",
+        "id": "evt_01KXG04GVSS6QBKSCYWMBQWZMS",
+        "kind": "event",
+        "owner": "workspace",
+        "parent": "trt_01KXG04GVS1W2103BQKJT7KZRZ",
+        "renames": []
+      },
+      "evt_01M15CRJ6RE1E1ZFKT9Y1PXNZK": {
+        "bakedName": "SEED",
+        "curName": "SEED",
+        "id": "evt_01M15CRJ6RE1E1ZFKT9Y1PXNZK",
+        "kind": "event",
+        "owner": "workspace",
+        "parent": "trt_01KXG04GVS1W2103BQKJT7KZRZ",
+        "renames": []
+      },
+      "orb_01KXG04GVS05DXYNB5ZR3H2X72": {
         "bakedName": "ModalRecordOrbital",
         "curName": "ModalRecordOrbital",
-        "id": "orb_01M281A464XH0NKFZS7CZYTPDK",
+        "id": "orb_01KXG04GVS05DXYNB5ZR3H2X72",
         "kind": "orbital",
         "owner": "workspace",
         "renames": []
       },
-      "pag_01M281A465BWEA60NNZZ1J45AJ": {
+      "pag_01KXG04GVS0WAVKFJ83G3TMZBR": {
         "bakedName": "ModalRecordModalPage",
         "curName": "ModalRecordModalPage",
-        "id": "pag_01M281A465BWEA60NNZZ1J45AJ",
+        "id": "pag_01KXG04GVS0WAVKFJ83G3TMZBR",
         "kind": "page",
         "owner": "workspace",
         "renames": []
       },
-      "trt_01M281A46480RGYMX2WT1623HK": {
+      "trt_01KXG04GVS1W2103BQKJT7KZRZ": {
         "bakedName": "ModalRecordModal",
         "curName": "ModalRecordModal",
-        "id": "trt_01M281A46480RGYMX2WT1623HK",
+        "id": "trt_01KXG04GVS1W2103BQKJT7KZRZ",
         "kind": "trait",
         "owner": "workspace",
         "renames": []
@@ -125,25 +134,37 @@
             ]
           },
           {
+            "default": {},
+            "description": "The row an edit-mode OPEN pre-fills from when its payload carries no row. Stashed by SEED — hosts route the surface's loaded event here (e.g. a document look's RecordItemLoaded) so scalar-only action events ({ id }) can still open a fully seeded settings form.",
+            "intrinsic": true,
+            "name": "seedRow",
+            "relation": {
+              "cardinality": "one",
+              "entity": "ModalRecord",
+              "entityId": "ent_01KXG04GVS68RDSK2NDK0G2TT5"
+            },
+            "type": "relation"
+          },
+          {
             "name": "createdAt",
             "type": "string"
           }
         ],
-        "id": "ent_01M281A464TVRCM01WXQQVMC43",
+        "id": "ent_01KXG04GVS68RDSK2NDK0G2TT5",
         "name": "ModalRecord",
         "persistence": "runtime"
       },
-      "id": "orb_01M281A464XH0NKFZS7CZYTPDK",
+      "id": "orb_01KXG04GVS05DXYNB5ZR3H2X72",
       "name": "ModalRecordOrbital",
       "pages": [
         {
-          "id": "pag_01M281A465BWEA60NNZZ1J45AJ",
+          "id": "pag_01KXG04GVS0WAVKFJ83G3TMZBR",
           "name": "ModalRecordModalPage",
           "path": "/modalrecords/modal",
           "traits": [
             {
               "ref": "ModalRecordModal",
-              "refId": "trt_01M281A46480RGYMX2WT1623HK"
+              "refId": "trt_01KXG04GVS1W2103BQKJT7KZRZ"
             }
           ]
         }
@@ -166,34 +187,75 @@
               "tier": "internal",
               "type": "slot"
             },
+            "fieldOverrides": {
+              "default": [],
+              "description": "Per-field label/placeholder/hint overrides, keyed by field name. Types, options and required-ness stay entity-schema-driven (declare once on the entity); override only display copy the entity's @description doesn't fit.",
+              "items": {
+                "properties": {
+                  "hint": {
+                    "name": "hint",
+                    "required": false,
+                    "type": "string"
+                  },
+                  "label": {
+                    "name": "label",
+                    "required": false,
+                    "type": "string"
+                  },
+                  "name": {
+                    "name": "name",
+                    "required": true,
+                    "type": "string"
+                  },
+                  "placeholder": {
+                    "name": "placeholder",
+                    "required": false,
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              },
+              "label": "Any per-field display copy overrides?",
+              "synonyms": "field labels, custom labels, help text overrides, placeholder text",
+              "tier": "presentation",
+              "type": "[ModalFieldOverride]"
+            },
             "fields": {
               "default": [],
-              "description": "Entity fields displayed as inputs in the modal form",
+              "description": "Entity fields rendered as inputs inside the modal form.",
               "items": {
                 "type": "string"
               },
-              "label": "Form fields",
-              "tier": "presentation",
+              "label": "Which fields appear in the form?",
+              "synonyms": "form fields, inputs, editable fields, field list",
+              "tier": "domain",
               "type": "[string]"
             },
             "icon": {
               "default": "layout-panel-top",
-              "description": "Icon shown in the modal header",
-              "label": "Icon",
+              "description": "Lucide icon name shown next to the modal title.",
+              "label": "Which icon appears in the modal header?",
+              "synonyms": "header icon, modal icon, title icon",
               "tier": "presentation",
               "type": "string"
             },
             "mode": {
               "default": "create",
-              "description": "create or edit — controls submit-button copy and validation",
-              "label": "Form mode",
-              "tier": "presentation",
-              "type": "string"
+              "description": "create = blank form; edit = pre-filled from the selected row.",
+              "label": "Is this for creating or editing?",
+              "synonyms": "form mode, create or edit, new or update, add or modify",
+              "tier": "internal",
+              "type": "string",
+              "values": [
+                "create",
+                "edit"
+              ]
             },
             "title": {
               "default": "Details",
-              "description": "Heading at the top of the modal",
-              "label": "Modal title",
+              "description": "Heading displayed at the top of the modal.",
+              "label": "What should the modal heading say?",
+              "synonyms": "modal title, dialog heading, panel title, form title",
               "tier": "presentation",
               "type": "string"
             }
@@ -215,13 +277,17 @@
             {
               "kind": "set",
               "resource": "@entity.id"
+            },
+            {
+              "kind": "set",
+              "resource": "@entity.seedRow"
             }
           ],
           "emits": [
             {
               "description": "Indicates a successful data save operation.",
               "event": "SAVE",
-              "eventId": "evt_01M281A464H4JZR88QQGE2FFVJ",
+              "eventId": "evt_01KXG04GVSB8F2AS3XHMEZ69NW",
               "payloadSchema": [
                 {
                   "name": "data",
@@ -230,19 +296,19 @@
                 }
               ],
               "synonyms": "submit, persist, confirm",
-              "tier": "essential"
+              "tier": "domain"
             },
             {
               "description": "Indicates the modal window is being closed.",
               "event": "CLOSE",
-              "eventId": "evt_01M281A464S3DTRD3DGS41BAMK",
+              "eventId": "evt_01KXG04GVSBXP7PA6YXW44W87X",
               "synonyms": "dismiss, hide, cancel",
-              "tier": "essential"
+              "tier": "domain"
             },
             {
               "description": "Indicates a failure to load the record data.",
               "event": "ModalRecordLoadFailed",
-              "eventId": "evt_01M281A464MAPRB44P5TVDXW76",
+              "eventId": "evt_01KXG04GVS0KS8WXT183DREMAC",
               "payloadSchema": [
                 {
                   "name": "error",
@@ -260,7 +326,7 @@
             {
               "description": "Signals that the modal's data has been successfully loaded.",
               "event": "ModalRecordLoaded",
-              "eventId": "evt_01M281A464BMHMM9Z4601T2MEK",
+              "eventId": "evt_01KXG04GVS3BQFMQRN09N23MX6",
               "payloadSchema": [
                 {
                   "entity": "ModalRecord",
@@ -283,6 +349,10 @@
                       "type": "string"
                     },
                     {
+                      "name": "seedRow",
+                      "type": "ModalRecord"
+                    },
+                    {
                       "name": "createdAt",
                       "type": "string"
                     }
@@ -292,32 +362,93 @@
               ],
               "scope": "internal",
               "synonyms": "loaded, data ready, populated",
-              "tier": "essential"
+              "tier": "domain"
             }
           ],
           "entityContract": {
-            "provides": [],
+            "provides": [
+              "seedRow"
+            ],
             "requires": []
           },
           "entityRebindable": true,
           "entityRefIds": {
-            "ModalRecord": "ent_01M281A464TVRCM01WXQQVMC43"
+            "ModalRecord": "ent_01KXG04GVS68RDSK2NDK0G2TT5"
           },
-          "id": "trt_01M281A46480RGYMX2WT1623HK",
+          "id": "trt_01KXG04GVS1W2103BQKJT7KZRZ",
           "linkedEntity": "ModalRecord",
-          "linkedEntityId": "ent_01M281A464TVRCM01WXQQVMC43",
+          "linkedEntityId": "ent_01KXG04GVS68RDSK2NDK0G2TT5",
           "name": "ModalRecordModal",
           "scope": "instance",
           "stateMachine": {
             "events": [
               {
-                "id": "evt_01M281A4646ZXP6YW7MS5KQ47F",
+                "id": "evt_01KXG04GVSS6QBKSCYWMBQWZMS",
                 "key": "INIT",
                 "name": "Initialize"
               },
               {
+                "description": "Indicates a failure to load the record data.",
+                "id": "evt_01KXG04GVS0KS8WXT183DREMAC",
+                "key": "ModalRecordLoadFailed",
+                "name": "ModalRecord load failed",
+                "payloadSchema": [
+                  {
+                    "name": "error",
+                    "type": "string"
+                  },
+                  {
+                    "name": "code",
+                    "type": "string"
+                  }
+                ],
+                "synonyms": "error, failure, problem, unsuccessful",
+                "tier": "internal"
+              },
+              {
+                "description": "Stash the row an edit-mode OPEN will pre-fill from. Hosts route the owning surface's loaded event here (e.g. RecordItemLoaded from a document look) so an OPEN carrying only { id } still opens a fully seeded form.",
+                "id": "evt_01M15CRJ6RE1E1ZFKT9Y1PXNZK",
+                "key": "SEED",
+                "name": "Seed",
+                "payloadSchema": [
+                  {
+                    "entity": "ModalRecord",
+                    "name": "row",
+                    "properties": [
+                      {
+                        "name": "id",
+                        "type": "string"
+                      },
+                      {
+                        "name": "name",
+                        "type": "string"
+                      },
+                      {
+                        "name": "description",
+                        "type": "string"
+                      },
+                      {
+                        "name": "status",
+                        "type": "string"
+                      },
+                      {
+                        "name": "seedRow",
+                        "type": "ModalRecord"
+                      },
+                      {
+                        "name": "createdAt",
+                        "type": "string"
+                      }
+                    ],
+                    "type": "object"
+                  }
+                ],
+                "synonyms": "preload row, stash record, seed form, prefill",
+                "tier": "domain"
+              },
+              {
                 "description": "A request to display the modal window.",
-                "id": "evt_01M281A464ZBACF6PGVY44S1J1",
+                "id": "evt_01KXG04GVS6WNYYGFS0H53BHKC",
                 "key": "OPEN",
                 "name": "Open",
                 "payloadSchema": [
@@ -346,6 +477,10 @@
                         "type": "string"
                       },
                       {
+                        "name": "seedRow",
+                        "type": "ModalRecord"
+                      },
+                      {
                         "name": "createdAt",
                         "type": "string"
                       }
@@ -354,19 +489,19 @@
                   }
                 ],
                 "synonyms": "show, display, present, reveal",
-                "tier": "essential"
+                "tier": "domain"
               },
               {
                 "description": "Indicates the modal window is being closed.",
-                "id": "evt_01M281A464S3DTRD3DGS41BAMK",
+                "id": "evt_01KXG04GVSBXP7PA6YXW44W87X",
                 "key": "CLOSE",
                 "name": "Close",
                 "synonyms": "dismiss, hide, cancel",
-                "tier": "essential"
+                "tier": "domain"
               },
               {
                 "description": "Indicates a successful data save operation.",
-                "id": "evt_01M281A464H4JZR88QQGE2FFVJ",
+                "id": "evt_01KXG04GVSB8F2AS3XHMEZ69NW",
                 "key": "SAVE",
                 "name": "Save",
                 "payloadSchema": [
@@ -377,29 +512,11 @@
                   }
                 ],
                 "synonyms": "submit, persist, confirm",
-                "tier": "essential"
-              },
-              {
-                "description": "Indicates a failure to load the record data.",
-                "id": "evt_01M281A464MAPRB44P5TVDXW76",
-                "key": "ModalRecordLoadFailed",
-                "name": "ModalRecord load failed",
-                "payloadSchema": [
-                  {
-                    "name": "error",
-                    "type": "string"
-                  },
-                  {
-                    "name": "code",
-                    "type": "string"
-                  }
-                ],
-                "synonyms": "error, failure, problem, unsuccessful",
-                "tier": "internal"
+                "tier": "domain"
               },
               {
                 "description": "Signals that the modal's data has been successfully loaded.",
-                "id": "evt_01M281A464BMHMM9Z4601T2MEK",
+                "id": "evt_01KXG04GVS3BQFMQRN09N23MX6",
                 "key": "ModalRecordLoaded",
                 "name": "ModalRecord loaded",
                 "payloadSchema": [
@@ -424,6 +541,10 @@
                         "type": "string"
                       },
                       {
+                        "name": "seedRow",
+                        "type": "ModalRecord"
+                      },
+                      {
                         "name": "createdAt",
                         "type": "string"
                       }
@@ -432,7 +553,7 @@
                   }
                 ],
                 "synonyms": "loaded, data ready, populated",
-                "tier": "essential"
+                "tier": "domain"
               }
             ],
             "states": [
@@ -459,7 +580,46 @@
                   ]
                 ],
                 "event": "INIT",
-                "eventId": "evt_01M281A4646ZXP6YW7MS5KQ47F",
+                "eventId": "evt_01KXG04GVSS6QBKSCYWMBQWZMS",
+                "from": "closed",
+                "to": "closed"
+              },
+              {
+                "effects": [
+                  [
+                    "render-ui",
+                    "toast",
+                    {
+                      "dismissible": true,
+                      "message": [
+                        "str/concat",
+                        "Couldn't load the record — ",
+                        "@payload.error"
+                      ],
+                      "type": "alert",
+                      "variant": "error"
+                    }
+                  ]
+                ],
+                "event": "ModalRecordLoadFailed",
+                "eventId": "evt_01KXG04GVS0KS8WXT183DREMAC",
+                "from": "closed",
+                "to": "closed"
+              },
+              {
+                "effects": [
+                  [
+                    "set",
+                    "@entity.seedRow",
+                    [
+                      "object/merge",
+                      "@payload.row",
+                      {}
+                    ]
+                  ]
+                ],
+                "event": "SEED",
+                "eventId": "evt_01M15CRJ6RE1E1ZFKT9Y1PXNZK",
                 "from": "closed",
                 "to": "closed"
               },
@@ -496,7 +656,16 @@
                         },
                         {
                           "cancelEvent": "CLOSE",
-                          "entity": "@payload.row",
+                          "entity": [
+                            "object/merge",
+                            "@entity.seedRow",
+                            [
+                              "object/merge",
+                              "@payload.row",
+                              {}
+                            ]
+                          ],
+                          "fieldOverrides": "@config.fieldOverrides",
                           "fields": "@config.fields",
                           "mode": "@config.mode",
                           "submitEvent": "SAVE",
@@ -510,7 +679,7 @@
                   ]
                 ],
                 "event": "OPEN",
-                "eventId": "evt_01M281A464ZBACF6PGVY44S1J1",
+                "eventId": "evt_01KXG04GVS6WNYYGFS0H53BHKC",
                 "from": "closed",
                 "guard": [
                   "or",
@@ -519,8 +688,38 @@
                     "@config.mode",
                     "create"
                   ],
-                  "@payload.row"
+                  "@payload.row",
+                  [
+                    "!=",
+                    [
+                      "str/default",
+                      [
+                        "object/get",
+                        "@entity.seedRow",
+                        "id"
+                      ],
+                      ""
+                    ],
+                    ""
+                  ]
                 ],
+                "to": "open"
+              },
+              {
+                "effects": [
+                  [
+                    "set",
+                    "@entity.seedRow",
+                    [
+                      "object/merge",
+                      "@payload.row",
+                      {}
+                    ]
+                  ]
+                ],
+                "event": "SEED",
+                "eventId": "evt_01M15CRJ6RE1E1ZFKT9Y1PXNZK",
+                "from": "open",
                 "to": "open"
               },
               {
@@ -542,7 +741,7 @@
                   ]
                 ],
                 "event": "CLOSE",
-                "eventId": "evt_01M281A464S3DTRD3DGS41BAMK",
+                "eventId": "evt_01KXG04GVSBXP7PA6YXW44W87X",
                 "from": "open",
                 "to": "closed"
               },
@@ -555,14 +754,35 @@
                   ]
                 ],
                 "event": "SAVE",
-                "eventId": "evt_01M281A464H4JZR88QQGE2FFVJ",
+                "eventId": "evt_01KXG04GVSB8F2AS3XHMEZ69NW",
                 "from": "open",
                 "to": "closed"
               }
             ]
           }
         }
-      ]
+      ],
+      "types": {
+        "ModalFieldOverride": [
+          {
+            "name": "name",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "label",
+            "type": "string"
+          },
+          {
+            "name": "placeholder",
+            "type": "string"
+          },
+          {
+            "name": "hint",
+            "type": "string"
+          }
+        ]
+      }
     }
   ],
   "schemaVersion": 1,

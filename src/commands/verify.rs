@@ -798,6 +798,20 @@ fn emit_shell_to_tmp(path: &Path, lang: orbital_verify::shell::ShellLang) -> Res
     let _ = std::fs::remove_dir_all(&tmp_dir);
     std::fs::create_dir_all(&tmp_dir)?;
 
+    // `generate_from_file` reads `.orb` only; a `.lolo` target lowers through
+    // L1 into a sibling temp `.orb` first — the same source `orb validate`
+    // and the L1/L2 walk already accepted.
+    let lowered: PathBuf;
+    let path: &Path = if path.extension().and_then(|e| e.to_str()) == Some("lolo") {
+        let schema = orbital_lolo::parse_and_lower(path)
+            .map_err(|e| anyhow::anyhow!("lower {}: {e}", path.display()))?;
+        lowered = tmp_dir.join("lowered.orb");
+        std::fs::write(&lowered, serde_json::to_string(&schema)?)?;
+        &lowered
+    } else {
+        path
+    };
+
     let options = GenerateOptions {
         // from_env, not Default — same dev-registry rule as `orb compile`
         // (C-COMPILE-IGNORES-DEV-REGISTRIES).
