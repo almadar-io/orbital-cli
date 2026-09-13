@@ -8,6 +8,7 @@
         "name": "ChannelMember",
         "collection": "channelmembers",
         "persistence": "persistent",
+        "read_policy": ["=", ["object/get", "@entity", "member"], "@user.id"],
         "fields": [
           {
             "name": "id",
