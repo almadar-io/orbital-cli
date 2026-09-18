@@ -24,7 +24,7 @@ orbital ModalRecordOrbital {
     name : string @description "A user-facing identifier for the modal." @synonyms "title, label, identifier"
     description : string @description "A textual explanation of the modal's content or function." @synonyms "details, explanation, notes, summary"
     status : "active" | "inactive" | "pending" @description "Current operational state of the record." @synonyms "state, condition, flag" = active
-    seedRow : ModalRecord @intrinsic @description "The row an edit-mode OPEN pre-fills from when its payload carries no row. Stashed by SEED — hosts route the surface's loaded event here (e.g. a document look's RecordItemLoaded) so scalar-only action events ({ id }) can still open a fully seeded settings form." = {}
+    seedRow : Map string scalar @intrinsic @description "The row an edit-mode OPEN pre-fills from when its payload carries no row. Stashed by SEED — hosts route the surface's loaded event here (e.g. a document look's RecordItemLoaded) so scalar-only action events ({ id }) can still open a fully seeded settings form." = {}
     createdAt : string
   }
 
