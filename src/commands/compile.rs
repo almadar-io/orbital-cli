@@ -299,6 +299,13 @@ pub(crate) fn compile_schema(
                 }
             }
 
+            if std::env::var("ANDROID_HOME").is_err() && std::env::var("ANDROID_SDK_ROOT").is_err()
+            {
+                println!(
+                    "\n⚠️  Neither ANDROID_HOME nor ANDROID_SDK_ROOT is set — local.properties was not written; set one before running ./gradlew"
+                );
+            }
+
             println!("\nNext steps:");
             println!("  cd {}", output.display());
             println!("  ./gradlew assembleDebug");
@@ -308,6 +315,17 @@ pub(crate) fn compile_schema(
             let ios_backend = IosBackend::new();
             let result =
                 generate_from_file(&compile_path, output, &ios_shell, &ios_backend, &options)?;
+
+            // Rung-3 prevention gate (no existing call site runs
+            // `Shell::validate_structure`/layout checks for any shell today):
+            // catch a template/generated-output layout defect right after
+            // generation, using this compile's own manifest.
+            if options.copy_template {
+                use orbital_compiler::shell::Shell as _;
+                ios_shell.validate_structure(output)?;
+                let manifest: Vec<String> = result.files.iter().map(|f| f.path.clone()).collect();
+                ios_shell.validate_generated_layout(output, &manifest)?;
+            }
 
             println!("\n✅ Generated {} files", result.files.len());
 
