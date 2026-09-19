@@ -713,6 +713,36 @@ fn verify_one(
                 }
             }
             l2_server = Some(l2s);
+
+            // §156 fixture pass: every recorded events-wire fixture request
+            // must round-trip through this same live HTTP server as an
+            // `orbital_core::EventResponse` — the wire-shape gate for
+            // `orb verify --server` named in Program A's verification plan.
+            let orbital_name = schema
+                .orbitals
+                .first()
+                .map(|o| o.name.clone())
+                .unwrap_or_else(|| item.clone());
+            let fixture_report = super::verify_server::run_fixture_pass(&orbital_name, &schema)?;
+            if fixture_report.skipped {
+                emit(json_mode, "    L2/server fixture-pass SKIPPED (no fixtures dir)".to_string());
+            } else {
+                emit(
+                    json_mode,
+                    format!(
+                        "    L2/server fixture-pass {}/{} — {}",
+                        fixture_report.checked.len(),
+                        fixture_report.checked.len() + fixture_report.failures.len(),
+                        if fixture_report.is_green() { "green" } else { "FAIL" }
+                    ),
+                );
+                if !fixture_report.is_green() {
+                    l2_server_ok = false;
+                    for failure in &fixture_report.failures {
+                        emit(json_mode, format!("    L2/server fixture-pass FAIL — {failure}"));
+                    }
+                }
+            }
         }
 
         // Layer 3 — headless screenshot (opt-in; only when the binary was built with it).

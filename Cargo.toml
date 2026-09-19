@@ -42,6 +42,9 @@ serde_json.workspace = true
 
 # Source Map v3 emission for `orb emit --map` and `orb trace`
 sourcemap = "9"
+# Wire-shape fixture pass (`verify_server::run_fixture_pass`) — same sync HTTP client
+# `SyncServerBridge` uses (`orbital-client`'s `sync-http` feature), pinned identically.
+ureq = { workspace = true }
 
 [dev-dependencies]
 pretty_assertions.workspace = true

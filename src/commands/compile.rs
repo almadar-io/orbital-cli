@@ -6,7 +6,28 @@ use crate::utils::{
     strip_json_nulls, translate_schema_content, InputSyntax,
 };
 use crate::{ServerFrameworkArg, ShellMode, ShellType};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+/// Parse + resolve the schema for a native shell's bundled `resolved_schema.json`
+/// resource (Program B, §159 — the in-app kernel mounts on-device with no
+/// compiler, so it needs the same flattened `OrbitalSchema` `orb verify` and
+/// `orb dev` resolve). `source_path` is the ORIGINAL `.orb`/`.lolo` location
+/// (never `compile_path`, which for a `.lolo` source is a lowered temp file),
+/// so relative `uses` imports (e.g. `almadar-behaviors/*`) resolve exactly
+/// like `orb verify` does under `ALMADAR_DEV`. The one resolver:
+/// `orbital_verify::resolve_schema_with_source` wraps the same
+/// `orbital_compiler::resolve_schema_with_path` pipeline `orb verify` runs.
+fn resolve_native_shell_schema(
+    compile_path: &Path,
+    source_path: &Path,
+) -> anyhow::Result<orbital_core::OrbitalSchema> {
+    let schema = orbital_compiler::phases::parse_file(compile_path).map_err(|e| {
+        anyhow::anyhow!("Failed to parse schema for resolved-schema resource: {}", e)
+    })?;
+    orbital_verify::resolve_schema_with_source(schema, Some(source_path)).map_err(|e| {
+        anyhow::anyhow!("Failed to resolve schema for resolved-schema resource: {}", e)
+    })
+}
 
 /// Compile schema to generated code
 pub(crate) fn compile_schema(
@@ -281,7 +302,8 @@ pub(crate) fn compile_schema(
         }
         ShellType::Android => {
             let android_shell = AndroidShell::new();
-            let android_backend = AndroidBackend::new();
+            let resolved_schema = resolve_native_shell_schema(&compile_path, path)?;
+            let android_backend = AndroidBackend::new().with_resolved_schema(resolved_schema);
             let result = generate_from_file(
                 &compile_path,
                 output,
@@ -312,7 +334,8 @@ pub(crate) fn compile_schema(
         }
         ShellType::Ios => {
             let ios_shell = IosShell::new();
-            let ios_backend = IosBackend::new();
+            let resolved_schema = resolve_native_shell_schema(&compile_path, path)?;
+            let ios_backend = IosBackend::new().with_resolved_schema(resolved_schema);
             let result =
                 generate_from_file(&compile_path, output, &ios_shell, &ios_backend, &options)?;
 
