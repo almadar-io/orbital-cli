@@ -8,5 +8,5 @@
 //!
 //! DO NOT EDIT MANUALLY - changes will be overwritten on next sync.
 
-pub const RUNTIME_VERIFY_ENGINE: (&str, &str) = ("@almadar-io/runtime-verify-tool", "4.193.0");
+pub const RUNTIME_VERIFY_ENGINE: (&str, &str) = ("@almadar-io/runtime-verify-tool", "4.194.0");
 pub const COMPILED_VERIFY_ENGINE: (&str, &str) = ("@almadar-io/verify-tool", "3.154.0");
