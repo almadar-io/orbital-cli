@@ -724,23 +724,19 @@ fn verify_one(
                 .map(|o| o.name.clone())
                 .unwrap_or_else(|| item.clone());
             let fixture_report = super::verify_server::run_fixture_pass(&orbital_name, &schema)?;
-            if fixture_report.skipped {
-                emit(json_mode, "    L2/server fixture-pass SKIPPED (no fixtures dir)".to_string());
-            } else {
-                emit(
-                    json_mode,
-                    format!(
-                        "    L2/server fixture-pass {}/{} — {}",
-                        fixture_report.checked.len(),
-                        fixture_report.checked.len() + fixture_report.failures.len(),
-                        if fixture_report.is_green() { "green" } else { "FAIL" }
-                    ),
-                );
-                if !fixture_report.is_green() {
-                    l2_server_ok = false;
-                    for failure in &fixture_report.failures {
-                        emit(json_mode, format!("    L2/server fixture-pass FAIL — {failure}"));
-                    }
+            emit(
+                json_mode,
+                format!(
+                    "    L2/server fixture-pass {}/{} — {}",
+                    fixture_report.checked.len(),
+                    fixture_report.checked.len() + fixture_report.failures.len(),
+                    if fixture_report.is_green() { "green" } else { "FAIL" }
+                ),
+            );
+            if !fixture_report.is_green() {
+                l2_server_ok = false;
+                for failure in &fixture_report.failures {
+                    emit(json_mode, format!("    L2/server fixture-pass FAIL — {failure}"));
                 }
             }
         }

@@ -88,33 +88,25 @@ pub(crate) fn probe_over_http(
     probe_schema_with_scoped(item, schema, traits, |s, _idx| boot_http_bridge(s))
 }
 
-/// §156 fixture pass: every recorded `packages/almadar-core/fixtures/events-wire/<case>/
-/// request.json` POSTed through the SAME `SyncServerBridge`/HTTP path
-/// [`probe_over_http`] drives, against a fresh server booted for `schema`. This is a
-/// WIRE-SHAPE gate ONLY — it asserts that the server accepts every fixture's request
-/// body and answers with something that deserializes as `orbital_core::EventResponse`.
-/// It does NOT compare values against the fixture's recorded `response.json`: the
-/// fixtures were recorded against a synthetic orbital/schema (`NoteBoard` /
-/// `NoteCatalog` / `NotePersistor` / `InlineButtonRender3`), and while several of those
-/// trait names happen to coincide with `std-notes.orb`'s `NoteOrbital` (so some
-/// fixtures also transition for real), that coincidence is not what this checks.
+/// §156 fixture pass: every recorded `@almadar/core` `fixtures/events-wire/<case>/
+/// request.json` (baked into `orbital_core::fixtures`) POSTed through the SAME
+/// `SyncServerBridge`/HTTP path [`probe_over_http`] drives, against a fresh server
+/// booted for `schema`. This is a WIRE-SHAPE gate ONLY — it asserts that the server
+/// accepts every fixture's request body and answers with something that deserializes
+/// as `orbital_core::EventResponse`. It does NOT compare values against the fixture's
+/// recorded `response.json`: the fixtures were recorded against a synthetic
+/// orbital/schema (`NoteBoard` / `NoteCatalog` / `NotePersistor` /
+/// `InlineButtonRender3`), and while several of those trait names happen to coincide
+/// with `std-notes.orb`'s `NoteOrbital` (so some fixtures also transition for real),
+/// that coincidence is not what this checks.
 pub fn run_fixture_pass(orbital_name: &str, schema: &OrbitalSchema) -> anyhow::Result<FixturePassReport> {
-    let fixtures_dir = events_wire_fixtures_dir();
-    if !fixtures_dir.exists() {
-        return Ok(FixturePassReport { skipped: true, ..Default::default() });
-    }
-
     let server = boot_http_server(schema)?;
     let url = format!("{}/api/orbitals/{orbital_name}/events", server.base_url());
 
     let mut report = FixturePassReport::default();
-    for entry in std::fs::read_dir(&fixtures_dir)?.flatten() {
-        let request_path = entry.path().join("request.json");
-        if !request_path.exists() {
-            continue;
-        }
-        let case = entry.file_name().to_string_lossy().to_string();
-        let request_body: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&request_path)?)?;
+    for fixture in orbital_core::fixtures::EVENT_WIRE_CASES {
+        let case = fixture.name.to_string();
+        let request_body: serde_json::Value = serde_json::from_str(fixture.request())?;
 
         let response = ureq::post(&url).send_json(request_body);
         let response = match response {
@@ -136,21 +128,15 @@ pub fn run_fixture_pass(orbital_name: &str, schema: &OrbitalSchema) -> anyhow::R
     Ok(report)
 }
 
-fn events_wire_fixtures_dir() -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../packages/almadar-core/fixtures/events-wire")
-}
-
 #[derive(Debug, Default)]
 pub struct FixturePassReport {
-    pub skipped: bool,
     pub checked: Vec<String>,
     pub failures: Vec<String>,
 }
 
 impl FixturePassReport {
     pub fn is_green(&self) -> bool {
-        self.skipped || self.failures.is_empty()
+        self.failures.is_empty()
     }
 }
 
@@ -174,10 +160,6 @@ mod tests {
             .expect("std-notes.orb has an orbital");
 
         let report = run_fixture_pass(&orbital_name, &schema).expect("fixture pass must run");
-        if report.skipped {
-            eprintln!("verify_server::fixture_pass_accepts_every_recorded_request_shape: fixtures dir not found — skipping");
-            return;
-        }
         assert!(
             report.is_green(),
             "fixture pass had shape failures: {:#?}",
