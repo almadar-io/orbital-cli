@@ -14,6 +14,7 @@ use anyhow::Result;
 use std::path::{Path, PathBuf};
 
 use super::engines::{self, Engine, Tier};
+use super::npm_project;
 
 /// CLI-facing bundle for `orb verify` — built once in `main.rs` from the clap
 /// `Commands::Verify` variant so this function doesn't grow another arg on every
@@ -97,7 +98,11 @@ pub(crate) fn run_verify(args: VerifyCliArgs) -> Result<()> {
         traits,
     } = args;
     let engine_timeout = engine_timeout.map(std::time::Duration::from_secs);
-    let traits: Option<&[String]> = if traits.is_empty() { None } else { Some(&traits) };
+    let traits: Option<&[String]> = if traits.is_empty() {
+        None
+    } else {
+        Some(&traits)
+    };
 
     // Map `--shell` up front so an unknown value fails fast before any target is walked.
     let shell_lang = shell.as_deref().map(parse_shell_lang).transpose()?;
@@ -115,10 +120,10 @@ pub(crate) fn run_verify(args: VerifyCliArgs) -> Result<()> {
              drop --runtime/--compiled/--all to use it"
         );
     }
-    let repo_root = repo_root();
+    let (start_dir, user_store) = npm_project::cwd_and_user_store()?;
 
     let resolved_path = match path {
-        Some(p) => Some(resolve_target(p, &repo_root)?),
+        Some(p) => Some(resolve_target(p, &start_dir, &user_store)?),
         None => None,
     };
 
@@ -128,7 +133,13 @@ pub(crate) fn run_verify(args: VerifyCliArgs) -> Result<()> {
         if traits.is_some() {
             anyhow::bail!("--trait is not supported with --screenshot-frames");
         }
-        let targets = collect_targets(resolved_path, registry, topic.as_deref());
+        let targets = collect_targets(
+            resolved_path,
+            registry,
+            topic.as_deref(),
+            &start_dir,
+            &user_store,
+        )?;
         if targets.is_empty() {
             anyhow::bail!(
                 "no .orb targets (pass a FILE, a behavior NAME, or --registry [--topic <t>])"
@@ -159,7 +170,13 @@ pub(crate) fn run_verify(args: VerifyCliArgs) -> Result<()> {
         }
     }
 
-    let targets = collect_targets(resolved_path, registry, topic.as_deref());
+    let targets = collect_targets(
+        resolved_path,
+        registry,
+        topic.as_deref(),
+        &start_dir,
+        &user_store,
+    )?;
     if targets.is_empty() {
         anyhow::bail!(
             "no .orb targets (pass a FILE, a behavior NAME, or --registry [--topic <t>])"
@@ -201,7 +218,8 @@ pub(crate) fn run_verify(args: VerifyCliArgs) -> Result<()> {
         min_coverage,
         engine_timeout,
         shell_lang,
-        &repo_root,
+        &start_dir,
+        &user_store,
         traits,
     )
 }
@@ -382,7 +400,8 @@ fn run_verify_unified(
     min_coverage: Option<f64>,
     engine_timeout: Option<std::time::Duration>,
     shell_lang: Option<orbital_verify::shell::ShellLang>,
-    repo_root: &Path,
+    start_dir: &Path,
+    user_store: &Path,
     traits: Option<&[String]>,
 ) -> Result<()> {
     let mut reports = Vec::with_capacity(targets.len());
@@ -418,7 +437,8 @@ fn run_verify_unified(
             engine_reports.push(engines::run_runtime_engine(
                 target,
                 tier,
-                repo_root,
+                start_dir,
+                user_store,
                 runtime_port,
                 min_coverage,
                 engine_timeout,
@@ -431,7 +451,8 @@ fn run_verify_unified(
             engine_reports.push(engines::run_compiled_engine(
                 target,
                 tier,
-                repo_root,
+                start_dir,
+                user_store,
                 compiled_port,
                 client_port,
                 engine_timeout,
@@ -588,7 +609,8 @@ fn verify_one(
         .transpose()?;
 
     // Layer 1 — kernel circuit.
-    let l1 = orbital_verify::verify_schema_scoped(&item, schema.clone(), resolved_traits.as_deref())?;
+    let l1 =
+        orbital_verify::verify_schema_scoped(&item, schema.clone(), resolved_traits.as_deref())?;
     // A transition the app's OWN `@create`/`@update`/`@delete` policy denied is
     // declared behavior, not a defect — `--all-personas` has always bucketed it
     // (`classify_persona_failures`). The default single run did not, so every
@@ -730,13 +752,20 @@ fn verify_one(
                     "    L2/server fixture-pass {}/{} — {}",
                     fixture_report.checked.len(),
                     fixture_report.checked.len() + fixture_report.failures.len(),
-                    if fixture_report.is_green() { "green" } else { "FAIL" }
+                    if fixture_report.is_green() {
+                        "green"
+                    } else {
+                        "FAIL"
+                    }
                 ),
             );
             if !fixture_report.is_green() {
                 l2_server_ok = false;
                 for failure in &fixture_report.failures {
-                    emit(json_mode, format!("    L2/server fixture-pass FAIL — {failure}"));
+                    emit(
+                        json_mode,
+                        format!("    L2/server fixture-pass FAIL — {failure}"),
+                    );
                 }
             }
         }
@@ -1012,10 +1041,12 @@ pub(crate) fn run_screenshot_frames(path: &Path, out_dir: &Path) -> Result<bool>
 /// Resolve a TARGET argument: an existing path is used as-is; an explicit
 /// `.lolo`/`.orb` path that doesn't exist is passed through unchanged (the normal
 /// L0/resolve failure downstream reports it, same as before name resolution
-/// existed); anything else is looked up by file stem across the registry corpus
-/// — a unique match resolves, zero or ambiguous matches are a hard error listing
-/// the candidates (deterministic order, since `discover_registry` sorts).
-fn resolve_target(raw: PathBuf, repo_root: &Path) -> Result<PathBuf> {
+/// existed); anything else is looked up by file stem across every installed
+/// behavior package's registry (`orbital_verify::corpus::discover_registry`,
+/// resolved node-style from `start_dir`/`user_store`) — a unique match
+/// resolves, zero or ambiguous matches are a hard error listing the
+/// candidates (deterministic order, since `discover_registry` sorts).
+fn resolve_target(raw: PathBuf, start_dir: &Path, user_store: &Path) -> Result<PathBuf> {
     if raw.exists() {
         return Ok(raw);
     }
@@ -1025,17 +1056,31 @@ fn resolve_target(raw: PathBuf, repo_root: &Path) -> Result<PathBuf> {
     }
 
     let stem = raw.to_string_lossy().into_owned();
-    let mut candidates: Vec<PathBuf> = orbital_verify::corpus::discover_registry(repo_root)
-        .into_iter()
-        .filter(|p| p.file_stem().and_then(|s| s.to_str()) == Some(stem.as_str()))
-        .collect();
+    let mut candidates: Vec<PathBuf> =
+        orbital_verify::corpus::discover_registry(start_dir, user_store)?
+            .into_iter()
+            .filter(|p| p.file_stem().and_then(|s| s.to_str()) == Some(stem.as_str()))
+            .collect();
     candidates.sort();
 
     match candidates.len() {
-        0 => anyhow::bail!(
-            "no behavior named {stem:?} found under {}",
-            orbital_verify::corpus::REGISTRY_ROOTS.join(" or ")
-        ),
+        0 => {
+            let packages = orbital_core::behavior_packages::discover(start_dir, user_store)
+                .map_err(|e| anyhow::anyhow!("failed to discover behavior packages: {e}"))?;
+            if packages.is_empty() {
+                anyhow::bail!(
+                    "no behavior named {stem:?} found — {}",
+                    orbital_core::behavior_packages::not_installed_message(
+                        orbital_core::behavior_packages::STD_PACKAGE
+                    )
+                );
+            }
+            let names: Vec<&str> = packages.iter().map(|p| p.name.as_str()).collect();
+            anyhow::bail!(
+                "no behavior named {stem:?} found in any installed package: {}",
+                names.join(", ")
+            )
+        }
         1 => Ok(candidates.into_iter().next().expect("len checked")),
         _ => {
             let list: Vec<String> = candidates.iter().map(|p| p.display().to_string()).collect();
@@ -1048,27 +1093,25 @@ fn resolve_target(raw: PathBuf, repo_root: &Path) -> Result<PathBuf> {
     }
 }
 
-fn collect_targets(path: Option<PathBuf>, registry: bool, topic: Option<&str>) -> Vec<PathBuf> {
+fn collect_targets(
+    path: Option<PathBuf>,
+    registry: bool,
+    topic: Option<&str>,
+    start_dir: &Path,
+    user_store: &Path,
+) -> Result<Vec<PathBuf>> {
     if let Some(p) = path {
-        return vec![p];
+        return Ok(vec![p]);
     }
     if registry || topic.is_some() {
-        let mut all = orbital_verify::corpus::discover_registry(&repo_root());
+        let mut all = orbital_verify::corpus::discover_registry(start_dir, user_store)?;
         if let Some(t) = topic {
             let needle = format!("/{t}/");
             all.retain(|p| p.to_string_lossy().contains(&needle));
         }
-        return all;
+        return Ok(all);
     }
-    Vec::new()
-}
-
-fn repo_root() -> PathBuf {
-    // .../orbital-rust/crates/orbital-cli → ../../.. = monorepo root (packages/ lives there).
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../")
-        .canonicalize()
-        .unwrap_or_else(|_| PathBuf::from("."))
+    Ok(Vec::new())
 }
 
 fn display(p: &Path) -> String {
@@ -1082,66 +1125,114 @@ fn display(p: &Path) -> String {
 mod tests {
     use super::*;
 
-    fn tmp_registry(name: &str) -> PathBuf {
+    /// An installed behavior package fixture: a `node_modules/<name>` dir with
+    /// a `package.json` `orb` block plus every declared path it points to
+    /// (`orbital_core::behavior_packages::build_package` requires each to
+    /// exist). Returns the registry dir, where `.orb` fixtures get written.
+    fn write_fixture_package(node_modules: &Path, name: &str, prefix: &str) -> PathBuf {
+        let pkg_dir = node_modules.join(name);
+        let registry_dir = pkg_dir.join("behaviors/registry/ui/atoms");
+        std::fs::create_dir_all(&registry_dir).unwrap();
+        std::fs::write(pkg_dir.join("behaviors/behaviors-registry.json"), "{}").unwrap();
+        std::fs::write(
+            pkg_dir.join("behaviors/registry/factory-signatures.json"),
+            "{}",
+        )
+        .unwrap();
+        std::fs::write(pkg_dir.join("behaviors/lolo-behavior-contracts.json"), "{}").unwrap();
+        std::fs::write(pkg_dir.join("behaviors/signatures.lolo"), ";; fixture\n").unwrap();
+        std::fs::write(
+            pkg_dir.join("package.json"),
+            format!(
+                "{{\n  \"name\": \"{name}\",\n  \"version\": \"1.0.0\",\n  \"orb\": {{\n    \"prefix\": \"{prefix}\",\n    \"registry\": \"behaviors/registry\",\n    \"index\": \"behaviors/behaviors-registry.json\",\n    \"factorySignatures\": \"behaviors/registry/factory-signatures.json\",\n    \"loloContracts\": \"behaviors/lolo-behavior-contracts.json\",\n    \"signatures\": \"behaviors/signatures.lolo\",\n    \"compiler\": \"*\"\n  }}\n}}\n"
+            ),
+        )
+        .unwrap();
+        registry_dir
+    }
+
+    /// `(start_dir, user_store)` under a fresh temp root — `start_dir` is the
+    /// project directory a node-style walk-up begins from; `user_store` is
+    /// left empty so only fixtures written under `start_dir/node_modules` are
+    /// discovered.
+    fn tmp_project(name: &str) -> (PathBuf, PathBuf) {
         let root = std::env::temp_dir().join(format!("orbital-verify-target-resolve-{name}"));
         let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(root.join("packages/almadar-std/behaviors/registry/ui/atoms"))
-            .unwrap();
-        root
+        let start_dir = root.join("project");
+        let user_store = root.join("user-store");
+        std::fs::create_dir_all(&start_dir).unwrap();
+        (start_dir, user_store)
     }
 
     #[test]
     fn resolve_target_existing_path_passes_through() {
-        let root = tmp_registry("existing-path");
-        let file = root.join("some-file.orb");
+        let (start_dir, user_store) = tmp_project("existing-path");
+        let file = start_dir.join("some-file.orb");
         std::fs::write(&file, "{}").unwrap();
-        let resolved = resolve_target(file.clone(), &root).unwrap();
+        let resolved = resolve_target(file.clone(), &start_dir, &user_store).unwrap();
         assert_eq!(resolved, file);
     }
 
     #[test]
     fn resolve_target_missing_schema_extension_passes_through() {
-        let root = tmp_registry("missing-schema-ext");
-        let missing = root.join("does-not-exist.orb");
-        let resolved = resolve_target(missing.clone(), &root).unwrap();
+        let (start_dir, user_store) = tmp_project("missing-schema-ext");
+        let missing = start_dir.join("does-not-exist.orb");
+        let resolved = resolve_target(missing.clone(), &start_dir, &user_store).unwrap();
         assert_eq!(resolved, missing);
     }
 
     #[test]
     fn resolve_target_unique_name_resolves() {
-        let root = tmp_registry("unique-name");
-        let file =
-            root.join("packages/almadar-std/behaviors/registry/ui/atoms/ui-timer-display.orb");
+        let (start_dir, user_store) = tmp_project("unique-name");
+        let registry_dir =
+            write_fixture_package(&start_dir.join("node_modules"), "@fake/std", "almadar-std");
+        let file = registry_dir.join("ui-timer-display.orb");
         std::fs::write(&file, "{}").unwrap();
-        let resolved = resolve_target(PathBuf::from("ui-timer-display"), &root).unwrap();
+        // `orbital_core::behavior_packages::discover` canonicalizes each
+        // package root, so compare against the canonical form too (macOS
+        // temp dirs live under a `/var` -> `/private/var` symlink).
+        let file = file.canonicalize().unwrap();
+        let resolved =
+            resolve_target(PathBuf::from("ui-timer-display"), &start_dir, &user_store).unwrap();
         assert_eq!(resolved, file);
     }
 
     #[test]
     fn resolve_target_missing_name_errors() {
-        let root = tmp_registry("missing-name");
-        let err = resolve_target(PathBuf::from("no-such-behavior"), &root).unwrap_err();
+        let (start_dir, user_store) = tmp_project("missing-name");
+        let err =
+            resolve_target(PathBuf::from("no-such-behavior"), &start_dir, &user_store).unwrap_err();
         assert!(err.to_string().contains("no behavior named"));
     }
 
     #[test]
     fn resolve_target_ambiguous_name_errors_with_deterministic_candidates() {
-        let root = tmp_registry("ambiguous-name");
-        std::fs::create_dir_all(
-            root.join("packages/almadar-behaviors/behaviors/registry/ui/atoms"),
-        )
-        .unwrap();
-        let a = root.join("packages/almadar-std/behaviors/registry/ui/atoms/dupe-name.orb");
-        let b = root.join("packages/almadar-behaviors/behaviors/registry/ui/atoms/dupe-name.orb");
+        let (start_dir, user_store) = tmp_project("ambiguous-name");
+        let node_modules = start_dir.join("node_modules");
+        let reg_a = write_fixture_package(&node_modules, "@fake/std", "almadar-std");
+        let reg_b = write_fixture_package(&node_modules, "@fake-io/behaviors", "almadar-behaviors");
+        let a = reg_a.join("dupe-name.orb");
+        let b = reg_b.join("dupe-name.orb");
         std::fs::write(&a, "{}").unwrap();
         std::fs::write(&b, "{}").unwrap();
-        let err = resolve_target(PathBuf::from("dupe-name"), &root).unwrap_err();
+        // Canonical form, same reason as `resolve_target_unique_name_resolves`.
+        let a = a.canonicalize().unwrap();
+        let b = b.canonicalize().unwrap();
+        let err = resolve_target(PathBuf::from("dupe-name"), &start_dir, &user_store).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("ambiguous behavior name"));
-        // Deterministic order: candidates sorted lexicographically (almadar-behaviors < almadar-std).
-        let behaviors_idx = msg.find("almadar-behaviors").unwrap();
-        let std_idx = msg.find("almadar-std").unwrap();
-        assert!(behaviors_idx < std_idx);
+        // Deterministic order: candidates sorted lexicographically by resolved path.
+        let (first, second) = if a < b {
+            (a.display().to_string(), b.display().to_string())
+        } else {
+            (b.display().to_string(), a.display().to_string())
+        };
+        let first_idx = msg.find(&first).unwrap();
+        let second_idx = msg.find(&second).unwrap();
+        assert!(
+            first_idx < second_idx,
+            "candidates not in sorted order: {msg}"
+        );
     }
 
     #[test]
@@ -1221,6 +1312,7 @@ mod verdict_tests {
         engines::EngineReport {
             engine: "runtime".to_string(),
             ran,
+            status: if ran { "ran" } else { "error" },
             passed,
             failed,
             checks,

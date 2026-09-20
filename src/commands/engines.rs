@@ -14,6 +14,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
+use crate::utils::find_bun;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Engine {
     Rust,
@@ -91,6 +93,10 @@ pub(crate) struct CircuitFinding {
 pub(crate) struct EngineReport {
     pub engine: String,
     pub ran: bool,
+    /// `"ran"` | `"not_installed"` | `"error"` — finer-grained than `ran` alone,
+    /// so a missing npm package (fixable with `orb engines install`) reads
+    /// differently from a genuine spawn/timeout/parse failure.
+    pub status: &'static str,
     pub passed: usize,
     pub failed: usize,
     pub checks: usize,
@@ -108,12 +114,29 @@ impl EngineReport {
         EngineReport {
             engine: engine.as_str().to_string(),
             ran: false,
+            status: "error",
             passed: 0,
             failed: 0,
             checks: 0,
             coverage: None,
             circuit_findings: Vec::new(),
             error: Some(error),
+        }
+    }
+
+    /// The engine's npm package is not installed — the actionable rung below
+    /// `not_available`, pointing at `orb engines install` instead of a bare error.
+    pub(crate) fn not_installed(engine: Engine, package: &str) -> Self {
+        EngineReport {
+            engine: engine.as_str().to_string(),
+            ran: false,
+            status: "not_installed",
+            passed: 0,
+            failed: 0,
+            checks: 0,
+            coverage: None,
+            circuit_findings: Vec::new(),
+            error: Some(not_installed_message(package)),
         }
     }
 }
@@ -206,6 +229,7 @@ pub(crate) fn fold_rust_report(
         return EngineReport {
             engine: Engine::Rust.as_str().to_string(),
             ran: true,
+            status: "ran",
             passed: 0,
             failed,
             checks: failed,
@@ -281,6 +305,7 @@ pub(crate) fn fold_rust_report(
     EngineReport {
         engine: Engine::Rust.as_str().to_string(),
         ran: true,
+        status: "ran",
         passed,
         failed,
         checks,
@@ -291,110 +316,136 @@ pub(crate) fn fold_rust_report(
 }
 
 // ---------------------------------------------------------------------------
-// Node engine resolution + spawn watchdog
+// Engine resolution + spawn watchdog
 // ---------------------------------------------------------------------------
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum ResolvedCommand {
-    Node(PathBuf),
+    /// Run on bun (`<bun> <entry> <args…>`) — the normal case, whether the
+    /// entry came from an env override or an installed npm package's `bin`.
+    Bun(PathBuf),
     Exe(PathBuf),
-    Npx(String, String),
 }
 
-fn node_available() -> bool {
-    Command::new("node")
-        .arg("--version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+/// Why an engine could not be resolved to a runnable command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum EngineError {
+    /// The engine's npm package is not installed anywhere on the node-style
+    /// walk-up from the working directory (or the user store).
+    NotInstalled { package: String },
+    /// The package is installed but unusable (e.g. no matching `bin` entry).
+    Invalid { package: String, reason: String },
+    /// An explicit env override (or the bun runtime itself) could not be resolved.
+    Override(String),
 }
 
-/// Resolve a node engine command: (1) an explicit env override — if set, it ALWAYS
-/// wins (valid or not; an invalid override is a hard `Err`, never silently skipped),
-/// mirroring the existing `ORBITAL_BIN → PATH → …` precedent
-/// (`docs/Almadar_Verification.md`'s orbital-verify.sh resolution); (2) the dev
-/// workspace `tools/<pkg>/dist/index.js` when present; (3) `npx -y
-/// <pinned pkg>@<version>` — fetches the exact baked pin on first use (cached
-/// by npx afterwards), so developers need no manual engine install. Never
-/// panics — an unresolvable engine is a plain `Err(reason)` the caller carries
-/// as `EngineReport::not_available`.
+impl std::fmt::Display for EngineError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EngineError::NotInstalled { package } => {
+                write!(f, "{}", not_installed_message(package))
+            }
+            EngineError::Invalid { package, reason } => {
+                write!(f, "ORB_ENGINE_INVALID: `{package}` {reason}")
+            }
+            EngineError::Override(msg) => write!(f, "{msg}"),
+        }
+    }
+}
+
+/// The shared "engine not installed" hint — CLI text, the JSON `error` field,
+/// and `orb engines list` rows all read through this one function.
+pub(crate) fn not_installed_message(package: &str) -> String {
+    format!(
+        "ORB_ENGINE_NOT_INSTALLED: `{package}` is not installed — run `orb engines install` (or `--global`)"
+    )
+}
+
+/// Resolve an engine command: (1) an explicit env override — if set, it ALWAYS
+/// wins (valid or not; an invalid override is a hard `Err`, never silently
+/// skipped), mirroring the existing `ORBITAL_BIN → PATH → …` precedent
+/// (`docs/Almadar_Verification.md`'s orbital-verify.sh resolution); (2) the
+/// engine's pinned npm package, resolved node-style from `start_dir` (walk-up)
+/// with `user_store` as the final rung — its declared `bin` entry is run on
+/// bun. Never panics — an unresolvable engine is a plain `Err(EngineError)`
+/// the caller folds into `EngineReport::not_available`/`not_installed`.
+/// `(package, bin entry name, pinned version)` for a spawnable engine —
+/// shared by `resolve_node_engine` and `orb engines` (install/list/update).
+pub(crate) fn engine_pin(engine: Engine) -> (&'static str, &'static str, &'static str) {
+    match engine {
+        Engine::Runtime => {
+            let (pkg, ver) = crate::baked_engine_pins::RUNTIME_VERIFY_ENGINE;
+            (pkg, "runtime-verify", ver)
+        }
+        Engine::Compiled => {
+            let (pkg, ver) = crate::baked_engine_pins::COMPILED_VERIFY_ENGINE;
+            (pkg, "orbital-verify", ver)
+        }
+        Engine::Rust => unreachable!("rust engine runs in-process, never spawned"),
+    }
+}
+
+fn env_override_var(engine: Engine) -> &'static str {
+    match engine {
+        Engine::Runtime => "ORB_RUNTIME_VERIFY_BIN",
+        Engine::Compiled => "ORB_COMPILED_VERIFY_BIN",
+        Engine::Rust => unreachable!("rust engine runs in-process, never spawned"),
+    }
+}
+
 fn resolve_node_engine(
     engine: Engine,
-    repo_root: &Path,
-) -> std::result::Result<ResolvedCommand, String> {
-    let (dev_rel, env_var, pin): (&str, &str, (&str, &str)) = match engine {
-        Engine::Runtime => (
-            "tools/runtime-verify/dist/index.js",
-            "ORB_RUNTIME_VERIFY_BIN",
-            crate::baked_engine_pins::RUNTIME_VERIFY_ENGINE,
-        ),
-        Engine::Compiled => (
-            "tools/orbital-verify-unified/dist/index.js",
-            "ORB_COMPILED_VERIFY_BIN",
-            crate::baked_engine_pins::COMPILED_VERIFY_ENGINE,
-        ),
-        Engine::Rust => unreachable!("rust engine runs in-process, never spawned"),
-    };
+    start_dir: &Path,
+    user_store: &Path,
+) -> std::result::Result<ResolvedCommand, EngineError> {
+    let env_var = env_override_var(engine);
+    let (package, bin_name, _pinned_version) = engine_pin(engine);
 
     if let Ok(over) = std::env::var(env_var) {
         let p = PathBuf::from(&over);
         if !p.exists() {
-            return Err(format!("{env_var}={over} does not exist"));
+            return Err(EngineError::Override(format!(
+                "{env_var}={over} does not exist"
+            )));
         }
         if p.extension().and_then(|e| e.to_str()) == Some("js") {
-            if !node_available() {
-                return Err(format!(
-                    "{env_var}={over} is a .js entry but `node` is not on PATH"
-                ));
-            }
-            return Ok(ResolvedCommand::Node(p));
+            return Ok(ResolvedCommand::Bun(p));
         }
         return Ok(ResolvedCommand::Exe(p));
     }
 
-    let dev_path = repo_root.join(dev_rel);
-    if dev_path.is_file() {
-        if !node_available() {
-            return Err(format!(
-                "dev workspace engine found at {} but `node` is not on PATH",
-                dev_path.display()
-            ));
-        }
-        return Ok(ResolvedCommand::Node(dev_path));
+    let npm_pkg = orbital_core::behavior_packages::find_npm_package(package, start_dir, user_store)
+        .ok_or_else(|| EngineError::NotInstalled {
+            package: package.to_string(),
+        })?;
+    match npm_pkg.bin.get(bin_name) {
+        Some(entry) => Ok(ResolvedCommand::Bun(entry.clone())),
+        None => Err(EngineError::Invalid {
+            package: package.to_string(),
+            reason: format!("installed package has no `{bin_name}` bin entry"),
+        }),
     }
-
-    if node_available() {
-        return Ok(ResolvedCommand::Npx(pin.0.to_string(), pin.1.to_string()));
-    }
-
-    Err(format!(
-        "no {} engine available: {env_var} unset, dev workspace ({}) not found, and node/npx not on PATH",
-        engine.as_str(),
-        dev_path.display()
-    ))
 }
 
-fn build_command(resolved: ResolvedCommand, args: &[String]) -> Command {
+fn build_command(
+    resolved: ResolvedCommand,
+    args: &[String],
+) -> std::result::Result<Command, EngineError> {
     let mut cmd = match resolved {
-        ResolvedCommand::Node(path) => {
-            let mut c = Command::new("node");
-            c.arg(path);
+        ResolvedCommand::Bun(entry) => {
+            let bun = find_bun()
+                .map_err(|e| EngineError::Override(format!("bun runtime not found: {e}")))?;
+            let mut c = Command::new(bun);
+            c.arg(entry);
             c
         }
         ResolvedCommand::Exe(path) => Command::new(path),
-        ResolvedCommand::Npx(pkg, ver) => {
-            let mut c = Command::new("npx");
-            c.arg("-y").arg(format!("{pkg}@{ver}"));
-            c
-        }
     };
     cmd.args(args);
-    cmd
+    Ok(cmd)
 }
 
-/// `ORBITAL_BIN` points the node engines back at THIS binary (so they never shell
+/// `ORBITAL_BIN` points the spawned engines back at THIS binary (so they never shell
 /// out to a stale installed `orb`); `ALMADAR_DEV`/`ALMADAR_ROOT` are inherited so
 /// the dev-workspace registry resolution the two engines rely on stays in effect.
 ///
@@ -500,14 +551,18 @@ fn runtime_tier_flags(tier: Tier) -> &'static [&'static str] {
 pub(crate) fn run_runtime_engine(
     target: &Path,
     tier: Tier,
-    repo_root: &Path,
+    start_dir: &Path,
+    user_store: &Path,
     port: u16,
     min_coverage: Option<f64>,
     engine_timeout: Option<Duration>,
 ) -> EngineReport {
-    let resolved = match resolve_node_engine(Engine::Runtime, repo_root) {
+    let resolved = match resolve_node_engine(Engine::Runtime, start_dir, user_store) {
         Ok(r) => r,
-        Err(e) => return EngineReport::not_available(Engine::Runtime, e),
+        Err(EngineError::NotInstalled { package }) => {
+            return EngineReport::not_installed(Engine::Runtime, &package)
+        }
+        Err(e) => return EngineReport::not_available(Engine::Runtime, e.to_string()),
     };
 
     let item = target
@@ -543,7 +598,13 @@ pub(crate) fn run_runtime_engine(
         args.push(mc.to_string());
     }
 
-    let mut cmd = build_command(resolved, &args);
+    let mut cmd = match build_command(resolved, &args) {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&out_dir);
+            return EngineReport::not_available(Engine::Runtime, e.to_string());
+        }
+    };
     apply_shared_env(&mut cmd);
 
     let budget = engine_timeout.unwrap_or_else(|| tier.timeout());
@@ -643,6 +704,7 @@ fn fold_runtime_json(doc: &serde_json::Value) -> EngineReport {
     EngineReport {
         engine: Engine::Runtime.as_str().to_string(),
         ran: true,
+        status: "ran",
         passed,
         failed,
         checks,
@@ -659,14 +721,18 @@ fn fold_runtime_json(doc: &serde_json::Value) -> EngineReport {
 pub(crate) fn run_compiled_engine(
     target: &Path,
     tier: Tier,
-    repo_root: &Path,
+    start_dir: &Path,
+    user_store: &Path,
     port: u16,
     client_port: u16,
     engine_timeout: Option<Duration>,
 ) -> EngineReport {
-    let resolved = match resolve_node_engine(Engine::Compiled, repo_root) {
+    let resolved = match resolve_node_engine(Engine::Compiled, start_dir, user_store) {
         Ok(r) => r,
-        Err(e) => return EngineReport::not_available(Engine::Compiled, e),
+        Err(EngineError::NotInstalled { package }) => {
+            return EngineReport::not_installed(Engine::Compiled, &package)
+        }
+        Err(e) => return EngineReport::not_available(Engine::Compiled, e.to_string()),
     };
 
     let mut args = vec![
@@ -685,7 +751,10 @@ pub(crate) fn run_compiled_engine(
         Tier::Deep => {}
     }
 
-    let mut cmd = build_command(resolved, &args);
+    let mut cmd = match build_command(resolved, &args) {
+        Ok(c) => c,
+        Err(e) => return EngineReport::not_available(Engine::Compiled, e.to_string()),
+    };
     apply_shared_env(&mut cmd);
 
     let budget = engine_timeout.unwrap_or_else(|| tier.timeout());
@@ -778,6 +847,7 @@ fn fold_compiled_json(doc: &serde_json::Value) -> EngineReport {
     EngineReport {
         engine: Engine::Compiled.as_str().to_string(),
         ran: true,
+        status: "ran",
         passed,
         failed,
         checks,
@@ -917,6 +987,7 @@ mod tests {
             vec![EngineReport {
                 engine: "rust".into(),
                 ran: true,
+                status: "ran",
                 passed: 3,
                 failed: 0,
                 checks: 3,
@@ -934,6 +1005,7 @@ mod tests {
             vec![EngineReport {
                 engine: "rust".into(),
                 ran: true,
+                status: "ran",
                 passed: 2,
                 failed: 1,
                 checks: 3,
@@ -966,6 +1038,7 @@ mod tests {
                 EngineReport {
                     engine: "rust".into(),
                     ran: true,
+                    status: "ran",
                     passed: 2,
                     failed: 1,
                     checks: 3,
@@ -1035,46 +1108,139 @@ mod tests {
     }
 
     #[test]
-    fn resolve_node_engine_env_override_nonexistent_is_not_available() {
+    fn resolve_node_engine_env_override_nonexistent_is_error() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let key = "ORB_RUNTIME_VERIFY_BIN";
         let prev = std::env::var(key).ok();
         std::env::set_var(key, "/nonexistent/path/to/tool.js");
-        let result = resolve_node_engine(Engine::Runtime, Path::new("/nonexistent/repo/root"));
+        let result = resolve_node_engine(
+            Engine::Runtime,
+            Path::new("/nonexistent/start"),
+            Path::new("/nonexistent/store"),
+        );
         match prev {
             Some(v) => std::env::set_var(key, v),
             None => std::env::remove_var(key),
         }
-        assert!(result.is_err());
+        assert!(matches!(result, Err(EngineError::Override(_))));
     }
 
-    /// Published mode (no override, no dev workspace): resolution falls to the
-    /// baked npx pin, and the spawned command fetches it (`npx -y pkg@ver`) so
-    /// developers need no manual engine install.
+    /// An env override pointing at a `.js` entry resolves to `Bun` — the entry
+    /// is run through bun, never node from PATH.
     #[test]
-    fn resolve_node_engine_falls_to_npx_pin_and_fetches() {
+    fn resolve_node_engine_env_override_js_resolves_to_bun() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let key = "ORB_RUNTIME_VERIFY_BIN";
+        let tmp = std::env::temp_dir().join("orb-engine-env-override.js");
+        std::fs::write(&tmp, "// stub").unwrap();
+        let prev = std::env::var(key).ok();
+        std::env::set_var(key, &tmp);
+        let result = resolve_node_engine(
+            Engine::Runtime,
+            Path::new("/nonexistent/start"),
+            Path::new("/nonexistent/store"),
+        );
+        match prev {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+        let _ = std::fs::remove_file(&tmp);
+        match result {
+            Ok(ResolvedCommand::Bun(p)) => assert_eq!(p, tmp),
+            other => panic!("expected Bun(..), got {other:?}"),
+        }
+    }
+
+    /// An installed npm package whose `package.json` declares the expected
+    /// `bin` entry resolves to `Bun(<entry>)`.
+    #[test]
+    fn resolve_node_engine_finds_installed_package_bin() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let key = "ORB_RUNTIME_VERIFY_BIN";
         let prev = std::env::var(key).ok();
         std::env::remove_var(key);
-        let result = resolve_node_engine(Engine::Runtime, Path::new("/nonexistent/repo/root"));
+
+        let tmp = std::env::temp_dir().join("orb-engine-resolve-installed");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let (pkg, ver) = crate::baked_engine_pins::RUNTIME_VERIFY_ENGINE;
+        let pkg_dir = tmp.join("node_modules").join(pkg);
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        std::fs::create_dir_all(pkg_dir.join("dist")).unwrap();
+        std::fs::write(pkg_dir.join("dist/index.js"), "// stub").unwrap();
+        std::fs::write(
+            pkg_dir.join("package.json"),
+            format!(r#"{{"name":"{pkg}","version":"{ver}","bin":{{"runtime-verify":"./dist/index.js"}}}}"#),
+        )
+        .unwrap();
+        let user_store = tmp.join("empty-store");
+
+        let result = resolve_node_engine(Engine::Runtime, &tmp, &user_store);
         match prev {
             Some(v) => std::env::set_var(key, v),
             None => std::env::remove_var(key),
         }
-        let (pkg, ver) = crate::baked_engine_pins::RUNTIME_VERIFY_ENGINE;
+        let outcome = match result {
+            Ok(ResolvedCommand::Bun(p)) => Ok(p.ends_with("dist/index.js")),
+            other => Err(format!("expected Bun(..), got {other:?}")),
+        };
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert!(outcome.expect("resolved to Bun(..)"));
+    }
+
+    /// No env override, and the package is missing from every node_modules on
+    /// the walk-up: `EngineError::NotInstalled`.
+    #[test]
+    fn resolve_node_engine_missing_package_is_not_installed() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let key = "ORB_RUNTIME_VERIFY_BIN";
+        let prev = std::env::var(key).ok();
+        std::env::remove_var(key);
+        let result = resolve_node_engine(
+            Engine::Runtime,
+            Path::new("/nonexistent/start-dir"),
+            Path::new("/nonexistent/user-store"),
+        );
+        match prev {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+        let (pkg, _) = crate::baked_engine_pins::RUNTIME_VERIFY_ENGINE;
         match result {
-            Ok(ResolvedCommand::Npx(p, v)) => {
-                assert_eq!(p, pkg);
-                assert_eq!(v, ver);
-                let cmd = build_command(ResolvedCommand::Npx(p, v), &[]);
-                let args: Vec<String> = cmd
-                    .get_args()
-                    .map(|a| a.to_string_lossy().into_owned())
-                    .collect();
-                assert_eq!(args, vec!["-y".to_string(), format!("{pkg}@{ver}")]);
-            }
-            other => panic!("expected npx fallback, got {other:?}"),
+            Err(EngineError::NotInstalled { package }) => assert_eq!(package, pkg),
+            other => panic!("expected NotInstalled, got {other:?}"),
+        }
+    }
+
+    /// The package is installed but its `package.json` declares no matching
+    /// `bin` entry: `EngineError::Invalid`.
+    #[test]
+    fn resolve_node_engine_package_without_bin_entry_is_invalid() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let key = "ORB_RUNTIME_VERIFY_BIN";
+        let prev = std::env::var(key).ok();
+        std::env::remove_var(key);
+
+        let tmp = std::env::temp_dir().join("orb-engine-resolve-no-bin");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let (pkg, ver) = crate::baked_engine_pins::RUNTIME_VERIFY_ENGINE;
+        let pkg_dir = tmp.join("node_modules").join(pkg);
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        std::fs::write(
+            pkg_dir.join("package.json"),
+            format!(r#"{{"name":"{pkg}","version":"{ver}"}}"#),
+        )
+        .unwrap();
+        let user_store = tmp.join("empty-store");
+
+        let result = resolve_node_engine(Engine::Runtime, &tmp, &user_store);
+        match prev {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+        match result {
+            Err(EngineError::Invalid { package, .. }) => assert_eq!(package, pkg),
+            other => panic!("expected Invalid, got {other:?}"),
         }
     }
 }

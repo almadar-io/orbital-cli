@@ -177,6 +177,7 @@ pub(crate) fn typed_parse_error_to_json(
             valid_values: None,
             line: None,
             column: None,
+            needs_install: None,
         }],
         TypedParseError::Lolo(LoloError::Io { path, message }) => vec![ValidationJsonError {
             code: "LOLO_IO_ERROR".to_string(),
@@ -188,6 +189,7 @@ pub(crate) fn typed_parse_error_to_json(
             valid_values: None,
             line: None,
             column: None,
+            needs_install: None,
         }],
         TypedParseError::Lolo(LoloError::Parse { path, inner }) => {
             let span = inner.span();
@@ -555,6 +557,7 @@ pub(crate) fn typed_parse_error_to_json(
                 valid_values: None,
                 line: Some(span.line),
                 column: Some(span.col),
+                needs_install: None,
             }]
         }
         TypedParseError::Lolo(LoloError::Lower {
@@ -639,8 +642,28 @@ pub(crate) fn typed_parse_error_to_json(
                 valid_values: None,
                 line: Some(span.line),
                 column: Some(span.col),
+                needs_install: None,
             }]
         }
+        TypedParseError::Lolo(LoloError::Lower {
+            path,
+            inner: inner @ LowerError::BehaviorPackageNotInstalled { .. },
+        }) => vec![ValidationJsonError {
+            code: "ORB_BEHAVIOR_PACKAGE_NOT_INSTALLED".to_string(),
+            path: path.clone(),
+            message: format!("{inner}"),
+            suggestion: Some(
+                "Run `orb behaviors install <package>` for the package that declares this \
+                 behavior, then retry — the schema was NOT evaluated."
+                    .to_string(),
+            ),
+            fix_guidance: None,
+            expected_shape: None,
+            valid_values: None,
+            line: None,
+            column: None,
+            needs_install: Some(true),
+        }],
         TypedParseError::Lolo(LoloError::Lower { path, inner }) => vec![ValidationJsonError {
             code: "LOLO_LOWER_ERROR".to_string(),
             path: path.clone(),
@@ -651,6 +674,7 @@ pub(crate) fn typed_parse_error_to_json(
             valid_values: None,
             line: None,
             column: None,
+            needs_install: None,
         }],
     }
 }

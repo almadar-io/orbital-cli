@@ -30,6 +30,48 @@ pub(crate) fn validate_schema(
     validate_schema_native(path, extra_patterns, service_registry)
 }
 
+/// The JSON error `code` for a behavior-package `discover()` failure —
+/// checked before a schema is even parsed, since `CompilerOptions::from_env`
+/// runs discovery unconditionally. `PrefixConflict` gets its own `ORB_BEHAVIOR_*`
+/// code; the other `DiscoverError` variants (a malformed/incomplete installed
+/// package) share one generic code — none of the four behavior-lookup codes
+/// (`ORB_BEHAVIOR_{PACKAGE_NOT_INSTALLED,NOT_FOUND,AMBIGUOUS}`) applies to a
+/// discovery-time failure, only to a later `uses` resolution.
+pub(crate) fn discovery_error_json_code(
+    e: &orbital_core::behavior_packages::DiscoverError,
+) -> &'static str {
+    use orbital_core::behavior_packages::DiscoverError;
+    match e {
+        DiscoverError::PrefixConflict { .. } => "ORB_BEHAVIOR_PREFIX_CONFLICT",
+        DiscoverError::MissingDeclaredPath { .. }
+        | DiscoverError::InvalidPackageJson { .. }
+        | DiscoverError::Io { .. } => "ORB_BEHAVIOR_PACKAGE_INVALID",
+    }
+}
+
+/// True when an inline-phase error names a real, resolvable-shaped `uses`
+/// import that nothing on the `discover()` walk answers
+/// (`ORB_BEHAVIOR_PACKAGE_NOT_INSTALLED` / `ORB_BEHAVIOR_NOT_FOUND`) — as
+/// opposed to a broken loader environment (`BehaviorAmbiguous`/
+/// `PrefixConflict`/`StdLibNotConfigured`/…). Drives
+/// `ValidationJsonError.needs_install` and the "install this" vs.
+/// "environment is broken" suggestion text. `BehaviorPackageNotInstalled`
+/// (Phase 2: a missing `@almadar/std` — `PackageNotInstalled` covers a
+/// missing `<prefix>/<name>` scoped package) is install-actionable the same
+/// way.
+pub(crate) fn inline_error_needs_install(
+    e: &orbital_compiler::phases::inline::InlineError,
+) -> bool {
+    use orbital_compiler::loader::LoaderError;
+    use orbital_compiler::phases::inline::InlineError;
+    matches!(
+        e,
+        InlineError::Loader(LoaderError::PackageNotInstalled { .. })
+            | InlineError::Loader(LoaderError::BehaviorPackageNotInstalled { .. })
+            | InlineError::Loader(LoaderError::BehaviorNotFound { .. })
+    )
+}
+
 /// Validate schema with JSON output (for programmatic consumption by DeepAgent)
 fn validate_schema_json(
     path: &PathBuf,
@@ -39,6 +81,37 @@ fn validate_schema_json(
     use orbital_compiler::phases::inline::inline_schema_with_orbital_diagnostics;
     use orbital_compiler::{compile_schema, validate_comprehensive_full, CompilerOptions};
     use orbital_core::ir::{OirValidator, ValidationSeverity};
+
+    // Behavior-package discovery runs unconditionally in `from_env` — a
+    // `PrefixConflict` (or a malformed installed package) is validator
+    // infrastructure, never a schema authoring error, so it is reported
+    // before the schema is even read.
+    let discovery_probe = CompilerOptions::from_env();
+    if let Some(discovery_err) = &discovery_probe.discovery_error {
+        let output = ValidationJsonOutput {
+            success: true,
+            valid: false,
+            errors: Some(vec![ValidationJsonError {
+                code: discovery_error_json_code(discovery_err).to_string(),
+                path: "".to_string(),
+                message: discovery_err.to_string(),
+                suggestion: Some(
+                    "Validator environment error — the schema was NOT evaluated; retry, do not edit the schema"
+                        .to_string(),
+                ),
+                fix_guidance: None,
+                expected_shape: None,
+                valid_values: None,
+                line: None,
+                column: None,
+                needs_install: None,
+            }]),
+            warnings: None,
+            stats: None,
+        };
+        println!("{}", serde_json::to_string_pretty(&output)?);
+        return Ok(());
+    }
 
     // Step 1: Parse schema (auto-detect LOLO vs JSON syntax)
     let content_raw = match std::fs::read_to_string(path) {
@@ -58,6 +131,7 @@ fn validate_schema_json(
                     valid_values: None,
                     line: None,
                     column: None,
+                    needs_install: None,
                 }]),
                 warnings: None,
                 stats: None,
@@ -98,12 +172,14 @@ fn validate_schema_json(
     let mut orbital_ref_diagnostics = Vec::new();
     let mut uses_config_diagnostics = Vec::new();
     // from_env, NOT default: the plain-text validate path resolves imports
-    // through dev-workspace registries (ALMADAR_DEV) while this --json path
-    // used InlineConfig::default() and silently inlined the STALE baked
-    // copy of any behavior edited since the last bake — rabit's
+    // through installed behavior packages while this --json path used
+    // InlineConfig::default() and silently inlined the embedded std copy of
+    // any behavior an installed package overrides — rabit's
     // validateWithOrbitalCLI (--json) and a manual `orb validate` then
     // disagreed about the same schema.
-    let inline_config = CompilerOptions::from_env().inline;
+    // Reuse the already-run discovery (checked for `discovery_error` above)
+    // instead of re-walking `node_modules` a second time.
+    let inline_config = discovery_probe.inline;
     if let Err(e) = inline_schema_with_orbital_diagnostics(
         &mut schema,
         &inline_config,
@@ -126,21 +202,29 @@ fn validate_schema_json(
         // diagnosable from the consumer's log alone.
         use orbital_compiler::loader::LoaderError;
         use orbital_compiler::phases::inline::InlineError;
+        // `BehaviorAmbiguous`/`PrefixConflict` are installed-package-set
+        // problems (two packages both answer the same lookup) — validator
+        // infrastructure, same bucket as an unresolvable std/scoped path.
+        // `PackageNotInstalled`/`BehaviorNotFound` are the opposite: the
+        // schema named a real, resolvable-shaped import that nothing on the
+        // walk answers — `needs_install`, never `is_infra` (do NOT collapse
+        // its code to `INLINE_INFRA_ERROR`; keep `e.structured_code()` so the
+        // caller can tell "install this" from "environment is broken").
         let is_infra = matches!(
             &e,
             InlineError::Loader(LoaderError::StdLibNotConfigured)
                 | InlineError::Loader(LoaderError::ScopedPackageNotConfigured(_))
+                | InlineError::Loader(LoaderError::BehaviorAmbiguous { .. })
+                | InlineError::Loader(LoaderError::PrefixConflict { .. })
         );
+        let needs_install = inline_error_needs_install(&e);
         let mut inline_message = format!("Failed to resolve external references: {}", e);
         if is_infra {
             let lc = &inline_config.loader_config;
             inline_message.push_str(&format!(
-                " [loader env: dev_workspace={}, registry_roots={}, std_lib_path_set={}, auto_discover={}, ALMADAR_DEV={}]",
-                lc.dev_workspace,
-                lc.behaviors_registry_roots.len(),
+                " [loader env: installed_packages={}, std_lib_path_set={}]",
+                lc.packages.len(),
                 lc.std_lib_path.is_some(),
-                lc.auto_discover_registries,
-                std::env::var("ALMADAR_DEV").map(|v| !v.is_empty()).unwrap_or(false),
             ));
         }
         // Import-carrying loader errors have no spans, but the failing
@@ -151,6 +235,10 @@ fn validate_schema_json(
             InlineError::Loader(LoaderError::InvalidPrimitiveImport(s)) => Some(s.clone()),
             InlineError::Loader(LoaderError::StdImportNotCanonical { given, .. }) => {
                 Some(given.clone())
+            }
+            InlineError::Loader(LoaderError::BehaviorNotFound { name, .. }) => Some(name.clone()),
+            InlineError::Loader(LoaderError::PackageNotInstalled { prefix }) => {
+                Some(prefix.clone())
             }
             _ => None,
         };
@@ -186,19 +274,22 @@ fn validate_schema_json(
                 },
                 path: inline_path,
                 message: inline_message,
-                suggestion: Some(
-                    if is_infra {
-                        "Validator environment error — the schema was NOT evaluated; retry, do not edit the schema"
-                    } else {
-                        "Check `uses:` imports resolve to known behaviors"
-                    }
-                    .to_string(),
-                ),
+                suggestion: Some(if is_infra {
+                    "Validator environment error — the schema was NOT evaluated; retry, do not edit the schema"
+                        .to_string()
+                } else if needs_install {
+                    "Run `orb behaviors install <package>` for the package that declares this \
+                     behavior, then retry — the schema was NOT evaluated."
+                        .to_string()
+                } else {
+                    "Check `uses:` imports resolve to known behaviors".to_string()
+                }),
                 fix_guidance: None,
                 expected_shape: None,
                 valid_values: None,
                 line: inline_line,
                 column: inline_column,
+                needs_install: needs_install.then_some(true),
             }]),
             warnings: None,
             stats: None,
@@ -230,8 +321,13 @@ fn validate_schema_json(
         Some(lang) if lang != "en" => orbital_compiler::SchemaLanguage::NonLatin(lang),
         _ => orbital_compiler::SchemaLanguage::English,
     };
-    let mut comprehensive_result =
-        validate_comprehensive_full(&schema, extra_patterns, schema_language, service_registry);
+    let mut comprehensive_result = validate_comprehensive_full(
+        &schema,
+        extra_patterns,
+        schema_language,
+        service_registry,
+        inline_config.loader_config.packages.clone(),
+    );
     merge_post_inline_diagnostics(
         &mut comprehensive_result,
         &trait_ref_config_diagnostics,
@@ -313,6 +409,7 @@ fn validate_schema_json(
             column: resolved
                 .map(|(s, _)| s.col)
                 .or(quoted_anchor.map(|(_, c)| c)),
+            needs_install: None,
         });
     }
 
@@ -364,6 +461,7 @@ fn validate_schema_json(
                         valid_values: None,
                         line: None,
                         column: None,
+                        needs_install: None,
                     });
                 } else {
                     all_warnings.push(ValidationJsonWarning {
@@ -388,6 +486,7 @@ fn validate_schema_json(
                 valid_values: None,
                 line: None,
                 column: None,
+                needs_install: None,
             });
         }
     }
@@ -437,6 +536,21 @@ pub(crate) fn run_full_validation(
     };
     use orbital_core::ir::{OirValidator, ValidationSeverity};
 
+    // Behavior-package discovery runs unconditionally in `from_env` — a
+    // `PrefixConflict` (or a malformed installed package) is validator
+    // infrastructure, checked before the schema is even read.
+    let default_opts = CompilerOptions::from_env();
+    if let Some(discovery_err) = &default_opts.discovery_error {
+        return Ok(ValidationDiagnostics {
+            errors: vec![format!(
+                "[{}] {} (validator environment error — the schema was NOT evaluated; retry, do not edit the schema)",
+                discovery_error_json_code(discovery_err),
+                discovery_err
+            )],
+            warnings: Vec::new(),
+        });
+    }
+
     let content_raw = std::fs::read_to_string(path)?;
     let schema_language = match detect_language(&content_raw) {
         Some(lang) if lang != "en" => SchemaLanguage::NonLatin(lang),
@@ -447,10 +561,7 @@ pub(crate) fn run_full_validation(
 
     // Inline + enrich before validation so `uses`-based trait/entity/page refs
     // resolve (otherwise validate_comprehensive_full false-positives on every
-    // multi-use schema). Mirrors the `orb validate` path. `from_env` enables
-    // dev-workspace resolution (ALMADAR_DEV) so behavior edits apply without a
-    // rebuild + rebake.
-    let default_opts = CompilerOptions::from_env();
+    // multi-use schema). Mirrors the `orb validate` path.
     let mut trait_ref_config_diagnostics = Vec::new();
     let mut orbital_ref_diagnostics = Vec::new();
     let mut uses_config_diagnostics = Vec::new();
@@ -482,8 +593,13 @@ pub(crate) fn run_full_validation(
     }
     enrich_schema(&mut schema, &default_opts.enrichment);
 
-    let mut comprehensive_result =
-        validate_comprehensive_full(&schema, extra_patterns, schema_language, service_registry);
+    let mut comprehensive_result = validate_comprehensive_full(
+        &schema,
+        extra_patterns,
+        schema_language,
+        service_registry,
+        default_opts.inline.loader_config.packages.clone(),
+    );
     merge_post_inline_diagnostics(
         &mut comprehensive_result,
         &trait_ref_config_diagnostics,
@@ -585,4 +701,50 @@ fn validate_schema_native(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod needs_install_classification_tests {
+    use super::inline_error_needs_install;
+    use orbital_compiler::loader::LoaderError;
+    use orbital_compiler::phases::inline::InlineError;
+
+    #[test]
+    fn package_not_installed_and_behavior_not_found_need_install() {
+        assert!(inline_error_needs_install(&InlineError::Loader(
+            LoaderError::PackageNotInstalled {
+                prefix: "almadar-behaviors".to_string(),
+            }
+        )));
+        assert!(inline_error_needs_install(&InlineError::Loader(
+            LoaderError::BehaviorNotFound {
+                name: "std-notes".to_string(),
+                searched: vec![],
+            }
+        )));
+        // Phase 2: a missing `@almadar/std` itself (as opposed to a missing
+        // `<prefix>/<name>` scoped package — `PackageNotInstalled` above) is
+        // install-actionable the same way.
+        assert!(inline_error_needs_install(&InlineError::Loader(
+            LoaderError::BehaviorPackageNotInstalled {
+                package: "@almadar/std".to_string(),
+            }
+        )));
+    }
+
+    #[test]
+    fn a_broken_loader_environment_does_not_need_install() {
+        assert!(!inline_error_needs_install(&InlineError::Loader(
+            LoaderError::StdLibNotConfigured
+        )));
+        assert!(!inline_error_needs_install(&InlineError::Loader(
+            LoaderError::PrefixConflict {
+                prefix: "almadar-behaviors".to_string(),
+                package_a: "@almadar-io/behaviors".to_string(),
+                path_a: std::path::PathBuf::new(),
+                package_b: "@fixture/pkg".to_string(),
+                path_b: std::path::PathBuf::new(),
+            }
+        )));
+    }
 }

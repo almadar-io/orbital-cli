@@ -99,7 +99,10 @@ pub(crate) fn probe_over_http(
 /// `InlineButtonRender3`), and while several of those trait names happen to coincide
 /// with `std-notes.orb`'s `NoteOrbital` (so some fixtures also transition for real),
 /// that coincidence is not what this checks.
-pub fn run_fixture_pass(orbital_name: &str, schema: &OrbitalSchema) -> anyhow::Result<FixturePassReport> {
+pub fn run_fixture_pass(
+    orbital_name: &str,
+    schema: &OrbitalSchema,
+) -> anyhow::Result<FixturePassReport> {
     let server = boot_http_server(schema)?;
     let url = format!("{}/api/orbitals/{orbital_name}/events", server.base_url());
 
@@ -122,7 +125,9 @@ pub fn run_fixture_pass(orbital_name: &str, schema: &OrbitalSchema) -> anyhow::R
             .map_err(|e| anyhow::anyhow!("{case}: reading response body: {e}"))?;
         match serde_json::from_str::<EventResponse>(&body_text) {
             Ok(_) => report.checked.push(case),
-            Err(e) => report.failures.push(format!("{case}: reply did not deserialize as EventResponse: {e}\nbody: {body_text}")),
+            Err(e) => report.failures.push(format!(
+                "{case}: reply did not deserialize as EventResponse: {e}\nbody: {body_text}"
+            )),
         }
     }
     Ok(report)
@@ -145,7 +150,8 @@ mod tests {
     use super::*;
 
     fn load_std_notes() -> OrbitalSchema {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test-schemas/std-notes.orb");
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../test-schemas/std-notes.orb");
         let raw = std::fs::read_to_string(&path).expect("test-schemas/std-notes.orb must exist");
         orbital_core::schema::parse_schema(&raw).expect("std-notes.orb must parse")
     }
@@ -165,6 +171,9 @@ mod tests {
             "fixture pass had shape failures: {:#?}",
             report.failures
         );
-        assert!(!report.checked.is_empty(), "expected at least one fixture to be checked");
+        assert!(
+            !report.checked.is_empty(),
+            "expected at least one fixture to be checked"
+        );
     }
 }

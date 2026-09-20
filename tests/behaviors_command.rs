@@ -1,0 +1,793 @@
+//! `orb behaviors` + `orb signatures` integration tests — drives the real
+//! `orb`/`orbital` binary (`CARGO_BIN_EXE_orb`) against a temp project with a
+//! stub `bun` (`ORB_BUN_PATH`, no network) that materializes a fake behavior
+//! package (io-shaped, or `almadar-std`-prefixed) on `add` and deletes it on
+//! `remove`, per `docs/Almadar_Behavior_Packages.md` §4/§6/§10 (Phase 2:
+//! `@almadar/std` is an installed package too, no embedded fallback).
+
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+
+fn orb_bin() -> PathBuf {
+    PathBuf::from(env!("CARGO_BIN_EXE_orb"))
+}
+
+/// A temp project dir with a `package.json`, so `orb behaviors`/discovery
+/// resolves it as the project rather than falling back to `~/.orb`.
+struct Project {
+    dir: tempfile::TempDir,
+}
+
+impl Project {
+    fn new() -> Self {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("package.json"),
+            "{\n  \"name\": \"behaviors-command-test\",\n  \"private\": true\n}\n",
+        )
+        .unwrap();
+        Self { dir }
+    }
+
+    fn path(&self) -> &Path {
+        self.dir.path()
+    }
+
+    fn fake_pkg_dir(&self) -> PathBuf {
+        self.path().join("node_modules/@fake-io/behaviors")
+    }
+
+    fn fake_std_pkg_dir(&self) -> PathBuf {
+        self.path().join("node_modules/@fake/std")
+    }
+
+    fn fake_plain_pkg_dir(&self) -> PathBuf {
+        self.path().join("node_modules/@fake-plain/pkg")
+    }
+}
+
+const BUN_STUB_TEMPLATE: &str = r#"#!/bin/sh
+set -e
+case "$1" in
+  add)
+    mkdir -p "node_modules/@fake-io/behaviors/behaviors/registry/atoms"
+    cat > "node_modules/@fake-io/behaviors/package.json" <<'PKGJSON'
+{
+  "name": "@fake-io/behaviors",
+  "version": "1.2.3",
+  "orb": {
+    "prefix": "fake-behaviors",
+    "registry": "behaviors/registry",
+    "index": "behaviors/behaviors-registry.json",
+    "factorySignatures": "behaviors/registry/factory-signatures.json",
+    "loloContracts": "behaviors/lolo-behavior-contracts.json",
+    "signatures": "behaviors/signatures.lolo",
+    "compiler": "__COMPILER_RANGE__"
+  }
+}
+PKGJSON
+    echo '{}' > "node_modules/@fake-io/behaviors/behaviors/behaviors-registry.json"
+    echo '{}' > "node_modules/@fake-io/behaviors/behaviors/registry/factory-signatures.json"
+    echo '{}' > "node_modules/@fake-io/behaviors/behaviors/lolo-behavior-contracts.json"
+    printf ';; fake-behaviors signatures fragment\n(fake-atom)\n' > "node_modules/@fake-io/behaviors/behaviors/signatures.lolo"
+    printf '{"name":"fake-atom","orbitals":[]}\n' > "node_modules/@fake-io/behaviors/behaviors/registry/atoms/fake-atom.orb"
+    ;;
+  remove)
+    rm -rf "node_modules/@fake-io/behaviors"
+    ;;
+  install|update)
+    ;;
+esac
+"#;
+
+/// Write an executable `sh` stub standing in for `bun` at `<project>/fake-bun.sh`.
+/// `add` materializes `@fake-io/behaviors` (prefix `fake-behaviors`) with the
+/// given `compiler` range; `remove` deletes it; `install`/`update` no-op.
+fn write_bun_stub(project: &Project, compiler_range: &str) -> PathBuf {
+    let script = BUN_STUB_TEMPLATE.replace("__COMPILER_RANGE__", compiler_range);
+    write_stub_script(project, "fake-bun.sh", &script)
+}
+
+/// A `@fake/std` package (prefix `almadar-std`) materializer, standing in for
+/// bun the same way `write_bun_stub` does — `dependencies["@almadar/core"]`
+/// is set to `core_range` so `install_rejects_std_with_incompatible_core_range`
+/// can drive a real mismatch through `verify_package`'s core check.
+const BUN_STD_STUB_TEMPLATE: &str = r#"#!/bin/sh
+set -e
+case "$1" in
+  add)
+    mkdir -p "node_modules/@fake/std/behaviors/registry/atoms"
+    cat > "node_modules/@fake/std/package.json" <<'PKGJSON'
+{
+  "name": "@fake/std",
+  "version": "9.9.9",
+  "dependencies": {
+    "@almadar/core": "__CORE_RANGE__"
+  },
+  "orb": {
+    "prefix": "almadar-std",
+    "registry": "behaviors/registry",
+    "index": "behaviors/behaviors-registry.json",
+    "factorySignatures": "behaviors/registry/factory-signatures.json",
+    "loloContracts": "behaviors/lolo-behavior-contracts.json",
+    "signatures": "behaviors/signatures.lolo",
+    "compiler": "__COMPILER_RANGE__"
+  }
+}
+PKGJSON
+    echo '{}' > "node_modules/@fake/std/behaviors/behaviors-registry.json"
+    echo '{}' > "node_modules/@fake/std/behaviors/registry/factory-signatures.json"
+    echo '{}' > "node_modules/@fake/std/behaviors/lolo-behavior-contracts.json"
+    printf ';; fake-std signatures fragment\n(fake-std-atom)\n' > "node_modules/@fake/std/behaviors/signatures.lolo"
+    printf '{"name":"fake-std-atom","orbitals":[]}\n' > "node_modules/@fake/std/behaviors/registry/atoms/fake-std-atom.orb"
+    ;;
+  remove)
+    rm -rf "node_modules/@fake/std"
+    ;;
+  install|update)
+    ;;
+esac
+"#;
+
+/// Write an executable `sh` stub standing in for `bun` at
+/// `<project>/fake-std-bun.sh`. `add` materializes `@fake/std` (prefix
+/// `almadar-std`) with the given `compiler`/core ranges; `remove` deletes it;
+/// `install`/`update` no-op.
+fn write_std_bun_stub(project: &Project, compiler_range: &str, core_range: &str) -> PathBuf {
+    let script = BUN_STD_STUB_TEMPLATE
+        .replace("__COMPILER_RANGE__", compiler_range)
+        .replace("__CORE_RANGE__", core_range);
+    write_stub_script(project, "fake-std-bun.sh", &script)
+}
+
+/// A second io-shaped package (`@fake-io/peer-behaviors`, prefix
+/// `fake-peer-behaviors`) that declares `peerDependencies["@almadar/std"]` —
+/// unlike `@fake-io/behaviors` above, installing this one actually exercises
+/// `verify_package`'s std-peer check (and, with no std installed at all,
+/// `std_version_for_peer_check`'s not-installed error).
+const BUN_IO_PEER_STD_STUB_TEMPLATE: &str = r#"#!/bin/sh
+set -e
+case "$1" in
+  add)
+    mkdir -p "node_modules/@fake-io/peer-behaviors/behaviors/registry/atoms"
+    cat > "node_modules/@fake-io/peer-behaviors/package.json" <<'PKGJSON'
+{
+  "name": "@fake-io/peer-behaviors",
+  "version": "1.0.0",
+  "peerDependencies": {
+    "@almadar/std": "__STD_RANGE__"
+  },
+  "orb": {
+    "prefix": "fake-peer-behaviors",
+    "registry": "behaviors/registry",
+    "index": "behaviors/behaviors-registry.json",
+    "factorySignatures": "behaviors/registry/factory-signatures.json",
+    "loloContracts": "behaviors/lolo-behavior-contracts.json",
+    "signatures": "behaviors/signatures.lolo",
+    "compiler": "*"
+  }
+}
+PKGJSON
+    echo '{}' > "node_modules/@fake-io/peer-behaviors/behaviors/behaviors-registry.json"
+    echo '{}' > "node_modules/@fake-io/peer-behaviors/behaviors/registry/factory-signatures.json"
+    echo '{}' > "node_modules/@fake-io/peer-behaviors/behaviors/lolo-behavior-contracts.json"
+    printf '' > "node_modules/@fake-io/peer-behaviors/behaviors/signatures.lolo"
+    ;;
+  remove)
+    rm -rf "node_modules/@fake-io/peer-behaviors"
+    ;;
+  install|update)
+    ;;
+esac
+"#;
+
+fn write_io_peer_std_bun_stub(project: &Project, std_range: &str) -> PathBuf {
+    let script = BUN_IO_PEER_STD_STUB_TEMPLATE.replace("__STD_RANGE__", std_range);
+    write_stub_script(project, "fake-io-peer-bun.sh", &script)
+}
+
+/// A pre-Phase-2-shaped package (`@fake-plain/pkg`): its `package.json` has
+/// no `orb` block at all, so `discover()` ignores it entirely
+/// (`package_json_without_orb_block_is_ignored` in `behavior_packages.rs`).
+/// Unlike every other stub, `add` here also records the dependency in the
+/// PROJECT's own `package.json` — a real `bun add` would too — because that
+/// manifest-range diff is the only signal `run_install`/`run_update` has left
+/// to notice this package changed, given `discover()` never sees it.
+const BUN_NO_ORB_STUB_TEMPLATE: &str = r#"#!/bin/sh
+set -e
+case "$1" in
+  add)
+    mkdir -p "node_modules/@fake-plain/pkg"
+    cat > "node_modules/@fake-plain/pkg/package.json" <<'PKGJSON'
+{
+  "name": "@fake-plain/pkg",
+  "version": "3.4.5"
+}
+PKGJSON
+    cat > "package.json" <<'PROJJSON'
+{
+  "name": "behaviors-command-test",
+  "private": true,
+  "dependencies": {
+    "@fake-plain/pkg": "^3.4.5"
+  }
+}
+PROJJSON
+    ;;
+  remove)
+    rm -rf "node_modules/@fake-plain/pkg"
+    cat > "package.json" <<'PROJJSON'
+{
+  "name": "behaviors-command-test",
+  "private": true
+}
+PROJJSON
+    ;;
+  install|update)
+    ;;
+esac
+"#;
+
+fn write_no_orb_bun_stub(project: &Project) -> PathBuf {
+    write_stub_script(project, "fake-no-orb-bun.sh", BUN_NO_ORB_STUB_TEMPLATE)
+}
+
+fn write_stub_script(project: &Project, filename: &str, script: &str) -> PathBuf {
+    let path = project.path().join(filename);
+    let mut f = std::fs::File::create(&path).unwrap();
+    f.write_all(script.as_bytes()).unwrap();
+    drop(f);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    path
+}
+
+/// Run the stub's `add` op directly (without going through `orb behaviors
+/// install`) to seed state for a test that isn't itself exercising install.
+fn seed_fake_package(project: &Project, bun_stub: &Path) {
+    let status = Command::new("sh")
+        .arg(bun_stub)
+        .arg("add")
+        .current_dir(project.path())
+        .status()
+        .expect("seed via stub bun");
+    assert!(status.success(), "stub bun add failed");
+}
+
+fn orb(project: &Project, bun_stub: &Path, args: &[&str]) -> Output {
+    Command::new(orb_bin())
+        .args(args)
+        .current_dir(project.path())
+        .env("ORB_BUN_PATH", bun_stub)
+        .output()
+        .expect("spawn orb")
+}
+
+#[test]
+fn install_succeeds_and_prints_installed_line() {
+    let project = Project::new();
+    let bun_stub = write_bun_stub(&project, "*");
+    let output = orb(
+        &project,
+        &bun_stub,
+        &["behaviors", "install", "@fake-io/behaviors"],
+    );
+    assert!(
+        output.status.success(),
+        "install failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("installed @fake-io/behaviors@1.2.3"),
+        "stdout: {stdout}"
+    );
+    assert!(project.fake_pkg_dir().is_dir());
+}
+
+#[test]
+fn install_rejects_incompatible_compiler_range_and_removes_it() {
+    let project = Project::new();
+    let bun_stub = write_bun_stub(&project, ">=99.0.0");
+    let output = orb(
+        &project,
+        &bun_stub,
+        &["behaviors", "install", "@fake-io/behaviors"],
+    );
+    assert!(!output.status.success(), "install should have failed");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(">=99.0.0"),
+        "stderr should name the required range: {stderr}"
+    );
+    assert!(
+        stderr.contains(env!("CARGO_PKG_VERSION")),
+        "stderr should name the running orb version: {stderr}"
+    );
+    assert!(
+        !project.fake_pkg_dir().exists(),
+        "failed install should have been removed by the stub `bun remove`"
+    );
+}
+
+#[test]
+fn list_json_reports_prefix_and_behavior_count() {
+    let project = Project::new();
+    let bun_stub = write_bun_stub(&project, "*");
+    seed_fake_package(&project, &bun_stub);
+
+    let output = orb(&project, &bun_stub, &["behaviors", "list", "--json"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let rows: serde_json::Value = serde_json::from_str(&stdout).expect("valid json array");
+    let rows = rows.as_array().expect("array");
+    let fake = rows
+        .iter()
+        .find(|r| r["name"] == "@fake-io/behaviors")
+        .expect("fake package listed");
+    assert_eq!(fake["prefix"], "fake-behaviors");
+    assert_eq!(fake["behaviors"], 1);
+}
+
+#[test]
+fn which_resolves_prefixed_form() {
+    let project = Project::new();
+    let bun_stub = write_bun_stub(&project, "*");
+    seed_fake_package(&project, &bun_stub);
+
+    let output = orb(
+        &project,
+        &bun_stub,
+        &["behaviors", "which", "fake-behaviors/fake-atom"],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let expected = std::fs::canonicalize(
+        project
+            .fake_pkg_dir()
+            .join("behaviors/registry/atoms/fake-atom.orb"),
+    )
+    .unwrap();
+    assert!(
+        stdout.contains(expected.to_str().unwrap()),
+        "stdout: {stdout}, expected path {}",
+        expected.display()
+    );
+}
+
+/// Ruling 3 (Phase 2): `std/behaviors/<name>` with an installed
+/// `almadar-std` package that MISSES the name falls through to every OTHER
+/// installed package — so a name that only exists in our fake io-shaped
+/// package still resolves. The std package itself must be installed for this
+/// fallback to run at all (Phase 2 removed the embedded-phf fallback; see
+/// `which_std_behaviors_without_installed_std_reports_not_installed` below
+/// for the no-std-at-all case).
+#[test]
+fn which_resolves_std_behaviors_alias_via_ruling_3_fallback() {
+    let project = Project::new();
+    let std_stub = write_std_bun_stub(&project, "*", "*");
+    seed_fake_package(&project, &std_stub);
+    let bun_stub = write_bun_stub(&project, "*");
+    seed_fake_package(&project, &bun_stub);
+
+    let output = orb(
+        &project,
+        &bun_stub,
+        &["behaviors", "which", "std/behaviors/fake-atom"],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let expected = std::fs::canonicalize(
+        project
+            .fake_pkg_dir()
+            .join("behaviors/registry/atoms/fake-atom.orb"),
+    )
+    .unwrap();
+    assert!(
+        stdout.contains(expected.to_str().unwrap()),
+        "stdout: {stdout}"
+    );
+}
+
+/// Phase 2: no `almadar-std`-prefixed package installed at all is a hard,
+/// actionable error naming the install command — never a silent fallback to
+/// every other package (that only happens once std IS installed but misses
+/// the specific name, see the ruling-3 test above).
+#[test]
+fn which_std_behaviors_without_installed_std_reports_not_installed() {
+    let project = Project::new();
+    let bun_stub = write_bun_stub(&project, "*");
+    seed_fake_package(&project, &bun_stub);
+
+    let output = orb(
+        &project,
+        &bun_stub,
+        &["behaviors", "which", "std/behaviors/fake-atom"],
+    );
+    assert!(!output.status.success(), "which should have failed");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("@almadar/std is not installed"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("orb behaviors install @almadar/std"),
+        "stderr should name the install command: {stderr}"
+    );
+}
+
+/// `orb validate --json` on an already-lowered `.orb` (JSON — skips the
+/// `.lolo` lower-phase contracts check entirely, so this isolates the
+/// INLINE-phase resolution path) whose orbital `uses` a `std/behaviors/…`
+/// import, with no std installed: the inline-phase
+/// `BehaviorPackageNotInstalled` error must surface as `needs_install: true`
+/// (`inline_error_needs_install`, `commands/validate.rs`) so agent retry
+/// loops know to install rather than edit the schema. (A `.lolo` source hits
+/// an EARLIER not-installed check — `orbital-lolo`'s contracts loader — this
+/// fixture is JSON precisely to bypass it and isolate the INLINE-phase path;
+/// see `validate_json_lolo_uses_import_without_std_needs_install` below for
+/// the `.lolo`-lower-phase equivalent.)
+#[test]
+fn validate_json_orb_uses_import_without_std_needs_install() {
+    let project = Project::new();
+    let bun_stub = write_bun_stub(&project, "*");
+    std::fs::write(
+        project.path().join("app.orb"),
+        r#"{
+  "name": "needs-install-fixture",
+  "version": "1.0.0",
+  "orbitals": [
+    {
+      "name": "X",
+      "uses": [ { "from": "std/behaviors/std-modal", "as": "M" } ],
+      "entity": {
+        "name": "X",
+        "persistence": "runtime",
+        "fields": [ { "name": "id", "type": "string", "required": true } ]
+      },
+      "traits": []
+    }
+  ]
+}
+"#,
+    )
+    .unwrap();
+
+    let output = orb(&project, &bun_stub, &["validate", "--json", "app.orb"]);
+    assert!(
+        output.status.success(),
+        "orb validate --json should exit 0 even when the schema fails to resolve: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let result: serde_json::Value = serde_json::from_str(&stdout).expect("valid json");
+    let errors = result["errors"].as_array().expect("errors array");
+    let err = errors.first().expect("at least one error");
+    assert_eq!(err["code"], "ORB_BEHAVIOR_PACKAGE_NOT_INSTALLED");
+    assert_eq!(err["needsInstall"], true, "result: {result}");
+}
+
+/// `.lolo`-lower-phase mirror of `validate_json_orb_uses_import_without_std_needs_install`:
+/// a `uses … from "std/behaviors/…"` import, with no std installed, hits
+/// `LoloContracts::load` (`registry::LoadError::StdNotInstalled`) before the
+/// inline phase ever runs. That now surfaces as the structured
+/// `LowerError::BehaviorPackageNotInstalled` variant (not the free-form
+/// `BehaviorPackages(String)` bucket), which `typed_parse_error_to_json`
+/// (`utils/detect.rs`) maps to the same `ORB_BEHAVIOR_PACKAGE_NOT_INSTALLED`
+/// code and `needs_install: true` as the `.orb` inline-phase path.
+#[test]
+fn validate_json_lolo_uses_import_without_std_needs_install() {
+    let project = Project::new();
+    let bun_stub = write_bun_stub(&project, "*");
+    std::fs::write(
+        project.path().join("app.lolo"),
+        r#"
+orbital FixtureOrbital {
+  uses Widget from "std/behaviors/std-modal"
+
+  entity Item [persistent: items] {
+    id : string!
+  }
+
+  trait ItemWidget = Widget.traits.ModalRecordModal -> Item {
+  }
+}
+"#,
+    )
+    .unwrap();
+
+    let output = orb(&project, &bun_stub, &["validate", "--json", "app.lolo"]);
+    assert!(
+        output.status.success(),
+        "orb validate --json should exit 0 even when the schema fails to resolve: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let result: serde_json::Value = serde_json::from_str(&stdout).expect("valid json");
+    let errors = result["errors"].as_array().expect("errors array");
+    let err = errors.first().expect("at least one error");
+    assert_eq!(err["code"], "ORB_BEHAVIOR_PACKAGE_NOT_INSTALLED");
+    assert_eq!(err["needsInstall"], true, "result: {result}");
+    let message = err["message"].as_str().expect("message string");
+    assert!(
+        message.contains("@almadar/std is not installed")
+            && message.contains("orb behaviors install @almadar/std"),
+        "message: {message}"
+    );
+}
+
+/// `orb behaviors list` in a project with no installed std simply omits it —
+/// no "embedded std" placeholder row, just the packages that ARE installed.
+#[test]
+fn list_json_omits_std_when_not_installed() {
+    let project = Project::new();
+    let bun_stub = write_bun_stub(&project, "*");
+    seed_fake_package(&project, &bun_stub);
+
+    let output = orb(&project, &bun_stub, &["behaviors", "list", "--json"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let rows: serde_json::Value = serde_json::from_str(&stdout).expect("valid json array");
+    let rows = rows.as_array().expect("array");
+    assert!(
+        rows.iter().all(|r| r["prefix"] != "almadar-std"),
+        "no std installed, so no almadar-std row should be listed: {stdout}"
+    );
+}
+
+#[test]
+fn remove_refuses_when_lolo_references_prefix() {
+    let project = Project::new();
+    let bun_stub = write_bun_stub(&project, "*");
+    seed_fake_package(&project, &bun_stub);
+    std::fs::write(
+        project.path().join("app.lolo"),
+        "uses \"fake-behaviors/fake-atom\"\n",
+    )
+    .unwrap();
+
+    let output = orb(
+        &project,
+        &bun_stub,
+        &["behaviors", "remove", "@fake-io/behaviors"],
+    );
+    assert!(!output.status.success(), "remove should have been refused");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("app.lolo"),
+        "stderr should list the referencing file: {stderr}"
+    );
+    assert!(
+        project.fake_pkg_dir().is_dir(),
+        "package should not have been removed"
+    );
+}
+
+#[test]
+fn remove_succeeds_when_unreferenced() {
+    let project = Project::new();
+    let bun_stub = write_bun_stub(&project, "*");
+    seed_fake_package(&project, &bun_stub);
+
+    let output = orb(
+        &project,
+        &bun_stub,
+        &["behaviors", "remove", "@fake-io/behaviors"],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!project.fake_pkg_dir().exists());
+}
+
+/// Phase 2: `orb signatures` composes the INSTALLED std's `orb.signatures`
+/// file (first) plus every other installed package's fragment — there is no
+/// embedded fallback left.
+#[test]
+fn signatures_composes_installed_std_and_installed_package_fragments() {
+    let project = Project::new();
+    let std_stub = write_std_bun_stub(&project, "*", "*");
+    seed_fake_package(&project, &std_stub);
+    let bun_stub = write_bun_stub(&project, "*");
+    seed_fake_package(&project, &bun_stub);
+
+    let output = orb(&project, &bun_stub, &["signatures"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.starts_with(";; fake-std signatures fragment"),
+        "std fragment must come first: stdout head: {}",
+        &stdout[..stdout.len().min(80)]
+    );
+    assert!(
+        stdout.contains(";; fake-behaviors signatures fragment"),
+        "missing the installed fake package's signatures fragment"
+    );
+}
+
+/// Phase 2: with no installed std at all, `orb signatures` refuses instead of
+/// silently falling back to a baked fragment.
+#[test]
+fn signatures_without_std_reports_not_installed() {
+    let project = Project::new();
+    let bun_stub = write_bun_stub(&project, "*");
+    seed_fake_package(&project, &bun_stub);
+
+    let output = orb(&project, &bun_stub, &["signatures"]);
+    assert!(!output.status.success(), "signatures should have failed");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("@almadar/std is not installed"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("orb behaviors install @almadar/std"),
+        "stderr should name the install command: {stderr}"
+    );
+}
+
+/// `verify_package`'s new core check: a std whose `dependencies["@almadar/
+/// core"]` range excludes the version `orb` was baked against (`BAKED_CORE`)
+/// is refused and removed, same as an incompatible `orb.compiler` range.
+#[test]
+fn install_rejects_std_with_incompatible_core_range_and_removes_it() {
+    let project = Project::new();
+    let std_stub = write_std_bun_stub(&project, "*", ">=99.0.0");
+    let output = orb(&project, &std_stub, &["behaviors", "install", "@fake/std"]);
+    assert!(!output.status.success(), "install should have failed");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(">=99.0.0"),
+        "stderr should name the declared core range: {stderr}"
+    );
+    assert!(
+        stderr.contains("10.99.0"),
+        "stderr should name the baked @almadar/core version: {stderr}"
+    );
+    assert!(
+        !project.fake_std_pkg_dir().exists(),
+        "failed install should have been removed by the stub `bun remove`"
+    );
+}
+
+/// Ruling: an io package declaring `peerDependencies["@almadar/std"]`
+/// installed with no std present at all is refused with the install hint —
+/// there is no baked std version left to check the peer range against.
+#[test]
+fn install_rejects_io_peer_package_when_no_std_installed() {
+    let project = Project::new();
+    let bun_stub = write_io_peer_std_bun_stub(&project, "*");
+    let output = orb(
+        &project,
+        &bun_stub,
+        &["behaviors", "install", "@fake-io/peer-behaviors"],
+    );
+    assert!(!output.status.success(), "install should have failed");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("@almadar/std is not installed"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("orb behaviors install @almadar/std"),
+        "stderr should name the install command: {stderr}"
+    );
+    assert!(
+        !project
+            .path()
+            .join("node_modules/@fake-io/peer-behaviors")
+            .exists(),
+        "failed install should have been removed by the stub `bun remove`"
+    );
+}
+
+/// Regression: the spec passed to `install` is a local-path-shaped string
+/// whose text has nothing to do with the resolved package name
+/// (`@fake/std`) — before the fix, filtering `affected` by
+/// `parse_pkg_spec(spec).0 == pkg.name` matched nothing, so `verify_package`
+/// was silently skipped and this incompatible-core install exited 0. The
+/// before/after discover diff has no such blind spot.
+#[test]
+fn install_rejects_std_via_path_spec_with_incompatible_core_range() {
+    let project = Project::new();
+    let std_stub = write_std_bun_stub(&project, "*", ">=99.0.0");
+    let output = orb(
+        &project,
+        &std_stub,
+        &["behaviors", "install", "./fake-std.tgz"],
+    );
+    assert!(!output.status.success(), "install should have failed");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(">=99.0.0"),
+        "stderr should name the declared core range: {stderr}"
+    );
+    assert!(
+        stderr.contains("10.99.0"),
+        "stderr should name the baked @almadar/core version: {stderr}"
+    );
+    assert!(
+        !project.fake_std_pkg_dir().exists(),
+        "failed install should have been removed by the stub `bun remove`"
+    );
+}
+
+/// Same path-spec shape as above, but a compatible core range — the install
+/// must still succeed and print the resolved package (by NAME, not by the
+/// spec string) once discovered.
+#[test]
+fn install_succeeds_via_path_spec_with_compatible_core_range() {
+    let project = Project::new();
+    let std_stub = write_std_bun_stub(&project, "*", "*");
+    let output = orb(
+        &project,
+        &std_stub,
+        &["behaviors", "install", "./fake-std.tgz"],
+    );
+    assert!(
+        output.status.success(),
+        "install failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("installed @fake/std@9.9.9"),
+        "stdout: {stdout}"
+    );
+    assert!(project.fake_std_pkg_dir().is_dir());
+}
+
+/// A package whose `package.json` carries no `orb` block at all (the
+/// pre-Phase-2 shape) is invisible to `discover()`, so it can only be
+/// noticed via the project manifest diff — and must be refused, not silently
+/// reported as a successful install.
+#[test]
+fn install_of_package_without_orb_block_is_refused_and_removed() {
+    let project = Project::new();
+    let bun_stub = write_no_orb_bun_stub(&project);
+    let output = orb(
+        &project,
+        &bun_stub,
+        &["behaviors", "install", "@fake-plain/pkg"],
+    );
+    assert!(!output.status.success(), "install should have failed");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("@fake-plain/pkg@3.4.5 is not a behavior package"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("no `orb` block"),
+        "stderr should say why: {stderr}"
+    );
+    assert!(
+        !project.fake_plain_pkg_dir().exists(),
+        "failed install should have been removed by the stub `bun remove`"
+    );
+}

@@ -16,8 +16,10 @@ mod utils;
 
 use commands::{
     compile_schema, execute_schema_cli, format_schema, parse_schema, resolve_schema_cli,
-    run_convert, run_dev_mode, run_i18n_check, run_i18n_vocab, run_serve, run_tests,
-    simulate_render, stamp_schema_cli, validate_schema,
+    run_convert, run_dev_mode, run_engines_install, run_engines_list, run_engines_remove,
+    run_engines_update, run_i18n_check, run_i18n_vocab, run_install, run_list, run_remove,
+    run_serve, run_tests, run_update, run_which, simulate_render, stamp_schema_cli,
+    validate_schema,
 };
 use utils::{evaluate_sexpr, spawn_agent, spawn_agent_with_args};
 
@@ -135,13 +137,16 @@ enum Commands {
         path: PathBuf,
     },
 
-    /// Print the embedded lolo type-signature catalog (signatures.lolo).
+    /// Print the composed lolo type-signature catalog (signatures.lolo).
     ///
     /// Emits the generated catalog of every operator (arity + return types),
     /// enum/struct, binding-context rule, and std behavior entity/trait/page
     /// contract — the canonical lolo vocabulary that agents (e.g. rabit) read
-    /// to author valid `.lolo`. Baked into the binary at compile time from
-    /// `signatures.lolo`; regenerate with `make lolo-sync`.
+    /// to author valid `.lolo`. Composed from the installed `@almadar/std`
+    /// package's `orb.signatures` file plus every other installed behavior
+    /// package's fragment, in walk order (Phase 2,
+    /// `docs/Almadar_Behavior_Packages.md` §10) — `@almadar/std` must be
+    /// installed (`orb behaviors install @almadar/std`, or `--global`).
     Signatures {
         /// Write to this file instead of stdout.
         #[arg(long, value_name = "FILE")]
@@ -662,6 +667,129 @@ enum Commands {
         #[command(subcommand)]
         command: I18nCommand,
     },
+
+    /// Behavior packages — install/remove/update/inspect the npm packages
+    /// `uses` resolves against (Almadar_Behavior_Packages.md).
+    Behaviors {
+        #[command(subcommand)]
+        command: BehaviorsCommand,
+    },
+
+    /// The two `orb verify` node engines (`--runtime`/`--compiled`) — ordinary
+    /// npm packages resolved node-style, same mechanism as `orb behaviors`.
+    Engines {
+        #[command(subcommand)]
+        command: EnginesCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum BehaviorsCommand {
+    /// Install a behavior package (`bun add <pkg>`), or every package in the
+    /// project manifest when `<pkg>` is omitted (`bun install`). Verifies the
+    /// installed `orb.compiler` range and `peerDependencies["@almadar/std"]`
+    /// range, removing what bun added on a failed check.
+    Install {
+        /// Package spec, e.g. `@almadar-io/behaviors` or `@almadar-io/behaviors@^1`.
+        pkg: Option<String>,
+        /// Target the user store (`~/.orb`) instead of the nearest project.
+        #[arg(long)]
+        global: bool,
+    },
+    /// Remove an installed behavior package (`bun remove <pkg>`). Refuses if
+    /// any `.lolo`/`.orb` under the project still imports its prefix.
+    Remove {
+        /// Installed package name.
+        pkg: String,
+        /// Target the user store (`~/.orb`) instead of the nearest project.
+        #[arg(long)]
+        global: bool,
+    },
+    /// Update a behavior package (`bun update [<pkg>]`), then re-run the same
+    /// compiler/peer checks as `install`. A failed check is reported, not
+    /// auto-reverted (bun has no per-package revert).
+    Update {
+        /// Package name, or every installed behavior package when omitted.
+        pkg: Option<String>,
+        /// Target the user store (`~/.orb`) instead of the nearest project.
+        #[arg(long)]
+        global: bool,
+    },
+    /// List behavior packages installed on the walk from the working
+    /// directory: name, version, prefix, behavior count, resolved path, link.
+    List {
+        /// Print as a JSON array instead of a table.
+        #[arg(long)]
+        json: bool,
+        /// List the user store (`~/.orb`) instead of the working directory's walk.
+        #[arg(long)]
+        global: bool,
+    },
+    /// Resolve one `uses` specifier ("which copy compiled?") — prints the
+    /// resolved `.orb` path and the owning package.
+    Which {
+        /// `<prefix>/<name>` or `std/behaviors/<name>`.
+        spec: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum EnginesCommand {
+    /// Install the `orb verify` node engines (`bun add -d <pkg>@<pin>`),
+    /// pinned to the versions this `orb` was baked against. Neither
+    /// `--runtime` nor `--compiled` given installs both. Verifies the
+    /// installed package's version + declared `bin` entry, removing what bun
+    /// added on a failed check, then installs the Chromium browser bun
+    /// engines need (skip with `--no-browsers`).
+    Install {
+        /// Target the user store (`~/.orb`) instead of the nearest project.
+        #[arg(long)]
+        global: bool,
+        /// Install only the runtime engine (`@almadar-io/runtime-verify-tool`).
+        #[arg(long)]
+        runtime: bool,
+        /// Install only the compiled engine (`@almadar-io/verify-tool`).
+        #[arg(long)]
+        compiled: bool,
+        /// Skip the Chromium browser install step.
+        #[arg(long)]
+        no_browsers: bool,
+    },
+    /// List the resolved engines: package, version, bin entry, path, link.
+    List {
+        /// Print as a JSON array instead of a table.
+        #[arg(long)]
+        json: bool,
+        /// List the user store (`~/.orb`) instead of the working directory's walk.
+        #[arg(long)]
+        global: bool,
+    },
+    /// Re-install the engines at the versions this `orb` was baked against.
+    /// Neither `--runtime` nor `--compiled` given updates both.
+    Update {
+        /// Target the user store (`~/.orb`) instead of the nearest project.
+        #[arg(long)]
+        global: bool,
+        /// Update only the runtime engine.
+        #[arg(long)]
+        runtime: bool,
+        /// Update only the compiled engine.
+        #[arg(long)]
+        compiled: bool,
+    },
+    /// Remove an installed engine (`bun remove <pkg>`). Neither `--runtime`
+    /// nor `--compiled` given removes both.
+    Remove {
+        /// Target the user store (`~/.orb`) instead of the nearest project.
+        #[arg(long)]
+        global: bool,
+        /// Remove only the runtime engine.
+        #[arg(long)]
+        runtime: bool,
+        /// Remove only the compiled engine.
+        #[arg(long)]
+        compiled: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -682,24 +810,40 @@ enum I18nCommand {
     Check,
 }
 
-/// The lolo type-signature catalog, baked at compile time. Generated from the
-/// vendored @almadar/{core,std,patterns} packages by `tools/lolo-types-sync`
-/// (`make lolo-sync`). Exposed via `orb signatures` so the bundled agent can
-/// read the canonical vocabulary from the binary instead of a fragile path.
-const LOLO_SIGNATURES: &str = include_str!("../../../signatures.lolo");
+/// `orb signatures` = the installed std's `orb.signatures` file followed by
+/// every other installed behavior package's `orb.signatures` file, in walk
+/// order (Almadar_Behavior_Packages.md §6). `@almadar/std` is required — no
+/// embedded fallback remains (Phase 2, §10): an uninstalled std is a hard,
+/// actionable error.
+fn compose_lolo_signatures() -> anyhow::Result<String> {
+    let cwd = std::env::current_dir()?;
+    let user_store =
+        orbital_core::behavior_packages::user_store_dir().unwrap_or_else(|| cwd.clone());
+    let packages = orbital_core::behavior_packages::discover(&cwd, &user_store)
+        .map_err(|e| anyhow::anyhow!("failed to discover behavior packages: {e}"))?;
+
+    let mut out = String::new();
+    match packages.iter().find(|p| p.prefix == "almadar-std") {
+        Some(std_pkg) => out.push_str(&std::fs::read_to_string(&std_pkg.signatures)?),
+        None => anyhow::bail!(orbital_core::behavior_packages::not_installed_message(
+            orbital_core::behavior_packages::STD_PACKAGE
+        )),
+    }
+    for pkg in packages.iter().filter(|p| p.prefix != "almadar-std") {
+        out.push_str(&std::fs::read_to_string(&pkg.signatures)?);
+    }
+    Ok(out)
+}
 
 fn print_lolo_signatures(out: Option<&std::path::Path>) -> anyhow::Result<()> {
+    let signatures = compose_lolo_signatures()?;
     match out {
         Some(path) => {
-            std::fs::write(path, LOLO_SIGNATURES)?;
-            eprintln!(
-                "Wrote {} bytes to {}",
-                LOLO_SIGNATURES.len(),
-                path.display()
-            );
+            std::fs::write(path, &signatures)?;
+            eprintln!("Wrote {} bytes to {}", signatures.len(), path.display());
         }
         None => {
-            print!("{LOLO_SIGNATURES}");
+            print!("{signatures}");
         }
     }
     Ok(())
@@ -889,6 +1033,32 @@ fn main() -> anyhow::Result<()> {
             I18nCommand::Vocab { json } => run_i18n_vocab(json),
             I18nCommand::Check => run_i18n_check(),
         },
+        Some(Commands::Behaviors { command }) => match command {
+            BehaviorsCommand::Install { pkg, global } => run_install(pkg, global),
+            BehaviorsCommand::Remove { pkg, global } => run_remove(pkg, global),
+            BehaviorsCommand::Update { pkg, global } => run_update(pkg, global),
+            BehaviorsCommand::List { json, global } => run_list(json, global),
+            BehaviorsCommand::Which { spec } => run_which(spec),
+        },
+        Some(Commands::Engines { command }) => match command {
+            EnginesCommand::Install {
+                global,
+                runtime,
+                compiled,
+                no_browsers,
+            } => run_engines_install(global, runtime, compiled, no_browsers),
+            EnginesCommand::List { json, global } => run_engines_list(json, global),
+            EnginesCommand::Update {
+                global,
+                runtime,
+                compiled,
+            } => run_engines_update(global, runtime, compiled),
+            EnginesCommand::Remove {
+                global,
+                runtime,
+                compiled,
+            } => run_engines_remove(global, runtime, compiled),
+        },
         // Agent-delegating commands
         Some(Commands::Fix { path }) => {
             spawn_agent_with_args(&["fix", &path.display().to_string()])
@@ -989,6 +1159,8 @@ pub(crate) struct ValidationJsonError {
     pub(crate) line: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) column: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) needs_install: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]

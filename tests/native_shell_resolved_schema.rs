@@ -79,8 +79,7 @@ fn compile_native(shell: &str, out_dir: &std::path::Path) {
             "-o",
             out_dir.to_str().unwrap(),
         ])
-        .env("ALMADAR_DEV", "1")
-        .env("ALMADAR_ROOT", &repo)
+        .current_dir(&repo)
         .output()
         .expect("failed to spawn orbital binary");
 

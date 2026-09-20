@@ -7,10 +7,11 @@
 //! Enrich runs. `--prior` (the existing on-disk orbital) anchors id reuse so
 //! re-stamps are byte-stable. `--imports <DIR>` additionally resolves
 //! cross-file `uses` id edges (`Alias.traits.X` / `Alias.entity` /
-//! `Alias.pages.X`) against `<DIR>`'s live workspace registries — see
-//! `orbital_compiler::resolve_cross_file_id_edges`.
+//! `Alias.pages.X`) against the behavior packages installed from `<DIR>` —
+//! see `orbital_compiler::resolve_cross_file_id_edges`.
 
-use orbital_compiler::loader::{discover_registry_roots, ExternalOrbitalLoader, LoaderConfig};
+use orbital_compiler::loader::{ExternalOrbitalLoader, LoaderConfig};
+use orbital_core::behavior_packages::{discover, user_store_dir};
 use std::collections::HashSet;
 use std::path::Path;
 
@@ -42,11 +43,12 @@ pub(crate) fn stamp_schema_cli(
     orbital_lolo::stamp_schema_identity(&mut schema, prior_schema.as_ref(), &HashSet::new());
 
     if let Some(dir) = imports_dir {
+        let user_store = user_store_dir().unwrap_or_else(|| dir.to_path_buf());
+        let packages = discover(dir, &user_store)
+            .map_err(|e| anyhow::anyhow!("Failed to discover behavior packages: {}", e))?;
         let config = LoaderConfig {
             base_path: dir.to_path_buf(),
-            dev_workspace: true,
-            auto_discover_registries: true,
-            behaviors_registry_roots: discover_registry_roots(dir),
+            packages,
             ..Default::default()
         };
         let mut loader = ExternalOrbitalLoader::new(config);

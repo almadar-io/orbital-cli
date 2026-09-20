@@ -12,6 +12,9 @@
 //!   default                 compare against the snapshot (byte-identical);
 //!                           on mismatch write `warnings.actual.json` and fail
 //!   COMPAT_BASELINE_WRITE=1 (re-)write the snapshot
+//!   COMPAT_PROJECT_DIR=<dir> run `orb validate` with `<dir>` as its cwd instead
+//!                           of the repo root, to prove behavior-package node_modules
+//!                           resolution byte-matches the workspace-linked corpus
 //!
 //! Ignored by default; run explicitly:
 //!   cargo test -p orbital-cli --test compat_differential -- --ignored --release
@@ -38,6 +41,14 @@ fn repo_root() -> PathBuf {
         .parent()
         .unwrap()
         .to_path_buf()
+}
+
+/// cwd for the spawned `orb validate` — the repo root by default, or
+/// `COMPAT_PROJECT_DIR` when set (see module doc comment).
+fn project_dir(repo: &Path) -> PathBuf {
+    std::env::var_os("COMPAT_PROJECT_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repo.to_path_buf())
 }
 
 const REGISTRY_ROOTS: &[&str] = &[
@@ -90,10 +101,16 @@ fn validate_one(repo: &Path, file: &Path) -> FileResult {
         .unwrap_or(file)
         .to_string_lossy()
         .replace('\\', "/");
+    // the spawn cwd may not be `repo` (COMPAT_PROJECT_DIR), so the path must be absolute
+    let abs_file = if file.is_absolute() {
+        file.to_path_buf()
+    } else {
+        repo.join(file)
+    };
     let output = Command::new(orb_bin())
         .args(["validate", "--json"])
-        .arg(file)
-        .current_dir(repo)
+        .arg(&abs_file)
+        .current_dir(project_dir(repo))
         .output()
         .expect("failed to spawn orb binary");
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -104,15 +121,28 @@ fn validate_one(repo: &Path, file: &Path) -> FileResult {
             errors: vec![(
                 "HARNESS_PARSE_ERROR".into(),
                 String::new(),
-                format!("orb validate --json did not emit JSON (status {}): {e}", output.status),
+                format!(
+                    "orb validate --json did not emit JSON (status {}): {e}",
+                    output.status
+                ),
             )],
             warnings: Vec::new(),
         },
         Ok(json) => {
             let row = |r: &DiagnosticRow| (r.code.clone(), r.path.clone(), r.message.clone());
-            let mut errors: Vec<_> = json.errors.as_deref().unwrap_or(&[]).iter().map(row).collect();
+            let mut errors: Vec<_> = json
+                .errors
+                .as_deref()
+                .unwrap_or(&[])
+                .iter()
+                .map(row)
+                .collect();
             if !output.status.success() && !json.valid && errors.is_empty() {
-                errors.push(("HARNESS_NONZERO_EXIT".into(), String::new(), stdout.into_owned()));
+                errors.push((
+                    "HARNESS_NONZERO_EXIT".into(),
+                    String::new(),
+                    stdout.into_owned(),
+                ));
             }
             FileResult {
                 rel_path: rel,
@@ -149,8 +179,7 @@ fn compat_differential_corpus() {
 
     let started = Instant::now();
     let next = AtomicUsize::new(0);
-    let results: Vec<Mutex<Option<FileResult>>> =
-        files.iter().map(|_| Mutex::new(None)).collect();
+    let results: Vec<Mutex<Option<FileResult>>> = files.iter().map(|_| Mutex::new(None)).collect();
     std::thread::scope(|s| {
         let workers = std::thread::available_parallelism()
             .map(|n| n.get())
@@ -218,7 +247,11 @@ fn compat_differential_corpus() {
 
     if std::env::var("COMPAT_BASELINE_WRITE").ok().as_deref() == Some("1") {
         std::fs::write(&baseline_path, &actual).unwrap();
-        println!("compat-differential: wrote {} tuples to {}", unique_tuples, baseline_path.display());
+        println!(
+            "compat-differential: wrote {} tuples to {}",
+            unique_tuples,
+            baseline_path.display()
+        );
         return;
     }
 
@@ -242,7 +275,10 @@ fn compat_differential_corpus() {
             if e != a {
                 diffs += 1;
                 if diffs <= 20 {
-                    diff.push_str(&format!("line {}:\n  expected: {e}\n  actual:   {a}\n", i + 1));
+                    diff.push_str(&format!(
+                        "line {}:\n  expected: {e}\n  actual:   {a}\n",
+                        i + 1
+                    ));
                 }
             }
         }
@@ -253,5 +289,8 @@ fn compat_differential_corpus() {
             diff
         );
     }
-    println!("compat-differential: zero delta against {}", baseline_path.display());
+    println!(
+        "compat-differential: zero delta against {}",
+        baseline_path.display()
+    );
 }

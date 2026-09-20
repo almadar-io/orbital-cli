@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 /// `orb dev` resolve). `source_path` is the ORIGINAL `.orb`/`.lolo` location
 /// (never `compile_path`, which for a `.lolo` source is a lowered temp file),
 /// so relative `uses` imports (e.g. `almadar-behaviors/*`) resolve exactly
-/// like `orb verify` does under `ALMADAR_DEV`. The one resolver:
+/// like `orb verify` does. The one resolver:
 /// `orbital_verify::resolve_schema_with_source` wraps the same
 /// `orbital_compiler::resolve_schema_with_path` pipeline `orb verify` runs.
 fn resolve_native_shell_schema(
@@ -25,8 +25,28 @@ fn resolve_native_shell_schema(
         anyhow::anyhow!("Failed to parse schema for resolved-schema resource: {}", e)
     })?;
     orbital_verify::resolve_schema_with_source(schema, Some(source_path)).map_err(|e| {
-        anyhow::anyhow!("Failed to resolve schema for resolved-schema resource: {}", e)
+        anyhow::anyhow!(
+            "Failed to resolve schema for resolved-schema resource: {}",
+            e
+        )
     })
+}
+
+/// `CompilerOptions::from_env()`, but bail with a plain error when behavior-
+/// package discovery failed (a `PrefixConflict` or malformed installed
+/// package) — validator/compiler infrastructure, never a schema authoring
+/// error, so `orb compile` must not silently proceed as if no packages were
+/// installed.
+fn compiler_options_or_bail() -> anyhow::Result<orbital_compiler::CompilerOptions> {
+    let options = orbital_compiler::CompilerOptions::from_env();
+    if let Some(e) = &options.discovery_error {
+        anyhow::bail!(
+            "[{}] {} (validator environment error — the schema was NOT compiled; retry, do not edit the schema)",
+            crate::commands::validate::discovery_error_json_code(e),
+            e
+        );
+    }
+    Ok(options)
 }
 
 /// Compile schema to generated code
@@ -152,11 +172,10 @@ pub(crate) fn compile_schema(
         .map_err(|e| anyhow::anyhow!("Failed to read schema file: {}", e))?;
 
     let options = GenerateOptions {
-        // from_env, not Default: `orb compile` must honor the ALMADAR_DEV
-        // live-workspace registries exactly like `orb emit` — a Default here
-        // silently compiled against the STALE baked registries in dev
-        // (C-COMPILE-IGNORES-DEV-REGISTRIES).
-        compiler: orbital_compiler::CompilerOptions::from_env(),
+        // from_env, not Default: `orb compile` must honor installed behavior
+        // packages exactly like `orb emit` — a Default here silently compiled
+        // against the embedded std registry only (C-COMPILE-IGNORES-DEV-REGISTRIES).
+        compiler: compiler_options_or_bail()?,
         copy_template: true,
         clean: false,
         verbose,
@@ -438,7 +457,7 @@ fn compile_mixed(
         );
 
         let options = GenerateOptions {
-            compiler: orbital_compiler::CompilerOptions::from_env(),
+            compiler: compiler_options_or_bail()?,
             copy_template: true,
             clean: false,
             verbose,
@@ -536,7 +555,7 @@ fn compile_mixed(
         );
 
         let options = GenerateOptions {
-            compiler: orbital_compiler::CompilerOptions::from_env(),
+            compiler: compiler_options_or_bail()?,
             copy_template: true,
             clean: false,
             verbose,

@@ -49,3 +49,4 @@ ureq = { workspace = true }
 [dev-dependencies]
 pretty_assertions.workspace = true
 syn = { version = "2", features = ["full"] }
+tempfile = "3.10"
