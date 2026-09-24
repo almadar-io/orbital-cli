@@ -13,6 +13,7 @@ pub(crate) fn validate_schema(
     json_output: bool,
     patterns_path: Option<&std::path::Path>,
     services_path: Option<&std::path::Path>,
+    deny_warnings: bool,
 ) -> anyhow::Result<()> {
     // Load extra patterns (explicit path or auto-discover)
     let extra_patterns = load_extra_patterns(path, patterns_path);
@@ -21,13 +22,18 @@ pub(crate) fn validate_schema(
     let service_registry = load_services_registry(services_path);
 
     if json_output {
-        return validate_schema_json(path, extra_patterns, service_registry);
+        return validate_schema_json(path, extra_patterns, service_registry, deny_warnings);
     }
 
     println!("Validating schema: {}", path.display());
 
     // Use native Rust validation only
-    validate_schema_native(path, extra_patterns, service_registry)
+    validate_schema_native(path, extra_patterns, service_registry, deny_warnings)
+}
+
+/// The one pass rule: no errors, and no warnings either when `--deny-warnings` holds the 0/0 bar.
+pub(crate) fn validation_passes(errors: usize, warnings: usize, deny_warnings: bool) -> bool {
+    errors == 0 && (!deny_warnings || warnings == 0)
 }
 
 /// The JSON error `code` for a behavior-package `discover()` failure —
@@ -77,6 +83,7 @@ fn validate_schema_json(
     path: &PathBuf,
     extra_patterns: Option<orbital_compiler::ExtraPatterns>,
     service_registry: orbital_compiler::embedded::ServiceRegistryData,
+    deny_warnings: bool,
 ) -> anyhow::Result<()> {
     use orbital_compiler::phases::inline::inline_schema_with_orbital_diagnostics;
     use orbital_compiler::{compile_schema, validate_comprehensive_full, CompilerOptions};
@@ -493,7 +500,7 @@ fn validate_schema_json(
 
     let output = ValidationJsonOutput {
         success: true,
-        valid: all_errors.is_empty(),
+        valid: validation_passes(all_errors.len(), all_warnings.len(), deny_warnings),
         errors: if all_errors.is_empty() {
             None
         } else {
@@ -679,6 +686,7 @@ fn validate_schema_native(
     path: &PathBuf,
     extra_patterns: Option<orbital_compiler::ExtraPatterns>,
     service_registry: orbital_compiler::embedded::ServiceRegistryData,
+    deny_warnings: bool,
 ) -> anyhow::Result<()> {
     let diags = run_full_validation(path, extra_patterns, service_registry)?;
 
@@ -699,8 +707,39 @@ fn validate_schema_native(
             println!("  \u{26a0}\u{fe0f}  {w}");
         }
     }
+    if !validation_passes(diags.errors.len(), diags.warnings.len(), deny_warnings) {
+        anyhow::bail!(
+            "Schema validation failed: {} warning(s) under --deny-warnings",
+            diags.warnings.len()
+        );
+    }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod deny_warnings_tests {
+    use super::validation_passes;
+
+    #[test]
+    fn warnings_fail_only_under_deny_warnings() {
+        assert!(validation_passes(0, 0, false));
+        assert!(validation_passes(0, 0, true));
+        assert!(
+            validation_passes(0, 3, false),
+            "warnings alone pass by default"
+        );
+        assert!(
+            !validation_passes(0, 1, true),
+            "one warning fails the 0/0 bar"
+        );
+    }
+
+    #[test]
+    fn errors_fail_either_way() {
+        assert!(!validation_passes(1, 0, false));
+        assert!(!validation_passes(1, 0, true));
+    }
 }
 
 #[cfg(test)]

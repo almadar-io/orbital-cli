@@ -224,6 +224,123 @@ fn guard_for_event(td: &TraitDefinition, event: &str) -> serde_json::Value {
         .unwrap_or(serde_json::Value::Array(vec![]))
 }
 
+/// `orb execute <FILE> --event E --trait T --cascade`: the event through the real kernel dispatch
+/// (listens fan-out, executed effects, the dispatch roots). The Rust leg of the cascade parity runner
+/// (`tools/parity-cascade`); prints one JSON object whether it succeeds or not.
+pub(crate) fn execute_cascade_cli(
+    path: &Path,
+    event: &str,
+    payload: Option<&str>,
+    trait_name: &str,
+) -> anyhow::Result<()> {
+    let report = parse_json_arg(payload)
+        .map(|payload| serde_json::json!([{ "trait": trait_name, "event": event, "payload": payload }]))
+        .and_then(|steps| run_cascade(path, &steps))
+        .map(|mut report| {
+            // One step: its outcomes at the top level, as before `--steps`.
+            if let Some(first) = report["steps"][0]["outcomes"].as_array().cloned() {
+                report["outcomes"] = serde_json::Value::Array(first);
+            }
+            report
+        });
+    print_cascade_report(report)
+}
+
+/// `orb execute <FILE> --steps '[{trait, event, payload}, …]'`: each step through the same kernel
+/// in order, so what one step leaves behind (a held delivery, a state) is what the next one meets.
+pub(crate) fn execute_cascade_steps_cli(path: &Path, steps: &str) -> anyhow::Result<()> {
+    print_cascade_report(parse_json_arg(Some(steps)).and_then(|steps| run_cascade(path, &steps)))
+}
+
+fn print_cascade_report(report: anyhow::Result<serde_json::Value>) -> anyhow::Result<()> {
+    let report =
+        report.unwrap_or_else(|e| serde_json::json!({ "success": false, "error": e.to_string() }));
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
+}
+
+fn run_cascade(path: &Path, steps: &serde_json::Value) -> anyhow::Result<serde_json::Value> {
+    use orbital_compiler::{resolve_schema_with_path, CompilerOptions};
+    use orbital_core::effects::Effect;
+    use orbital_core::runtime::{EntitySource, InMemoryEntityCache, RuntimeKernel};
+
+    let steps = steps
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("--steps must be a JSON array"))?;
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("Failed to read {}: {}", path.display(), e))?;
+    let schema = parse_schema_auto(&content, &path.display().to_string())
+        .map_err(|e| anyhow::anyhow!("Failed to parse {}: {}", path.display(), e))?;
+    let resolved = resolve_schema_with_path(schema, &CompilerOptions::from_env(), Some(path))
+        .map_err(|e| anyhow::anyhow!("Failed to resolve {}: {}", path.display(), e))?;
+
+    let kernel = RuntimeKernel::new(
+        orbital_core::RuntimeEnvironment::Server,
+        std::sync::Arc::new(InMemoryEntityCache::new()) as std::sync::Arc<dyn EntitySource>,
+        Default::default(),
+    );
+    kernel
+        .register_schema(resolved)
+        .map_err(|e| anyhow::anyhow!("Failed to register {}: {e}", path.display()))?;
+
+    let mut reports = Vec::with_capacity(steps.len());
+    for (i, step) in steps.iter().enumerate() {
+        let field = |key: &str| {
+            step[key]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("step {i}: `{key}` must be a string"))
+        };
+        let (trait_name, event) = (field("trait")?, field("event")?);
+        let payload = match &step["payload"] {
+            serde_json::Value::Null => orbital_core::Value::Null,
+            p => to_core_value(p)?,
+        };
+        let outcomes = kernel
+            .dispatch(trait_name, None, event, payload)
+            .map_err(|e| anyhow::anyhow!("step {i} dispatch failed: {e}"))?;
+        let outcomes: Vec<serde_json::Value> = outcomes
+            .iter()
+            .map(|(t, r)| {
+                let emits: Vec<serde_json::Value> = r
+                    .effect_results
+                    .iter()
+                    .filter_map(|er| match &er.effect {
+                        Effect::Emit { event, payload } => Some(serde_json::json!({
+                            "event": event,
+                            "payload": serde_json::to_value(payload).unwrap_or(serde_json::Value::Null),
+                        })),
+                        _ => None,
+                    })
+                    .collect();
+                serde_json::json!({
+                    "trait": t,
+                    "executed": r.executed,
+                    "previousState": r.previous_state,
+                    "newState": r.new_state,
+                    "emits": emits,
+                })
+            })
+            .collect();
+        let states: serde_json::Map<String, serde_json::Value> = kernel
+            .trait_snapshot(Some("singleton"))
+            .into_iter()
+            .map(|(name, (state, _))| (name, serde_json::Value::String(state)))
+            .collect();
+        reports.push(serde_json::json!({ "outcomes": outcomes, "states": states }));
+    }
+    let dispatch_modes: serde_json::Map<String, serde_json::Value> = kernel
+        .trait_snapshot(Some("singleton"))
+        .into_iter()
+        .map(|(name, (_, mode))| {
+            (
+                name,
+                serde_json::to_value(mode).unwrap_or(serde_json::Value::Null),
+            )
+        })
+        .collect();
+    Ok(serde_json::json!({ "success": true, "steps": reports, "dispatchModes": dispatch_modes }))
+}
+
 fn run_execute(
     path: &Path,
     event: &str,

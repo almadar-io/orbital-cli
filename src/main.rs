@@ -15,11 +15,11 @@ mod emit;
 mod utils;
 
 use commands::{
-    compile_schema, execute_schema_cli, format_schema, parse_schema, resolve_schema_cli,
-    run_convert, run_dev_mode, run_engines_install, run_engines_list, run_engines_remove,
-    run_engines_update, run_i18n_check, run_i18n_vocab, run_install, run_list, run_remove,
-    run_serve, run_tests, run_update, run_which, simulate_render, stamp_schema_cli,
-    validate_schema,
+    compile_schema, execute_cascade_cli, execute_cascade_steps_cli, execute_schema_cli,
+    format_schema, parse_schema, resolve_schema_cli, run_convert, run_dev_mode,
+    run_engines_install, run_engines_list, run_engines_remove, run_engines_update, run_i18n_check,
+    run_i18n_vocab, run_install, run_list, run_remove, run_serve, run_tests, run_update, run_which,
+    simulate_render, stamp_schema_cli, validate_schema,
 };
 use utils::{evaluate_sexpr, spawn_agent, spawn_agent_with_args};
 
@@ -128,6 +128,10 @@ enum Commands {
         /// Simulate render output — trace every reachable state and report what render-ui effects fire
         #[arg(long)]
         simulate: bool,
+
+        /// Fail on any warning (the 0 errors / 0 warnings bar)
+        #[arg(long)]
+        deny_warnings: bool,
     },
 
     /// Parse and display schema information
@@ -191,8 +195,8 @@ enum Commands {
         path: PathBuf,
 
         /// Event to fire (e.g. INIT)
-        #[arg(long)]
-        event: String,
+        #[arg(long, required_unless_present = "steps")]
+        event: Option<String>,
 
         /// Event payload as a JSON object (default: {})
         #[arg(long)]
@@ -209,6 +213,16 @@ enum Commands {
         /// Output the execution result DTO as JSON (for programmatic consumption)
         #[arg(long)]
         json: bool,
+
+        /// Run the event through the kernel's full dispatch (listens fan-out, executed effects)
+        /// and print each processed trait's outcome as JSON. Requires `--trait`.
+        #[arg(long, requires = "trait_name")]
+        cascade: bool,
+
+        /// A JSON array of `{trait, event, payload}` run as `--cascade` does, in order
+        /// against one kernel, in place of `--event`/`--trait`.
+        #[arg(long, conflicts_with_all = ["event", "trait_name", "payload"])]
+        steps: Option<String>,
     },
 
     /// Stamp V4 identity (ids + ledger) onto a name-only `.orb` schema.
@@ -863,8 +877,15 @@ fn main() -> anyhow::Result<()> {
             patterns,
             services,
             simulate,
+            deny_warnings,
         }) => {
-            validate_schema(&path, json, patterns.as_deref(), services.as_deref())?;
+            validate_schema(
+                &path,
+                json,
+                patterns.as_deref(),
+                services.as_deref(),
+                deny_warnings,
+            )?;
             if simulate {
                 simulate_render(&path, patterns.as_deref())?;
             }
@@ -879,11 +900,25 @@ fn main() -> anyhow::Result<()> {
         }) => resolve_schema_cli(&path, output.as_deref(), verbose),
         Some(Commands::Execute {
             path,
-            event,
+            steps: Some(steps),
+            ..
+        }) => execute_cascade_steps_cli(&path, &steps),
+        Some(Commands::Execute {
+            path,
+            event: Some(event),
+            payload,
+            trait_name: Some(trait_name),
+            cascade: true,
+            ..
+        }) => execute_cascade_cli(&path, &event, payload.as_deref(), &trait_name),
+        Some(Commands::Execute {
+            path,
+            event: Some(event),
             payload,
             entity,
             trait_name,
             json,
+            ..
         }) => execute_schema_cli(
             &path,
             &event,
@@ -892,6 +927,9 @@ fn main() -> anyhow::Result<()> {
             trait_name.as_deref(),
             json,
         ),
+        Some(Commands::Execute { event: None, .. }) => {
+            Err(anyhow::anyhow!("orb execute needs --event or --steps"))
+        }
         Some(Commands::Stamp {
             path,
             prior,

@@ -27,7 +27,7 @@ pub(crate) use engines_cmd::{
     run_install as run_engines_install, run_list as run_engines_list,
     run_remove as run_engines_remove, run_update as run_engines_update,
 };
-pub(crate) use execute::execute_schema_cli;
+pub(crate) use execute::{execute_cascade_cli, execute_cascade_steps_cli, execute_schema_cli};
 pub(crate) use i18n::{run_i18n_check, run_i18n_vocab};
 pub(crate) use parse::{format_schema, parse_schema, resolve_schema_cli};
 pub(crate) use serve::run_serve;

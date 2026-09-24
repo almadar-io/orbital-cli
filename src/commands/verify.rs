@@ -574,7 +574,9 @@ fn verify_one(
         let service_registry = crate::utils::load_services_registry(None);
         let l0 =
             crate::commands::validate::run_full_validation(path, extra_patterns, service_registry)?;
-        let l0_ok = l0.errors.is_empty();
+        // The 0 errors / 0 warnings bar: a warning fails Layer 0 like an error.
+        let l0_ok =
+            crate::commands::validate::validation_passes(l0.errors.len(), l0.warnings.len(), true);
         let l0_icon = if l0_ok { "✓" } else { "✗" };
         emit(
             json_mode,
@@ -588,9 +590,16 @@ fn verify_one(
             for e in &l0.errors {
                 emit(json_mode, format!("    L0 FAIL {e}"));
             }
+            for w in &l0.warnings {
+                emit(json_mode, format!("    L0 FAIL (warning) {w}"));
+            }
             return Ok(VerifyOneOutcome {
                 ok: false,
-                l0_errors: l0.errors,
+                l0_errors: l0
+                    .errors
+                    .into_iter()
+                    .chain(l0.warnings.into_iter().map(|w| format!("WARN {w}")))
+                    .collect(),
                 l1: None,
                 l2: None,
                 l2_server: None,
