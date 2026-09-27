@@ -157,6 +157,32 @@ enum Commands {
         out: Option<PathBuf>,
     },
 
+    /// What is valid at a cursor position in a `.lolo` source, as JSON
+    /// (`orbital_lolo::complete`): keywords, effect operators, pattern tags and
+    /// props, and installed behaviors' import paths, traits, orbitals and typed
+    /// config keys. Candidates only — ranking is the caller's.
+    Complete {
+        /// The `.lolo` file (omit with --stdin to read the unsaved buffer).
+        file: Option<PathBuf>,
+        /// Byte offset of the cursor.
+        #[arg(long)]
+        offset: usize,
+        /// Read the source from stdin instead of a file.
+        #[arg(long)]
+        stdin: bool,
+    },
+
+    /// Where each inline behavior embed sits in a `.lolo`, as JSON: the
+    /// `Inline<Short><N>` trait name the `.orb` carries, the embedded
+    /// behavior, and the 1-based line and character column of its tag.
+    Embeds {
+        /// The `.lolo` file (omit with --stdin to read the unsaved buffer).
+        file: Option<PathBuf>,
+        /// Read the source from stdin instead of a file.
+        #[arg(long)]
+        stdin: bool,
+    },
+
     /// Resolve a schema: run Inline + Compose + Enrich and emit the
     /// fully-inlined .orb form without generating code.
     ///
@@ -849,6 +875,48 @@ fn compose_lolo_signatures() -> anyhow::Result<String> {
     Ok(out)
 }
 
+/// `orb complete`: the completion candidates at `offset`, as JSON on stdout.
+fn print_completions(
+    file: Option<&std::path::Path>,
+    offset: usize,
+    stdin: bool,
+) -> anyhow::Result<()> {
+    let source = match (file, stdin) {
+        (_, true) => {
+            let mut buf = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)?;
+            buf
+        }
+        (Some(path), false) => std::fs::read_to_string(path)?,
+        (None, false) => anyhow::bail!("orb complete: pass a .lolo file or --stdin"),
+    };
+    let cwd = std::env::current_dir()?;
+    let user_store =
+        orbital_core::behavior_packages::user_store_dir().unwrap_or_else(|| cwd.clone());
+    let packages = orbital_core::behavior_packages::discover(&cwd, &user_store)
+        .map_err(|e| anyhow::anyhow!("failed to discover behavior packages: {e}"))?;
+    let contracts = orbital_lolo::registry::LoloContracts::load(&packages).ok();
+    let result = orbital_lolo::complete::complete(&source, offset, contracts.as_ref());
+    println!("{}", serde_json::to_string(&result)?);
+    Ok(())
+}
+
+fn print_embeds(file: Option<&std::path::Path>, stdin: bool) -> anyhow::Result<()> {
+    let source = match (file, stdin) {
+        (_, true) => {
+            let mut buf = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)?;
+            buf
+        }
+        (Some(path), false) => std::fs::read_to_string(path)?,
+        (None, false) => anyhow::bail!("orb embeds: pass a .lolo file or --stdin"),
+    };
+    let embeds = orbital_lolo::embeds::inline_embeds(&source)
+        .map_err(|e| anyhow::anyhow!("orb embeds: {e}"))?;
+    println!("{}", serde_json::to_string(&embeds)?);
+    Ok(())
+}
+
 fn print_lolo_signatures(out: Option<&std::path::Path>) -> anyhow::Result<()> {
     let signatures = compose_lolo_signatures()?;
     match out {
@@ -893,6 +961,12 @@ fn main() -> anyhow::Result<()> {
         }
         Some(Commands::Parse { path }) => parse_schema(&path),
         Some(Commands::Signatures { out }) => print_lolo_signatures(out.as_deref()),
+        Some(Commands::Complete {
+            file,
+            offset,
+            stdin,
+        }) => print_completions(file.as_deref(), offset, stdin),
+        Some(Commands::Embeds { file, stdin }) => print_embeds(file.as_deref(), stdin),
         Some(Commands::Resolve {
             path,
             output,
