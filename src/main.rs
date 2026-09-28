@@ -1267,12 +1267,36 @@ pub(crate) struct ValidationJsonError {
     pub(crate) expected_shape: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) valid_values: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) line: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) column: Option<u32>,
+    #[serde(flatten)]
+    pub(crate) position: Option<SourcePosition>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) needs_install: Option<bool>,
+}
+
+/// Where a diagnostic sits in the `.lolo` source: 1-based `line`/`column`,
+/// `endColumn` just past the last character. `approximate`: the span is the
+/// enclosing construct's, not the offending token's.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SourcePosition {
+    pub(crate) line: u32,
+    pub(crate) column: u32,
+    pub(crate) end_line: u32,
+    pub(crate) end_column: u32,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) approximate: bool,
+}
+
+impl SourcePosition {
+    pub(crate) fn of(span: orbital_lolo::Span, exact: bool) -> Self {
+        Self {
+            line: span.line,
+            column: span.col,
+            end_line: span.line,
+            end_column: span.col + u32::from(span.len.max(1)),
+            approximate: !exact,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -1283,10 +1307,8 @@ pub(crate) struct ValidationJsonWarning {
     pub(crate) message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) suggestion: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) line: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) column: Option<u32>,
+    #[serde(flatten)]
+    pub(crate) position: Option<SourcePosition>,
 }
 
 #[derive(Debug, Serialize)]

@@ -2,7 +2,7 @@
 //! parse-error mapping consumed by `orbital validate --json`.
 
 use crate::utils::i18n::translate_schema_content;
-use crate::ValidationJsonError;
+use crate::{SourcePosition, ValidationJsonError};
 
 /// Canonicalize serde_json for `.orb` emission: recursively strip `null`
 /// values AND emit object keys in deterministic (sorted) order. Used by the
@@ -175,8 +175,7 @@ pub(crate) fn typed_parse_error_to_json(
             fix_guidance: None,
             expected_shape: None,
             valid_values: None,
-            line: None,
-            column: None,
+            position: None,
             needs_install: None,
         }],
         TypedParseError::Lolo(LoloError::Io { path, message }) => vec![ValidationJsonError {
@@ -187,8 +186,7 @@ pub(crate) fn typed_parse_error_to_json(
             fix_guidance: None,
             expected_shape: None,
             valid_values: None,
-            line: None,
-            column: None,
+            position: None,
             needs_install: None,
         }],
         TypedParseError::Lolo(LoloError::Parse { path, inner }) => {
@@ -555,8 +553,7 @@ pub(crate) fn typed_parse_error_to_json(
                 fix_guidance,
                 expected_shape: None,
                 valid_values: None,
-                line: Some(span.line),
-                column: Some(span.col),
+                position: Some(SourcePosition::of(span, true)),
                 needs_install: None,
             }]
         }
@@ -640,15 +637,14 @@ pub(crate) fn typed_parse_error_to_json(
                 fix_guidance: None,
                 expected_shape: None,
                 valid_values: None,
-                line: Some(span.line),
-                column: Some(span.col),
+                position: Some(SourcePosition::of(span, true)),
                 needs_install: None,
             }]
         }
-        TypedParseError::Lolo(LoloError::Lower {
-            path,
-            inner: inner @ LowerError::BehaviorPackageNotInstalled { .. },
-        }) => vec![ValidationJsonError {
+        TypedParseError::Lolo(LoloError::Lower { path, inner })
+            if matches!(inner.innermost(), LowerError::BehaviorPackageNotInstalled { .. }) =>
+        {
+            vec![ValidationJsonError {
             code: "ORB_BEHAVIOR_PACKAGE_NOT_INSTALLED".to_string(),
             path: path.clone(),
             message: format!("{inner}"),
@@ -660,10 +656,10 @@ pub(crate) fn typed_parse_error_to_json(
             fix_guidance: None,
             expected_shape: None,
             valid_values: None,
-            line: None,
-            column: None,
+            position: None,
             needs_install: Some(true),
-        }],
+            }]
+        }
         TypedParseError::Lolo(LoloError::Lower { path, inner }) => vec![ValidationJsonError {
             code: "LOLO_LOWER_ERROR".to_string(),
             path: path.clone(),
@@ -672,8 +668,9 @@ pub(crate) fn typed_parse_error_to_json(
             fix_guidance: None,
             expected_shape: None,
             valid_values: None,
-            line: None,
-            column: None,
+            position: inner
+                .span()
+                .map(|span| SourcePosition::of(span, inner.span_is_exact())),
             needs_install: None,
         }],
     }

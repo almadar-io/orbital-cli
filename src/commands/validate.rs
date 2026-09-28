@@ -4,7 +4,7 @@ use crate::utils::{
     detect_language, load_extra_patterns, load_services_registry, merge_post_inline_diagnostics,
     parse_schema_auto_typed_with_map, parse_schema_auto_with_map, typed_parse_error_to_json,
 };
-use crate::{ValidationJsonError, ValidationJsonOutput, ValidationJsonWarning, ValidationStats};
+use crate::{SourcePosition, ValidationJsonError, ValidationJsonOutput, ValidationJsonWarning, ValidationStats};
 use std::path::PathBuf;
 
 /// Validate schema using native Rust validation
@@ -109,8 +109,7 @@ fn validate_schema_json(
                 fix_guidance: None,
                 expected_shape: None,
                 valid_values: None,
-                line: None,
-                column: None,
+                position: None,
                 needs_install: None,
             }]),
             warnings: None,
@@ -136,8 +135,7 @@ fn validate_schema_json(
                     fix_guidance: None,
                     expected_shape: None,
                     valid_values: None,
-                    line: None,
-                    column: None,
+                    position: None,
                     needs_install: None,
                 }]),
                 warnings: None,
@@ -234,42 +232,17 @@ fn validate_schema_json(
                 lc.std_lib_path.is_some(),
             ));
         }
-        // Import-carrying loader errors have no spans, but the failing
-        // import string appears verbatim on a `uses` line — locate it so
-        // the agent has an edit anchor (run 36: an invented import stalled
-        // 4 repair rounds at line null).
-        let import_needle = match &e {
-            InlineError::Loader(LoaderError::InvalidPrimitiveImport(s)) => Some(s.clone()),
-            InlineError::Loader(LoaderError::StdImportNotCanonical { given, .. }) => {
-                Some(given.clone())
-            }
-            InlineError::Loader(LoaderError::BehaviorNotFound { name, .. }) => Some(name.clone()),
-            InlineError::Loader(LoaderError::PackageNotInstalled { prefix }) => {
-                Some(prefix.clone())
-            }
+        // Import-carrying loader errors have no spans; the failing import is
+        // located at the `uses` line that declares it, matched exactly.
+        let import_position = match &e {
+            InlineError::Loader(LoaderError::InvalidPrimitiveImport(s)) => Some(s.as_str()),
+            InlineError::Loader(LoaderError::StdImportNotCanonical { given, .. }) => Some(given.as_str()),
+            InlineError::Loader(LoaderError::BehaviorNotFound { name, .. }) => Some(name.as_str()),
+            InlineError::Loader(LoaderError::PackageNotInstalled { prefix }) => Some(prefix.as_str()),
             _ => None,
-        };
-        let (inline_line, inline_column) = import_needle
-            .and_then(|needle| {
-                let src = std::fs::read_to_string(&path).ok()?;
-                let find = |n: &str| {
-                    src.lines().enumerate().find_map(|(i, l)| {
-                        l.find(n)
-                            .map(|c| (Some((i + 1) as u32), Some((c + 1) as u32)))
-                    })
-                };
-                // The loader may have normalized the path before failing
-                // (`@std/graphs/X` reported as `std/behaviors/X`), so fall
-                // back to the last path segment, which survives rewriting.
-                find(&needle).or_else(|| {
-                    needle
-                        .rsplit('/')
-                        .next()
-                        .filter(|seg| !seg.is_empty())
-                        .and_then(|seg| find(seg))
-                })
-            })
-            .unwrap_or((None, None));
+        }
+        .and_then(|import| source_map.as_ref()?.import_span(import))
+        .map(|span| SourcePosition::of(span, false));
         let output = ValidationJsonOutput {
             success: true,
             valid: false,
@@ -294,8 +267,7 @@ fn validate_schema_json(
                 fix_guidance: None,
                 expected_shape: None,
                 valid_values: None,
-                line: inline_line,
-                column: inline_column,
+                position: import_position,
                 needs_install: needs_install.then_some(true),
             }]),
             warnings: None,
@@ -351,34 +323,10 @@ fn validate_schema_json(
     // path) back to the originating `.lolo` line:col — best-effort (see
     // `LoloSourceMap::lookup`'s longest-prefix fallback); `.orb` JSON input
     // carries no map, so line/column stay `None` there.
-    let source_text: Option<String> = source_map
-        .as_ref()
-        .and_then(|_| std::fs::read_to_string(&path).ok());
     for error in &comprehensive_result.errors {
         let resolved = source_map
             .as_ref()
             .and_then(|m| m.lookup_detailed(&error.path));
-        // Last-resort anchor when the path has no map entry at all (config
-        // referrer chains, cross-orbital codes — run 37: ORB_CONFIG_DANGLING_REF
-        // at line null stalled a session; C-LINE-BLIND family): our messages
-        // quote the offending token in backticks, and its first source
-        // occurrence is a deterministic edit anchor.
-        let quoted_anchor = if resolved.is_none() {
-            source_text.as_ref().and_then(|src| {
-                let msg = &error.message;
-                let start = msg.find('`')? + 1;
-                let end = start + msg[start..].find('`')?;
-                let token = &msg[start..end];
-                if token.is_empty() {
-                    return None;
-                }
-                src.lines()
-                    .enumerate()
-                    .find_map(|(i, l)| l.find(token).map(|c| (i as u32 + 1, c as u32 + 1)))
-            })
-        } else {
-            None
-        };
         // A longest-prefix fallback span points at the nearest tracked
         // ancestor — for expressions spliced in by the inline phase (config
         // defaults, `@trait.X` references) that line contains only the
@@ -388,13 +336,6 @@ fn validate_schema_json(
         let fix_guidance = match resolved {
             Some((_, false)) => {
                 let note = "Location is approximate (nearest tracked source line). If the shown line only references a config knob or another trait, the failing expression lives where that value is DECLARED (e.g. the trait's config block default) — search the file for the expression named in the message.";
-                Some(match &error.fix_guidance {
-                    Some(existing) => format!("{existing} {note}"),
-                    None => note.to_string(),
-                })
-            }
-            None if quoted_anchor.is_some() => {
-                let note = "Line points at the FIRST occurrence of the quoted token — other occurrences may need the same fix.";
                 Some(match &error.fix_guidance {
                     Some(existing) => format!("{existing} {note}"),
                     None => note.to_string(),
@@ -410,28 +351,21 @@ fn validate_schema_json(
             fix_guidance,
             expected_shape: error.expected_shape.clone(),
             valid_values: error.valid_values.clone(),
-            line: resolved
-                .map(|(s, _)| s.line)
-                .or(quoted_anchor.map(|(l, _)| l)),
-            column: resolved
-                .map(|(s, _)| s.col)
-                .or(quoted_anchor.map(|(_, c)| c)),
+            position: resolved.map(|(span, exact)| SourcePosition::of(span, exact)),
             needs_install: None,
         });
     }
 
     for warning in &comprehensive_result.warnings {
-        let span = source_map
+        let resolved = source_map
             .as_ref()
-            .and_then(|m| m.lookup_detailed(&warning.path))
-            .map(|(s, _)| s);
+            .and_then(|m| m.lookup_detailed(&warning.path));
         all_warnings.push(ValidationJsonWarning {
             code: warning.code.to_string(),
             path: warning.path.clone(),
             message: warning.message.clone(),
             suggestion: warning.suggestion.clone(),
-            line: span.map(|s| s.line),
-            column: span.map(|s| s.col),
+            position: resolved.map(|(span, exact)| SourcePosition::of(span, exact)),
         });
     }
 
@@ -466,8 +400,7 @@ fn validate_schema_json(
                         fix_guidance: None,
                         expected_shape: None,
                         valid_values: None,
-                        line: None,
-                        column: None,
+                        position: None,
                         needs_install: None,
                     });
                 } else {
@@ -476,8 +409,7 @@ fn validate_schema_json(
                         path: error.path.clone(),
                         message: error.message.clone(),
                         suggestion: None,
-                        line: None,
-                        column: None,
+                        position: None,
                     });
                 }
             }
@@ -491,8 +423,7 @@ fn validate_schema_json(
                 fix_guidance: None,
                 expected_shape: None,
                 valid_values: None,
-                line: None,
-                column: None,
+                position: None,
                 needs_install: None,
             });
         }
