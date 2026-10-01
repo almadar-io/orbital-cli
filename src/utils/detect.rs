@@ -628,6 +628,13 @@ pub(crate) fn typed_parse_error_to_json(
                         "declare a sibling field named {sibling:?} in the same struct, typed `event`"
                     )),
                 ),
+                TypeError::EventRefPosition { .. } => (
+                    "ELOLO_T_EVENT_REF_POSITION",
+                    Some(
+                        "declare that position `event`, or write a plain string value there"
+                            .to_string(),
+                    ),
+                ),
             };
             vec![ValidationJsonError {
                 code: code.to_string(),
