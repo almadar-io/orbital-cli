@@ -67,8 +67,10 @@ pub(crate) fn resolve_schema_cli(
         .map_err(|e| anyhow::anyhow!("Failed to parse {}: {}", path.display(), e))?;
     let resolved = resolve_schema_with_path(schema, &options, Some(path))
         .map_err(|e| anyhow::anyhow!("Failed to resolve {}: {}", path.display(), e))?;
-    let resolved_value = serde_json::to_value(&resolved)
+    let mut resolved_value = serde_json::to_value(&resolved)
         .map_err(|e| anyhow::anyhow!("Failed to serialize resolved schema: {}", e))?;
+    // Awaiting-server skeleton predictions — resolve output only, never persisted.
+    orbital_compiler::phases::await_render::attach_await_renders(&resolved, &mut resolved_value);
     // Byte-identical `orb resolve` (owner ruling, Stage C): `preserve_order`
     // means `to_string_pretty` alone reflects HashMap insertion order, which
     // varies run to run for the same schema. Canonicalize before printing.

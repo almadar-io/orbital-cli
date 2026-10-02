@@ -378,7 +378,10 @@ fn validate_schema_json(
     // One reporter: when validation already reported errors the compile step
     // can only restate the same root cause as `COMPILATION_ERROR`, so it runs
     // only on a schema validation accepted.
-    let options = CompilerOptions::from_env();
+    // Already inlined above WITH the source path; re-inlining here would
+    // resolve relative `uses` against the cwd instead of the file's folder.
+    let mut options = CompilerOptions::from_env();
+    options.inline.skip_inline = true;
     let compile_result = if all_errors.is_empty() {
         Some(compile_schema(schema, &options))
     } else {

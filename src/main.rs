@@ -931,10 +931,18 @@ fn print_lolo_signatures(out: Option<&std::path::Path>) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The loader's `.lolo` lowerer: a relative import of a `.lolo`-only sibling.
+fn lower_lolo_file(path: &std::path::Path) -> Result<orbital_core::schema::OrbitalSchema, String> {
+    let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    crate::utils::parse_schema_auto_typed(&content, &path.to_string_lossy())
+        .map_err(|e| e.describe())
+}
+
 fn main() -> anyhow::Result<()> {
     // Namespaced structured logging (mirror of @almadar/logger). Quiet by default
     // (warn/error only); enable namespaces with e.g. ALMADAR_DEBUG='almadar:runtime:*'.
     orbital_core::logging::init();
+    orbital_compiler::loader::register_source_lowerer(lower_lolo_file);
 
     let cli = Cli::parse();
 

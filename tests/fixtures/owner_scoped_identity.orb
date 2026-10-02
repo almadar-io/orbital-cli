@@ -151,7 +151,7 @@
                     "render-ui",
                     "main",
                     {
-                      "type": "entity-list",
+                      "type": "data-list",
                       "entity": "@payload.data",
                       "fields": [
                         "channelName"

@@ -55,7 +55,7 @@ fn verify_server_runs_http_parity_pass() {
 /// `default_probe_persona` gives the in-process probe, and seeds an owned row for it.
 /// Before the fix the HTTP bridge bound no persona at all, `@user.id` was unset, the
 /// owner-scoped fetch matched nothing, and `entity_data_bound` failed with the literal
-/// `entity-list[entity=<empty-array>]` offender (reproduced by temporarily reverting
+/// `data-list[entity=<empty-array>]` offender (reproduced by temporarily reverting
 /// `boot_http_bridge` to its pre-fix `seed_sample`-only body during this fix's development).
 #[test]
 fn verify_server_binds_default_persona_for_owner_scoped_identity() {
