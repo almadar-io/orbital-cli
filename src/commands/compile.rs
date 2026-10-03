@@ -8,10 +8,11 @@ use crate::utils::{
 use crate::{ServerFrameworkArg, ShellMode, ShellType};
 use std::path::{Path, PathBuf};
 
-/// Parse + resolve the schema for a native shell's bundled `resolved_schema.json`
-/// resource (Program B, §159 — the in-app kernel mounts on-device with no
-/// compiler, so it needs the same flattened `OrbitalSchema` `orb verify` and
-/// `orb dev` resolve). `source_path` is the ORIGINAL `.orb`/`.lolo` location
+/// Parse + resolve the schema a client bundles: a native shell's
+/// `resolved_schema.json` (Program B, §159 — the in-app kernel mounts on-device
+/// with no compiler) and the TypeScript client's `browserSchema.json` (its
+/// browser-store legs). Both need the same flattened `OrbitalSchema` `orb verify`
+/// and `orb dev` resolve. `source_path` is the ORIGINAL `.orb`/`.lolo` location
 /// (never `compile_path`, which for a `.lolo` source is a lowered temp file),
 /// so relative `uses` imports (e.g. `almadar-behaviors/*`) resolve exactly
 /// like `orb verify` does. The one resolver:
@@ -66,7 +67,7 @@ pub(crate) fn compile_schema(
 ) -> anyhow::Result<()> {
     use orbital_compiler::shell::{python_shell, typescript_shell, typescript_shell_hono};
 
-    use orbital_compiler::{generate_from_file, GenerateOptions};
+    use orbital_compiler::{generate::generate_from_file_with_source, GenerateOptions};
     use orbital_shell_android::{AndroidBackend, AndroidShell};
     use orbital_shell_ios::{IosBackend, IosShell};
     use orbital_shell_mobile::{MobileBackend, MobileShell};
@@ -207,12 +208,23 @@ pub(crate) fn compile_schema(
                 schema_language: detected_lang,
                 dev_logs,
                 server_framework: sf,
+                browser_schema: Some(resolve_native_shell_schema(&compile_path, path)?),
                 ..TypeScriptBackend::default()
             };
-            let result = generate_from_file(&compile_path, output, &ts_shell, &backend, &options)?;
+            let result = generate_from_file_with_source(&compile_path, path, output, &ts_shell, &backend, &options)?;
 
             // Copy project locales into output so the generated App.tsx import resolves
             copy_locales(path, output);
+
+            // `public "./public"` lands at the client's public root, served as-is.
+            let lowered = orbital_compiler::parse_file(&compile_path)
+                .map_err(|e| anyhow::anyhow!("Failed to read {}: {}", compile_path.display(), e))?;
+            if let Some(public) = &lowered.public_dir {
+                let from = orbital_compiler::phases::public::resolve_public_dir(path, public)
+                    .map_err(|message| anyhow::anyhow!("{message}"))?;
+                orbital_compiler::phases::public::copy_public(&from, &output.join("packages/client/public"))
+                    .map_err(|e| anyhow::anyhow!("Failed to copy public folder: {e}"))?;
+            }
 
             println!("\n✅ Generated {} files", result.files.len());
 
@@ -257,7 +269,7 @@ pub(crate) fn compile_schema(
         ShellType::Python => {
             let py_shell = python_shell(&shells_dir);
             let backend = PythonBackend::new();
-            let result = generate_from_file(&compile_path, output, &py_shell, &backend, &options)?;
+            let result = generate_from_file_with_source(&compile_path, path, output, &py_shell, &backend, &options)?;
 
             println!("\n✅ Generated {} files", result.files.len());
 
@@ -277,8 +289,7 @@ pub(crate) fn compile_schema(
         ShellType::Mobile => {
             let mobile_shell = MobileShell::new();
             let mobile_backend = MobileBackend::new();
-            let result = generate_from_file(
-                &compile_path,
+            let result = generate_from_file_with_source(&compile_path, path,
                 output,
                 &mobile_shell,
                 &mobile_backend,
@@ -303,7 +314,7 @@ pub(crate) fn compile_schema(
             let rust_shell = RustShell::new();
             let rust_backend = RustBackend::new();
             let result =
-                generate_from_file(&compile_path, output, &rust_shell, &rust_backend, &options)?;
+                generate_from_file_with_source(&compile_path, path, output, &rust_shell, &rust_backend, &options)?;
 
             println!("\n✅ Generated {} files", result.files.len());
 
@@ -323,8 +334,7 @@ pub(crate) fn compile_schema(
             let android_shell = AndroidShell::new();
             let resolved_schema = resolve_native_shell_schema(&compile_path, path)?;
             let android_backend = AndroidBackend::new().with_resolved_schema(resolved_schema);
-            let result = generate_from_file(
-                &compile_path,
+            let result = generate_from_file_with_source(&compile_path, path,
                 output,
                 &android_shell,
                 &android_backend,
@@ -356,7 +366,7 @@ pub(crate) fn compile_schema(
             let resolved_schema = resolve_native_shell_schema(&compile_path, path)?;
             let ios_backend = IosBackend::new().with_resolved_schema(resolved_schema);
             let result =
-                generate_from_file(&compile_path, output, &ios_shell, &ios_backend, &options)?;
+                generate_from_file_with_source(&compile_path, path, output, &ios_shell, &ios_backend, &options)?;
 
             // Rung-3 prevention gate (no existing call site runs
             // `Shell::validate_structure`/layout checks for any shell today):
@@ -398,7 +408,7 @@ fn compile_mixed(
 ) -> anyhow::Result<()> {
     use orbital_compiler::shell::{python_shell, typescript_shell};
 
-    use orbital_compiler::{generate_from_file, GenerateOptions};
+    use orbital_compiler::{generate::generate_from_file_with_source, GenerateOptions};
     use orbital_shell_android::{AndroidBackend, AndroidShell};
     use orbital_shell_ios::{IosBackend, IosShell};
     use orbital_shell_mobile::{MobileBackend, MobileShell};
@@ -471,10 +481,10 @@ fn compile_mixed(
                 let ts_shell = typescript_shell(shells_dir);
                 let backend = TypeScriptBackend {
                     schema_language: detected_lang_mixed.clone(),
+                    browser_schema: Some(resolve_native_shell_schema(&compile_path, path)?),
                     ..TypeScriptBackend::new()
                 };
-                let result = generate_from_file(
-                    &compile_path,
+                let result = generate_from_file_with_source(&compile_path, path,
                     &frontend_output,
                     &ts_shell,
                     &backend,
@@ -485,8 +495,7 @@ fn compile_mixed(
             ShellType::Python => {
                 let py_shell = python_shell(shells_dir);
                 let backend = PythonBackend::new();
-                let result = generate_from_file(
-                    &compile_path,
+                let result = generate_from_file_with_source(&compile_path, path,
                     &frontend_output,
                     &py_shell,
                     &backend,
@@ -497,8 +506,7 @@ fn compile_mixed(
             ShellType::Mobile => {
                 let mob_shell = MobileShell::new();
                 let mob_backend = MobileBackend::new();
-                let result = generate_from_file(
-                    &compile_path,
+                let result = generate_from_file_with_source(&compile_path, path,
                     &frontend_output,
                     &mob_shell,
                     &mob_backend,
@@ -509,8 +517,7 @@ fn compile_mixed(
             ShellType::Rust => {
                 let rust_shell = RustShell::new();
                 let rust_backend = RustBackend::new();
-                let result = generate_from_file(
-                    &compile_path,
+                let result = generate_from_file_with_source(&compile_path, path,
                     &frontend_output,
                     &rust_shell,
                     &rust_backend,
@@ -521,8 +528,7 @@ fn compile_mixed(
             ShellType::Android => {
                 let android_shell = AndroidShell::new();
                 let android_backend = AndroidBackend::new();
-                let result = generate_from_file(
-                    &compile_path,
+                let result = generate_from_file_with_source(&compile_path, path,
                     &frontend_output,
                     &android_shell,
                     &android_backend,
@@ -533,8 +539,7 @@ fn compile_mixed(
             ShellType::Ios => {
                 let ios_shell = IosShell::new();
                 let ios_backend = IosBackend::new();
-                let result = generate_from_file(
-                    &compile_path,
+                let result = generate_from_file_with_source(&compile_path, path,
                     &frontend_output,
                     &ios_shell,
                     &ios_backend,
@@ -567,8 +572,7 @@ fn compile_mixed(
             ShellType::Typescript => {
                 let ts_shell = typescript_shell(shells_dir);
                 let backend = TypeScriptBackend::new();
-                let result = generate_from_file(
-                    &compile_path,
+                let result = generate_from_file_with_source(&compile_path, path,
                     &backend_output,
                     &ts_shell,
                     &backend,
@@ -579,8 +583,7 @@ fn compile_mixed(
             ShellType::Python => {
                 let py_shell = python_shell(shells_dir);
                 let backend = PythonBackend::new();
-                let result = generate_from_file(
-                    &compile_path,
+                let result = generate_from_file_with_source(&compile_path, path,
                     &backend_output,
                     &py_shell,
                     &backend,
@@ -591,8 +594,7 @@ fn compile_mixed(
             ShellType::Rust => {
                 let rust_shell = RustShell::new();
                 let rust_backend = RustBackend::new();
-                let result = generate_from_file(
-                    &compile_path,
+                let result = generate_from_file_with_source(&compile_path, path,
                     &backend_output,
                     &rust_shell,
                     &rust_backend,

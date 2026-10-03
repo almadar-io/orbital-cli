@@ -260,7 +260,7 @@ fn print_cascade_report(report: anyhow::Result<serde_json::Value>) -> anyhow::Re
 }
 
 fn run_cascade(path: &Path, steps: &serde_json::Value) -> anyhow::Result<serde_json::Value> {
-    use orbital_compiler::{resolve_schema_with_path, CompilerOptions};
+    use orbital_compiler::{phases::lazy::resolve_program_with_path, CompilerOptions};
     use orbital_core::effects::Effect;
     use orbital_core::runtime::{EntitySource, InMemoryEntityCache, RuntimeKernel};
 
@@ -271,7 +271,7 @@ fn run_cascade(path: &Path, steps: &serde_json::Value) -> anyhow::Result<serde_j
         .map_err(|e| anyhow::anyhow!("Failed to read {}: {}", path.display(), e))?;
     let schema = parse_schema_auto(&content, &path.display().to_string())
         .map_err(|e| anyhow::anyhow!("Failed to parse {}: {}", path.display(), e))?;
-    let resolved = resolve_schema_with_path(schema, &CompilerOptions::from_env(), Some(path))
+    let (resolved, _lazy) = resolve_program_with_path(schema, &CompilerOptions::from_env(), Some(path))
         .map_err(|e| anyhow::anyhow!("Failed to resolve {}: {}", path.display(), e))?;
 
     let kernel = RuntimeKernel::new(
@@ -348,7 +348,7 @@ fn run_execute(
     entity_arg: Option<&str>,
     trait_filter: Option<&str>,
 ) -> anyhow::Result<ExecutionResultDto> {
-    use orbital_compiler::{resolve_schema_with_path, CompilerOptions};
+    use orbital_compiler::{phases::lazy::resolve_program_with_path, CompilerOptions};
 
     let schema_path = path.display().to_string();
     let options = CompilerOptions::from_env();
@@ -357,7 +357,7 @@ fn run_execute(
         .map_err(|e| anyhow::anyhow!("Failed to read {}: {}", path.display(), e))?;
     let schema = parse_schema_auto(&content, &schema_path)
         .map_err(|e| anyhow::anyhow!("Failed to parse {}: {}", path.display(), e))?;
-    let resolved = resolve_schema_with_path(schema, &options, Some(path))
+    let (resolved, _lazy) = resolve_program_with_path(schema, &options, Some(path))
         .map_err(|e| anyhow::anyhow!("Failed to resolve {}: {}", path.display(), e))?;
 
     let payload_json = parse_json_arg(payload_arg)?;

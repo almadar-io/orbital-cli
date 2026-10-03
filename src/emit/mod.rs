@@ -145,7 +145,35 @@ fn emit_orb(source: &str, output: Option<&Path>, source_path: &str) -> Result<()
     let cleaned = crate::strip_json_nulls(value);
     let json = serde_json::to_string_pretty(&orbital_core::util::canonical_json(&cleaned))
         .map_err(|e| anyhow!("Failed to serialize schema: {}", e))?;
-    write_output(&json, output)
+    write_output(&json, output)?;
+    // A program with locales ships its merged catalogs beside the emitted `.orb`
+    // (`<stem>.<locale>.json`, the same files `orb resolve --output` writes).
+    match output {
+        Some(out) if schema.locales.as_ref().is_some_and(|l| !l.is_empty()) => {
+            let path = Path::new(source_path);
+            let options = orbital_compiler::CompilerOptions::from_env();
+            let (resolved, _lazy) =
+                orbital_compiler::phases::lazy::resolve_program_with_path(schema, &options, Some(path))
+                    .map_err(|e| anyhow!("Failed to resolve {} for its catalogs: {}", source_path, e))?;
+            let program_dir = path.parent().unwrap_or(Path::new("."));
+            orbital_compiler::phases::messages::write_catalogs(out, &resolved, program_dir)
+                .map_err(|e| anyhow!("Failed to write catalogs beside {}: {}", out.display(), e))?;
+            // Its own per-behavior catalogs travel with it: a program importing it
+            // from the output folder reads `<folder>/locales/<locale>/<name>.json`.
+            let out_dir = out.parent().unwrap_or(Path::new("."));
+            for locale in resolved.locales.iter().flatten() {
+                let file = Path::new("locales").join(locale).join(format!("{}.json", resolved.name));
+                let (from, to) = (program_dir.join(&file), out_dir.join(&file));
+                if from.exists() && from.canonicalize().ok() != to.canonicalize().ok() {
+                    std::fs::create_dir_all(to.parent().unwrap_or(out_dir))?;
+                    std::fs::copy(&from, &to)
+                        .map_err(|e| anyhow!("Failed to copy {} to {}: {}", from.display(), to.display(), e))?;
+                }
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
 }
 
 /// Parse either `.lolo` surface syntax or `.orb` JSON based on first
@@ -186,6 +214,7 @@ fn parse_any_syntax_with_prior(
 fn emit_code(opts: EmitOptions, source: &str, source_path: &str) -> Result<()> {
     let schema = parse_any_syntax(source, source_path)?;
     let compiler_options = CompilerOptions::from_env();
+    let unresolved = schema.clone();
     let module = compile_schema(schema, &compiler_options)
         .map_err(|e| anyhow!("Schema compilation failed: {}", e))?;
 
@@ -196,6 +225,14 @@ fn emit_code(opts: EmitOptions, source: &str, source_path: &str) -> Result<()> {
                 server_framework: match opts.server {
                     EmitServer::Hono => ServerFramework::Hono,
                     EmitServer::Express => ServerFramework::Express,
+                },
+                browser_schema: if module.entities.iter().any(|e| e.local) {
+                    Some(
+                        orbital_verify::resolve_schema_with_source(unresolved, Some(Path::new(source_path)))
+                            .map_err(|e| anyhow!("Failed to resolve schema for the browser store: {}", e))?,
+                    )
+                } else {
+                    None
                 },
                 ..TypeScriptBackend::default()
             };

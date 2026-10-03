@@ -72,10 +72,13 @@ fn resolve_to_temp(path: &std::path::Path) -> anyhow::Result<PathBuf> {
     let schema = orbital_compiler::parse_file(path)
         .map_err(|e| anyhow::anyhow!("parse {}: {e}", path.display()))?;
     let options = orbital_compiler::CompilerOptions::from_env();
-    let resolved = orbital_compiler::resolve_schema_with_path(schema, &options, Some(path))
+    let (resolved, lazy) = orbital_compiler::phases::lazy::resolve_program_with_path(schema, &options, Some(path))
         .map_err(|e| anyhow::anyhow!("resolve {}: {e}", path.display()))?;
     let out = std::env::temp_dir().join(format!("orbital-dev-{}.orb", std::process::id()));
     std::fs::write(&out, serde_json::to_string(&resolved)?)?;
+    let program_dir = path.parent().unwrap_or(std::path::Path::new("."));
+    orbital_compiler::phases::messages::write_catalogs(&out, &resolved, program_dir)?;
+    crate::commands::parse::write_lazy(out.parent().unwrap_or(std::path::Path::new(".")), &lazy, program_dir, false)?;
     Ok(out)
 }
 
