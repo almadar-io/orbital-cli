@@ -81,6 +81,8 @@ pub enum ShellType {
     Android,
     /// Native iOS application with SwiftUI
     Ios,
+    /// Chrome extension (Manifest V3) hosting the program in its service worker
+    ChromeExtension,
 }
 
 /// Server framework choice for backend code generation

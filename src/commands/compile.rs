@@ -69,6 +69,7 @@ pub(crate) fn compile_schema(
 
     use orbital_compiler::{generate::generate_from_file_with_source, GenerateOptions};
     use orbital_shell_android::{AndroidBackend, AndroidShell};
+    use orbital_shell_chrome::{ChromeBackend, ChromeShell};
     use orbital_shell_ios::{IosBackend, IosShell};
     use orbital_shell_mobile::{MobileBackend, MobileShell};
     use orbital_shell_python::PythonBackend;
@@ -392,6 +393,25 @@ pub(crate) fn compile_schema(
             println!("  cd {}", output.display());
             println!("  ./orb-build.sh");
         }
+        ShellType::ChromeExtension => {
+            let chrome_shell = ChromeShell::new();
+            let resolved_schema = resolve_native_shell_schema(&compile_path, path)?;
+            let program_json = serde_json::to_value(&resolved_schema)?;
+            let services = crate::utils::load_services_registry(None);
+            let program = orbital_shell_chrome::check_program(&program_json, &services.runtimes)
+                .map_err(|errors| anyhow::anyhow!(errors.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("\n")))?;
+            let chrome_backend = ChromeBackend::new(resolved_schema, program);
+            let result = generate_from_file_with_source(&compile_path, path, output, &chrome_shell, &chrome_backend, &options)?;
+
+            println!("\n✅ Generated {} files", result.files.len());
+            for warning in &result.warnings {
+                println!("  ⚠️  {}", warning);
+            }
+            println!("\nNext steps:");
+            println!("  cd {}", output.display());
+            println!("  pnpm install && pnpm build");
+            println!("  Load dist/ as an unpacked extension at chrome://extensions");
+        }
     }
 
     Ok(())
@@ -536,6 +556,9 @@ fn compile_mixed(
                 )?;
                 total_files += result.files.len();
             }
+            ShellType::ChromeExtension => {
+                return Err(anyhow::anyhow!("The chrome-extension shell is a whole program; compile it without --frontend/--backend"));
+            }
             ShellType::Ios => {
                 let ios_shell = IosShell::new();
                 let ios_backend = IosBackend::new();
@@ -611,6 +634,9 @@ fn compile_mixed(
             ShellType::Ios => {
                 return Err(anyhow::anyhow!("iOS shell cannot be used as a backend"));
             }
+            ShellType::ChromeExtension => {
+                return Err(anyhow::anyhow!("The chrome-extension shell is a whole program; compile it without --frontend/--backend"));
+            }
         }
     }
 
@@ -631,6 +657,7 @@ fn compile_mixed(
             Some(ShellType::Mobile) => "http://localhost:8000",
             Some(ShellType::Android) => "http://localhost:8000",
             Some(ShellType::Ios) => "http://localhost:8000",
+            Some(ShellType::ChromeExtension) => "http://localhost:8000",
             None => "http://localhost:8000",
         };
 
@@ -657,6 +684,7 @@ fn compile_mixed(
             Some(ShellType::Ios) => {
                 format!("# API URL for backend server\nAPI_URL={}\n", backend_url)
             }
+            Some(ShellType::ChromeExtension) => String::new(),
             None => String::new(),
         };
 
@@ -721,6 +749,9 @@ fn generate_docker_compose(frontend: Option<ShellType>, backend: Option<ShellTyp
             ShellType::Ios => {
                 // iOS apps don't have a backend component
             }
+            ShellType::ChromeExtension => {
+                // A chrome extension has no backend component
+            }
         }
     }
 
@@ -733,6 +764,7 @@ fn generate_docker_compose(frontend: Option<ShellType>, backend: Option<ShellTyp
             Some(ShellType::Mobile) => "http://localhost:8000",
             Some(ShellType::Android) => "http://localhost:8000",
             Some(ShellType::Ios) => "http://localhost:8000",
+            Some(ShellType::ChromeExtension) => "http://localhost:8000",
             None => "http://localhost:8000",
         };
 
@@ -785,6 +817,9 @@ fn generate_docker_compose(frontend: Option<ShellType>, backend: Option<ShellTyp
                 compose.push_str("      - \"3000:3000\"\n");
                 compose.push_str("    depends_on:\n");
                 compose.push_str("      - backend\n");
+            }
+            ShellType::ChromeExtension => {
+                compose.push_str("  # Chrome extension - build with: pnpm build, then load dist/ unpacked\n");
             }
             ShellType::Ios => {
                 compose.push_str("  # iOS app - run locally with:\n");
