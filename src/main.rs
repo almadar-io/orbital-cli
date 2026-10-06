@@ -516,6 +516,10 @@ enum Commands {
         /// Path to extra patterns.json (auto-discovered if not specified)
         #[arg(long)]
         patterns: Option<PathBuf>,
+
+        /// Serve without the Firebase emulators: no dev personas, every request anonymous
+        #[arg(long)]
+        no_emulators: bool,
     },
 
     /// Start the Orbital desktop GUI application (not yet stable)
@@ -1110,7 +1114,15 @@ fn main() -> anyhow::Result<()> {
             open,
             no_build,
             patterns,
-        }) => run_serve(&path, port, open, no_build, patterns.as_deref()),
+            no_emulators,
+        }) => run_serve(
+            &path,
+            port,
+            open,
+            no_build,
+            patterns.as_deref(),
+            !no_emulators,
+        ),
         Some(Commands::Gui { path, server }) => orbital_client::run_desktop(&path, Some(&server)),
         Some(Commands::Dev {
             path,
