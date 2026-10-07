@@ -10,8 +10,7 @@ use std::path::{Path, PathBuf};
 
 /// Parse + resolve the schema a client bundles: a native shell's
 /// `resolved_schema.json` (Program B, §159 — the in-app kernel mounts on-device
-/// with no compiler) and the TypeScript client's `browserSchema.json` (its
-/// browser-store legs). Both need the same flattened `OrbitalSchema` `orb verify`
+/// with no compiler). It needs the same flattened `OrbitalSchema` `orb verify`
 /// and `orb dev` resolve. `source_path` is the ORIGINAL `.orb`/`.lolo` location
 /// (never `compile_path`, which for a `.lolo` source is a lowered temp file),
 /// so relative `uses` imports (e.g. `almadar-behaviors/*`) resolve exactly
@@ -31,6 +30,20 @@ fn resolve_native_shell_schema(
             e
         )
     })
+}
+
+/// The schema the TypeScript client bundles as `browserSchema.json` for its
+/// browser-store legs: the program as the compiled path compiles it, lazy
+/// behaviors included (their pages are route chunks of the same app).
+fn resolve_browser_schema(
+    compile_path: &Path,
+    source_path: &Path,
+) -> anyhow::Result<orbital_core::OrbitalSchema> {
+    let schema = orbital_compiler::phases::parse_file(compile_path)
+        .map_err(|e| anyhow::anyhow!("Failed to parse schema for browserSchema.json: {}", e))?;
+    let options = compiler_options_or_bail()?;
+    orbital_compiler::phases::resolve_compiled_program_with_path(schema, &options, Some(source_path))
+        .map_err(|e| anyhow::anyhow!("Failed to resolve schema for browserSchema.json: {}", e))
 }
 
 /// `CompilerOptions::from_env()`, but bail with a plain error when behavior-
@@ -209,7 +222,7 @@ pub(crate) fn compile_schema(
                 schema_language: detected_lang,
                 dev_logs,
                 server_framework: sf,
-                browser_schema: Some(resolve_native_shell_schema(&compile_path, path)?),
+                browser_schema: Some(resolve_browser_schema(&compile_path, path)?),
                 ..TypeScriptBackend::default()
             };
             let result = generate_from_file_with_source(&compile_path, path, output, &ts_shell, &backend, &options)?;
@@ -501,7 +514,7 @@ fn compile_mixed(
                 let ts_shell = typescript_shell(shells_dir);
                 let backend = TypeScriptBackend {
                     schema_language: detected_lang_mixed.clone(),
-                    browser_schema: Some(resolve_native_shell_schema(&compile_path, path)?),
+                    browser_schema: Some(resolve_browser_schema(&compile_path, path)?),
                     ..TypeScriptBackend::new()
                 };
                 let result = generate_from_file_with_source(&compile_path, path,
