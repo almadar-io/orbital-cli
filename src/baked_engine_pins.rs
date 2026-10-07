@@ -8,6 +8,6 @@
 //!
 //! DO NOT EDIT MANUALLY - changes will be overwritten on next sync.
 
-pub const RUNTIME_VERIFY_ENGINE: (&str, &str) = ("@almadar-io/runtime-verify-tool", "4.249.0");
+pub const RUNTIME_VERIFY_ENGINE: (&str, &str) = ("@almadar-io/runtime-verify-tool", "4.250.0");
 pub const COMPILED_VERIFY_ENGINE: (&str, &str) = ("@almadar-io/verify-tool", "3.187.0");
 pub const BAKED_CORE: (&str, &str) = ("@almadar/core", "10.121.0");
