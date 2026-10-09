@@ -31,7 +31,7 @@ pub fn classify_file(file: &GeneratedFile, target: EmitTarget) -> Option<(NodeKi
     match target {
         EmitTarget::Ts => classify_ts(path, &file.content),
         EmitTarget::Py => classify_py(path, &file.content),
-        EmitTarget::Orb => None, // `orb` target doesn't emit code files.
+        EmitTarget::Orb | EmitTarget::Lolo => None, // these targets emit no code files.
     }
 }
 

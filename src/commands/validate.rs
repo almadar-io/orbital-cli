@@ -1,11 +1,35 @@
 //! `orb validate` — native Rust schema validation (text + JSON output).
 
 use crate::utils::{
-    detect_language, load_extra_patterns, load_services_registry, merge_post_inline_diagnostics,
+    detect_language, detect_syntax, load_extra_patterns, load_services_registry, merge_post_inline_diagnostics,
     parse_schema_auto_typed_with_map, parse_schema_auto_with_map, typed_parse_error_to_json,
 };
 use crate::{SourcePosition, ValidationJsonError, ValidationJsonOutput, ValidationJsonWarning, ValidationStats};
 use std::path::PathBuf;
+
+/// `.lolo` source facts the lowered schema cannot carry. The pre-bracket app
+/// header (a positional version, description/theme/locales/public on loose
+/// lines) lowers to the same `.orb`, so only the source can report it.
+pub(crate) fn source_findings(content: &str) -> Vec<Finding> {
+    if !matches!(detect_syntax(content), crate::utils::InputSyntax::Lolo) {
+        return Vec::new();
+    }
+    let Ok(program) = orbital_lolo::parse_str(content) else {
+        return Vec::new();
+    };
+    if !program.app.legacy_lines {
+        return Vec::new();
+    }
+    let path = format!("app:{}", program.app.span.line);
+    let message = "the app header writes its modifiers outside its bracket (a positional version, or description/theme/locales/public on loose lines); declare them in the bracket: `app NAME [ version: \"1.0.0\", description: …, theme: …, locales: […], public: … ]`".to_string();
+    vec![Finding {
+        code: "ORB_L_APP_HEADER_LEGACY".to_string(),
+        text: format!("[ORB_L_APP_HEADER_LEGACY] {path}: {message}"),
+        path,
+        message,
+        suggestion: Some("`orb format --write <file>` rewrites the header into the bracket form".to_string()),
+    }]
+}
 
 /// Validate schema using native Rust validation
 pub(crate) fn validate_schema(
@@ -181,7 +205,7 @@ fn validate_schema_json(
     );
     let lazy_errors: Vec<ValidationJsonError> = lazy_errors
         .into_iter()
-        .chain(catalog_findings(&schema, path.as_path()))
+        .chain(program_findings(&schema, path.as_path()))
         .map(finding_json_error)
         .collect();
     let lazy_warnings: Vec<ValidationJsonWarning> = lazy_warnings
@@ -343,6 +367,13 @@ fn validate_schema_json(
 
     let mut all_errors: Vec<ValidationJsonError> = lazy_errors;
     let mut all_warnings: Vec<ValidationJsonWarning> = lazy_warnings;
+    all_warnings.extend(source_findings(&content_raw).into_iter().map(|f| ValidationJsonWarning {
+        code: f.code,
+        path: f.path,
+        message: f.message,
+        suggestion: f.suggestion,
+        position: None,
+    }));
 
     // Convert comprehensive validation errors. When the schema came from
     // `.lolo`, `source_map` resolves `error.path` (an L2 JSON-pointer-style
@@ -519,6 +550,27 @@ fn load_catalogs(
         .collect()
 }
 
+/// Checks only the whole top-level program can make (after its `uses lazy`
+/// pages are recorded): its catalogs and its sign-in route. Both the text and
+/// `--json` paths report them.
+fn program_findings(
+    schema: &orbital_core::schema::OrbitalSchema,
+    path: &std::path::Path,
+) -> Vec<Finding> {
+    let mut findings = catalog_findings(schema, path);
+    for e in orbital_compiler::phases::validation::page::validate_sign_in_route(schema).errors {
+        let code = e.code.as_str().to_string();
+        findings.push(Finding {
+            text: format!("[{code}] {}: {}", e.path, e.message),
+            code,
+            path: e.path,
+            message: e.message,
+            suggestion: e.suggestion,
+        });
+    }
+    findings
+}
+
 /// The `ORB_I18N_*` rules over a program's own `i18n/t` calls and its catalogs.
 fn catalog_findings(schema: &orbital_core::schema::OrbitalSchema, path: &std::path::Path) -> Vec<Finding> {
     use orbital_core::messages::{check_catalogs, CatalogIssue};
@@ -630,7 +682,11 @@ pub(crate) fn run_full_validation(
     );
     Ok(ValidationDiagnostics {
         errors: core.errors.into_iter().map(|f| f.text).collect(),
-        warnings: core.warnings.into_iter().map(|f| f.text).collect(),
+        warnings: source_findings(&content_raw)
+            .into_iter()
+            .chain(core.warnings)
+            .map(|f| f.text)
+            .collect(),
     })
 }
 
@@ -710,7 +766,7 @@ pub(crate) fn validate_schema_core(
         default_opts,
     );
     if check_own_catalogs {
-        errors.extend(catalog_findings(&schema, path));
+        errors.extend(program_findings(&schema, path));
         if let Some(public) = &schema.public_dir {
             if let Err(message) = orbital_compiler::phases::public::resolve_public_dir(path, public) {
                 errors.push(Finding {
@@ -976,5 +1032,84 @@ mod needs_install_classification_tests {
                 path_b: std::path::PathBuf::new(),
             }
         )));
+    }
+}
+
+#[cfg(test)]
+mod legacy_header_tests {
+    use super::source_findings;
+
+    const BODY: &str = "\norbital Foo {\n  entity Bar {\n    id : string!\n  }\n}\n";
+
+    #[test]
+    fn a_loose_line_header_is_reported_once() {
+        let found = source_findings(&format!("app Foo \"1.0.0\"\n\"Desc\"\ntheme \"orb-light\"\n{BODY}"));
+        assert_eq!(found.iter().map(|f| f.code.as_str()).collect::<Vec<_>>(), vec!["ORB_L_APP_HEADER_LEGACY"]);
+        assert_eq!(found[0].path, "app:1");
+    }
+
+    #[test]
+    fn control_the_bracket_header_is_clean() {
+        assert!(source_findings(&format!("app Foo [version: \"1.0.0\", description: \"Desc\", theme: \"orb-light\"]\n{BODY}")).is_empty());
+        assert!(source_findings(&format!("app Foo\n{BODY}")).is_empty());
+    }
+
+    #[test]
+    fn a_positional_version_alone_is_reported() {
+        let found = source_findings(&format!("app Foo \"1.0.0\"\n{BODY}"));
+        assert_eq!(found.len(), 1);
+    }
+
+    #[test]
+    fn control_a_headerless_file_and_orb_json_are_clean() {
+        assert!(source_findings(BODY).is_empty());
+        assert!(source_findings("{\"name\":\"Foo\",\"orbitals\":[]}").is_empty());
+    }
+}
+
+#[cfg(test)]
+mod program_findings_tests {
+    use super::program_findings;
+
+    fn schema(site: serde_json::Value, path: &str) -> orbital_core::schema::OrbitalSchema {
+        serde_json::from_value(serde_json::json!({
+            "name": "app",
+            "site": site,
+            "orbitals": [{
+                "name": "Main",
+                "entity": { "name": "Item", "persistence": "runtime", "fields": [{ "name": "id", "type": "string" }] },
+                "traits": [],
+                "pages": [{ "name": "P", "path": path, "traits": [] }]
+            }]
+        }))
+        .expect("schema")
+    }
+
+    fn codes(s: &orbital_core::schema::OrbitalSchema) -> Vec<String> {
+        program_findings(s, std::path::Path::new("/nonexistent/app.lolo"))
+            .into_iter()
+            .map(|f| f.code)
+            .collect()
+    }
+
+    #[test]
+    fn a_page_on_the_hosts_sign_in_route_is_a_program_finding() {
+        assert_eq!(
+            codes(&schema(serde_json::json!({}), "/login")),
+            vec!["ORB_P_HOST_RESERVED_ROUTE"]
+        );
+    }
+
+    #[test]
+    fn an_unknown_sign_in_route_is_a_program_finding() {
+        assert_eq!(
+            codes(&schema(serde_json::json!({ "signIn": "/nope" }), "/")),
+            vec!["ORB_P_SIGN_IN_UNKNOWN_ROUTE"]
+        );
+    }
+
+    #[test]
+    fn control_the_hosts_sign_in_route_needs_no_page() {
+        assert!(codes(&schema(serde_json::json!({ "signIn": "/login" }), "/")).is_empty());
     }
 }

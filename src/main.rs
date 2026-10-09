@@ -630,7 +630,7 @@ enum Commands {
     /// (e.g. a single entity or trait). See
     /// `docs/Almadar_Compiler_Emit_Code.md` for the selector grammar.
     Emit {
-        /// Output target language: `orb`, `ts`, or `py`.
+        /// Output target: `orb`, `ts`, `py`, or `lolo`.
         #[arg(value_name = "TARGET")]
         target: emit::EmitTarget,
 
@@ -776,6 +776,39 @@ enum BehaviorsCommand {
     Which {
         /// `<prefix>/<name>` or `std/behaviors/<name>`.
         spec: String,
+    },
+    /// The installed behaviors under one or more registry scopes
+    /// (`<prefix>/<topic>[/<tier>]`, e.g. `almadar-std/ui/core/molecules`;
+    /// `std/...` spells the std package), with descriptions, trait values and
+    /// shipped embedding vectors.
+    Catalog {
+        /// Scope paths: a package prefix, optionally narrowed by topic and tier.
+        #[arg(required = true)]
+        paths: Vec<String>,
+        /// Keep only entries with one of these exposures
+        /// (`app|experience|palette|both|internal`); repeatable.
+        #[arg(long)]
+        exposure: Vec<String>,
+        /// Print as JSON (`CatalogEntry[]`).
+        #[arg(long)]
+        json: bool,
+    },
+    /// Describe one trait of an installed behavior: knobs (with embedding
+    /// vectors), events, embedding model.
+    Describe {
+        /// `<behavior>.traits.<Trait>`, or `-` to read a trait value (JSON) from stdin.
+        spec: String,
+        /// Print as JSON (`TraitDescription`).
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print a behavior's `.orb` as JSON (the file the loader resolves).
+    Source {
+        /// `<prefix>/<name>`, `std/behaviors/<name>` or a workspace-relative `./<dir>/<name>`.
+        spec: String,
+        /// Print as JSON.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -1173,6 +1206,13 @@ fn main() -> anyhow::Result<()> {
             BehaviorsCommand::Update { pkg, global } => run_update(pkg, global),
             BehaviorsCommand::List { json, global } => run_list(json, global),
             BehaviorsCommand::Which { spec } => run_which(spec),
+            BehaviorsCommand::Catalog {
+                paths,
+                exposure,
+                json,
+            } => commands::run_catalog(paths, exposure, json),
+            BehaviorsCommand::Describe { spec, json } => commands::run_describe(spec, json),
+            BehaviorsCommand::Source { spec, json } => commands::run_source(spec, json),
         },
         Some(Commands::Engines { command }) => match command {
             EnginesCommand::Install {

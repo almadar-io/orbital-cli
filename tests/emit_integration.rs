@@ -300,3 +300,54 @@ fn emit_orb_in_place_reemit_is_id_stable() {
     );
     let _ = std::fs::remove_file(&out);
 }
+
+// --- target = lolo ---------------------------------------------------------
+
+#[test]
+fn emit_lolo_from_orb_reemits_to_the_same_orb() {
+    let orb = std_modal_orb();
+    let (printed, stderr, ok) = run_orb(&["emit", "lolo", orb.to_str().unwrap()]);
+    assert!(ok, "emit lolo exited non-zero. stderr:\n{}", stderr);
+    assert!(printed.starts_with("app "), "printed source:\n{printed}");
+
+    let dir = tempfile::tempdir().unwrap();
+    let lolo = dir.path().join("printed.lolo");
+    std::fs::write(&lolo, &printed).unwrap();
+    let strip = |v: serde_json::Value| -> serde_json::Value {
+        fn walk(v: serde_json::Value) -> serde_json::Value {
+            match v {
+                serde_json::Value::Object(m) => serde_json::Value::Object(
+                    m.into_iter()
+                        .filter(|(k, v)| {
+                            k != "id"
+                                && k != "ledger"
+                                && k != "schemaVersion"
+                                && !k.ends_with("Id")
+                                && !k.ends_with("Ids")
+                                && !v.is_null()
+                        })
+                        .map(|(k, v)| (k, walk(v)))
+                        .collect(),
+                ),
+                serde_json::Value::Array(a) => {
+                    serde_json::Value::Array(a.into_iter().map(walk).collect())
+                }
+                v => v,
+            }
+        }
+        walk(v)
+    };
+    let (before, _, ok) = run_orb(&["emit", "orb", std_modal_lolo().to_str().unwrap()]);
+    assert!(ok);
+    let (after, stderr, ok) = run_orb(&["emit", "orb", lolo.to_str().unwrap()]);
+    assert!(ok, "printed source must compile. stderr:\n{stderr}");
+    let a: serde_json::Value = serde_json::from_str(&before).unwrap();
+    let b: serde_json::Value = serde_json::from_str(&after).unwrap();
+    assert_eq!(strip(a), strip(b));
+}
+
+#[test]
+fn emit_lolo_rejects_unreadable_input() {
+    let (_, _, ok) = run_orb(&["emit", "lolo", "/nonexistent/file.orb"]);
+    assert!(!ok);
+}
