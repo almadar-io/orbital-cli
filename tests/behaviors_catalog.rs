@@ -153,11 +153,15 @@ fn catalog_decodes_int8_vectors_and_shapes_entries() {
         e["traits"],
         serde_json::json!([{"behavior":"alpha/alpha-card","trait":"CardView"}])
     );
+    assert_eq!(
+        e["value"],
+        serde_json::json!({"behavior":"alpha/alpha-card"})
+    );
     assert_eq!(e["model"], "m1");
     assert_close(&e["vectors"]["description"], &[1.27, -0.01, -1.28, 0.1]);
     assert_close(&e["vectors"]["capabilities"], &[0.5, 0.25]);
     let keys: Vec<&String> = e.as_object().unwrap().keys().collect();
-    assert!(keys.len() == 10, "strict key set, got {keys:?}");
+    assert!(keys.len() == 11, "strict key set, got {keys:?}");
 }
 
 #[test]
@@ -401,16 +405,19 @@ fn describe_a_whole_behavior_and_one_orbital_from_the_resolved_program() {
     );
     assert_eq!(
         item["traits"][0]["knobs"],
-        serde_json::json!([{"name": "layout", "type": "string", "values": ["grid", "rows"]}])
+        serde_json::json!([{"name": "layout", "type": "string", "values": ["grid", "rows"], "default": "grid"}])
     );
-    assert_eq!(v["knobs"], serde_json::json!([{"name": "appName", "type": "string"}]));
+    assert_eq!(
+        v["knobs"],
+        serde_json::json!([{"name": "appName", "type": "string", "default": "Shop"}])
+    );
     assert_eq!(
         item["traits"][0]["events"]["transitions"],
         serde_json::json!(["OPEN"])
     );
     assert_eq!(
         item["pages"],
-        serde_json::json!([{"name": "ItemsPage", "path": "/items"}])
+        serde_json::json!([{"name": "ItemsPage", "path": "/items", "traits": ["ItemList"]}])
     );
 
     let one = json(&orb(
@@ -454,6 +461,119 @@ fn describe_a_whole_behavior_and_one_orbital_from_the_resolved_program() {
     assert!(String::from_utf8_lossy(&missing.stderr).contains("has no orbital `Nope`"));
 }
 
+#[test]
+fn describe_knobs_carry_their_default_and_the_events_an_event_knob_may_name() {
+    let p = project("m1");
+    let schema = r#"{"name":"desk","config":{"title":{"type":"string","default":"Desk"},"links":{"type":"[Link]","items":{"type":"object","properties":{"label":{"name":"label","type":"string","required":true},"href":{"name":"href","type":"string"}}},"default":[{"label":"Home","href":"/"}]}},"orbitals":[{"name":"TaskOrbital","entity":{"name":"Task","fields":[{"name":"id","type":"string","required":true}]},"traits":[{"name":"TaskList","stateMachine":{"states":[{"name":"s","isInitial":true}],"transitions":[{"from":"s","to":"s","event":"OPEN"}]},"emits":[{"event":"TASK_PICKED"}],"config":{"onPick":{"type":"event","default":"OPEN"},"actions":{"type":"[Action]","items":{"type":"object","properties":{"label":{"name":"label","type":"string","required":true},"event":{"name":"event","type":"event","required":true}}},"default":[{"label":"Close","event":"CLOSE"}]},"plain":{"type":"string"}}},{"name":"TaskSide","stateMachine":{"states":[{"name":"s","isInitial":true}],"transitions":[{"from":"s","to":"s","event":"CLOSE"}]}}],"pages":[{"name":"TasksPage","path":"/tasks","traits":[{"ref":"TaskList"},{"ref":"TaskSide"}]}]},{"name":"NoteOrbital","entity":{"name":"Note","fields":[{"name":"id","type":"string","required":true}]},"traits":[{"name":"NoteList","stateMachine":{"states":[{"name":"s","isInitial":true}],"transitions":[{"from":"s","to":"s","event":"NOTE_ONLY"}]}}]}]}"#;
+    write(&p.path().join("orbitals/desk.orb"), schema);
+    let v = json(&orb(
+        p.path(),
+        &["behaviors", "describe", "--json", "./orbitals/desk"],
+    ));
+    let knob = |knobs: &serde_json::Value, name: &str| {
+        knobs
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|k| k["name"] == name)
+            .cloned()
+            .unwrap_or_else(|| panic!("no knob {name} in {knobs}"))
+    };
+    assert_eq!(knob(&v["knobs"], "title")["default"], "Desk");
+    assert_eq!(
+        knob(&v["knobs"], "links")["default"],
+        serde_json::json!([{"label": "Home", "href": "/"}])
+    );
+    let list = &v["orbitals"][0]["traits"][0]["knobs"];
+    let on_pick = knob(list, "onPick");
+    assert_eq!(on_pick["default"], "OPEN");
+    assert_eq!(
+        on_pick["values"],
+        serde_json::json!(["OPEN", "TASK_PICKED"])
+    );
+    let actions = knob(list, "actions");
+    let member = actions["properties"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["name"] == "event")
+        .cloned()
+        .unwrap();
+    assert_eq!(
+        member["values"],
+        serde_json::json!(["CLOSE", "OPEN", "TASK_PICKED"])
+    );
+    let plain = knob(list, "plain");
+    assert!(
+        plain.get("default").is_none(),
+        "no default declared: {plain}"
+    );
+    assert!(plain.get("values").is_none(), "not an event knob: {plain}");
+}
+
+#[test]
+fn describe_reports_each_orbitals_derived_expectations() {
+    let p = project("m1");
+    let schema = r#"{"name":"shop","orbitals":[{"name":"OrderOrbital","entity":{"name":"Order","fields":[{"name":"id","type":"string","required":true},{"name":"total","type":"number"}]},"traits":[{"name":"OrderFeed","linkedEntity":"Order","emits":[{"event":"ORDER_PLACED"}],"stateMachine":{"states":[{"name":"s","isInitial":true}],"transitions":[{"from":"s","to":"s","event":"OPEN"}]}}],"pages":[{"name":"OrdersPage","path":"/orders/:id","traits":[{"ref":"OrderFeed"}]}]},{"name":"DeskOrbital","entity":{"name":"Desk","fields":[{"name":"id","type":"string","required":true}]},"traits":[{"name":"DeskBoard","linkedEntity":"Desk","listens":[{"event":"ORDER_PLACED","source":{"kind":"orbital","orbital":"OrderOrbital","trait":"OrderFeed"},"triggers":"OPEN"}],"stateMachine":{"states":[{"name":"s","isInitial":true}],"transitions":[{"from":"s","to":"s","event":"OPEN","effects":[["persist","update","Order",{"total":1}],["navigate",["str/concat","/orders/","@payload.id"]]]}]}}],"pages":[{"name":"DeskPage","path":"/desk","traits":[{"ref":"DeskBoard"}]}]}]}"#;
+    write(&p.path().join("orbitals/shop.orb"), schema);
+    let v = json(&orb(
+        p.path(),
+        &["behaviors", "describe", "--json", "./orbitals/shop"],
+    ));
+    let desk = v["orbitals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|o| o["value"]["orbital"] == "DeskOrbital")
+        .unwrap();
+    assert_eq!(
+        desk["expects"],
+        serde_json::json!([
+            { "kind": "page", "path": "/orders/:id" },
+            { "kind": "entity", "name": "Order", "shape": [{ "name": "total", "type": "number" }] },
+            { "kind": "event", "traitName": "OrderFeed", "event": "ORDER_PLACED" }
+        ])
+    );
+    let order = v["orbitals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|o| o["value"]["orbital"] == "OrderOrbital")
+        .unwrap();
+    assert_eq!(
+        order["expects"],
+        serde_json::json!([]),
+        "control: the provider expects nothing"
+    );
+}
+
+#[test]
+fn expects_derives_every_orbital_of_the_organism_as_written() {
+    let p = project("m1");
+    let schema = r#"{"name":"shop","orbitals":[{"name":"OrderOrbital","entity":{"name":"Order","fields":[{"name":"id","type":"string","required":true},{"name":"total","type":"number"}]},"traits":[],"pages":[]},{"name":"DeskOrbital","entity":{"name":"Desk","fields":[{"name":"id","type":"string","required":true}]},"traits":[{"name":"DeskBoard","linkedEntity":"Desk","stateMachine":{"states":[{"name":"s","isInitial":true}],"transitions":[{"from":"s","to":"s","event":"OPEN","effects":[["persist","update","Order",{"total":1}]]}]}}],"pages":[]}]}"#;
+    write(&p.path().join("orbitals/shop.orb"), schema);
+    let v = json(&orb(
+        p.path(),
+        &["behaviors", "expects", "--json", "./orbitals/shop"],
+    ));
+    assert_eq!(
+        v["DeskOrbital"]["expectations"],
+        serde_json::json!([{ "kind": "entity", "name": "Order", "shape": [{ "name": "total", "type": "number" }] }])
+    );
+    assert_eq!(v["DeskOrbital"]["diagnostics"], serde_json::json!([]));
+    assert_eq!(
+        v["OrderOrbital"]["expectations"],
+        serde_json::json!([]),
+        "control: the provider expects nothing"
+    );
+    let path = p.path().join("orbitals/shop.orb");
+    let by_path = json(&orb(
+        p.path(),
+        &["behaviors", "expects", "--json", path.to_str().unwrap()],
+    ));
+    assert_eq!(by_path, v, "a .orb path reads the same program");
+}
+
 /// Smoke against the real monorepo std package; skipped in a standalone checkout.
 #[test]
 fn smoke_real_std_package() {
@@ -484,4 +604,51 @@ fn smoke_real_std_package() {
     let d = json(&orb(&root, &["behaviors", "describe", "--json", &spec]));
     assert_eq!(d["value"]["trait"], name.as_str());
     assert!(d["events"]["transitions"].is_array());
+}
+
+#[test]
+fn describe_marks_which_traits_another_record_may_rebind() {
+    let p = project("m1");
+    let schema = r#"{"name":"kit","orbitals":[{"name":"RowOrbital","entity":{"name":"Row","fields":[{"name":"id","type":"string","required":true}]},"traits":[{"name":"RowBrowse","linkedEntity":"Row","entityRebindable":true,"stateMachine":{"states":[{"name":"s","isInitial":true}],"transitions":[{"from":"s","to":"s","event":"INIT"}]}},{"name":"RowFixed","linkedEntity":"Row","stateMachine":{"states":[{"name":"s","isInitial":true}],"transitions":[{"from":"s","to":"s","event":"INIT"}]}}],"pages":[{"name":"RowsPage","path":"/rows","traits":[{"ref":"RowBrowse"}]}]}]}"#;
+    write(&p.path().join("orbitals/kit.orb"), schema);
+    let v = json(&orb(
+        p.path(),
+        &["behaviors", "describe", "--json", "./orbitals/kit"],
+    ));
+    let traits = &v["orbitals"][0]["traits"];
+    assert_eq!(traits[0]["trait"], "RowBrowse");
+    assert_eq!(traits[0]["rebindable"], true);
+    assert_eq!(traits[1]["trait"], "RowFixed");
+    assert_eq!(traits[1]["rebindable"], false);
+    assert_eq!(
+        v["orbitals"][0]["pages"],
+        serde_json::json!([{"name": "RowsPage", "path": "/rows", "traits": ["RowBrowse"]}])
+    );
+}
+
+#[test]
+fn describe_reports_each_record_persistence() {
+    let p = project("m1");
+    let schema = r#"{"name":"kinds","orbitals":[{"name":"PetOrbital","entity":{"name":"Pet","persistence":"persistent","fields":[{"name":"id","type":"string","required":true}]},"traits":[],"pages":[]},{"name":"NoteOrbital","entity":{"name":"Note","fields":[{"name":"id","type":"string","required":true}]},"traits":[],"pages":[]},{"name":"VisitView","entity":{"name":"PageVisit","persistence":"runtime","fields":[{"name":"id","type":"string","required":true}]},"traits":[],"pages":[]}]}"#;
+    write(&p.path().join("orbitals/kinds.orb"), schema);
+    let v = json(&orb(
+        p.path(),
+        &["behaviors", "describe", "--json", "./orbitals/kinds"],
+    ));
+    assert_eq!(v["orbitals"][0]["entity"]["persistence"], "persistent");
+    assert_eq!(v["orbitals"][1]["entity"]["persistence"], "persistent");
+    assert_eq!(v["orbitals"][2]["entity"]["persistence"], "runtime");
+}
+
+#[test]
+fn describe_marks_the_identity_record() {
+    let p = project("m1");
+    let schema = r#"{"name":"people","orbitals":[{"name":"PersonOrbital","entity":{"name":"Person","persistence":"persistent","identity":true,"fields":[{"name":"id","type":"string","required":true}]},"traits":[],"pages":[]},{"name":"NoteOrbital","entity":{"name":"Note","fields":[{"name":"id","type":"string","required":true}]},"traits":[],"pages":[]}]}"#;
+    write(&p.path().join("orbitals/people.orb"), schema);
+    let v = json(&orb(
+        p.path(),
+        &["behaviors", "describe", "--json", "./orbitals/people"],
+    ));
+    assert_eq!(v["orbitals"][0]["entity"]["identity"], true);
+    assert_eq!(v["orbitals"][1]["entity"]["identity"], false);
 }

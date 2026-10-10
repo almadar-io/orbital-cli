@@ -114,10 +114,10 @@ pub(crate) fn run_verify(args: VerifyCliArgs) -> Result<()> {
         Tier::Standard
     };
     let engine_list = resolve_engines(rust, runtime, compiled, all);
-    if traits.is_some() && engine_list != vec![Engine::Rust] {
+    if traits.is_some() && engine_list.contains(&Engine::Runtime) {
         anyhow::bail!(
-            "--trait only scopes the in-process rust engine (L1 kernel + L2 client render); \
-             drop --runtime/--compiled/--all to use it"
+            "--trait scopes the in-process rust engine and the compiled engine only; \
+             drop --runtime/--all to use it"
         );
     }
     let (start_dir, user_store) = npm_project::cwd_and_user_store()?;
@@ -456,6 +456,8 @@ fn run_verify_unified(
                 compiled_port,
                 client_port,
                 engine_timeout,
+                shell_lang.and_then(engines::NativeTarget::from_shell_lang),
+                traits,
             ));
         }
 
@@ -573,7 +575,7 @@ fn verify_one(
         let extra_patterns = crate::utils::load_extra_patterns(path, None);
         let service_registry = crate::utils::load_services_registry(None);
         let l0 =
-            crate::commands::validate::run_full_validation(path, extra_patterns, service_registry)?;
+            crate::commands::validate::run_full_validation(path, extra_patterns, service_registry, false)?;
         // The 0 errors / 0 warnings bar: a warning fails Layer 0 like an error.
         let l0_ok =
             crate::commands::validate::validation_passes(l0.errors.len(), l0.warnings.len(), true);

@@ -1,5 +1,7 @@
-app std-modal "1.0.0"
-"std-modal as a Function"
+app std-modal [
+  version: "1.0.0",
+  description: "std-modal as a Function"
+]
 ;;
 ;; Modal-only trait: renders ONLY to the `modal` slot. The parent molecule's
 ;; layout/browse trait is responsible for the `main` slot (the list, the
@@ -51,7 +53,7 @@ orbital ModalRecordOrbital {
         (set @entity.id ?id)
         (render-ui @config.detailSlot {
           children: [{
-            children: [{ name: @config.icon, type: icon }, {
+            children: [{ name: @config.icon, size: lg, type: icon }, {
               content: @config.title
               type: typography
               variant: h3
@@ -75,6 +77,8 @@ orbital ModalRecordOrbital {
     }
 
     state open {
+      INIT -> closed
+        (render-ui @config.detailSlot null)
       ;; a refetch echo while the modal is open refreshes the stash in place
       SEED -> open
         (set @entity.seedRow (object/merge ?row {}))

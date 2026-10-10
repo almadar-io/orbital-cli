@@ -344,7 +344,12 @@
                     },
                     {
                       "name": "status",
-                      "type": "string"
+                      "type": "string",
+                      "values": [
+                        "active",
+                        "inactive",
+                        "pending"
+                      ]
                     },
                     {
                       "name": "seedRow",
@@ -427,7 +432,12 @@
                       },
                       {
                         "name": "status",
-                        "type": "string"
+                        "type": "string",
+                        "values": [
+                          "active",
+                          "inactive",
+                          "pending"
+                        ]
                       },
                       {
                         "name": "seedRow",
@@ -472,7 +482,12 @@
                       },
                       {
                         "name": "status",
-                        "type": "string"
+                        "type": "string",
+                        "values": [
+                          "active",
+                          "inactive",
+                          "pending"
+                        ]
                       },
                       {
                         "name": "seedRow",
@@ -536,7 +551,12 @@
                       },
                       {
                         "name": "status",
-                        "type": "string"
+                        "type": "string",
+                        "values": [
+                          "active",
+                          "inactive",
+                          "pending"
+                        ]
                       },
                       {
                         "name": "seedRow",
@@ -637,6 +657,7 @@
                           "children": [
                             {
                               "name": "@config.icon",
+                              "size": "lg",
                               "type": "icon"
                             },
                             {
@@ -702,6 +723,19 @@
                   ]
                 ],
                 "to": "open"
+              },
+              {
+                "effects": [
+                  [
+                    "render-ui",
+                    "@config.detailSlot",
+                    null
+                  ]
+                ],
+                "event": "INIT",
+                "eventId": "evt_01KXG04GVSS6QBKSCYWMBQWZMS",
+                "from": "open",
+                "to": "closed"
               },
               {
                 "effects": [

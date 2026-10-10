@@ -9,7 +9,7 @@ use orbital_compiler::loader::{index_registry, ExternalOrbitalLoader, LoaderConf
 use orbital_core::behavior_packages::{BehaviorPackage, STD_PACKAGE};
 use serde::Serialize;
 use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 
 use super::npm_project::discover_from;
@@ -163,6 +163,11 @@ struct TraitValueOut {
 }
 
 #[derive(Serialize)]
+struct BehaviorValueOut {
+    behavior: String,
+}
+
+#[derive(Serialize)]
 struct CatalogEntryOut {
     behavior: String,
     package: String,
@@ -173,6 +178,8 @@ struct CatalogEntryOut {
     description: String,
     capabilities: Vec<String>,
     traits: Vec<TraitValueOut>,
+    /// The behavior as a value ready to embed or store (`behavior` typed).
+    value: BehaviorValueOut,
     vectors: BTreeMap<String, Vec<f64>>,
     model: String,
 }
@@ -329,6 +336,9 @@ pub(crate) fn run_catalog(
             entries.insert(
                 key.clone(),
                 CatalogEntryOut {
+                    value: BehaviorValueOut {
+                        behavior: key.clone(),
+                    },
                     behavior: key,
                     package: pkg.name.clone(),
                     topic: topic.to_string(),
@@ -630,7 +640,8 @@ const ORBITALS_SEGMENT: &str = ".orbitals.";
 type DeclaredConfigOut = BTreeMap<String, orbital_core::schema::ConfigField>;
 
 /// One knob as a payload field (the shape a `listens` payload declaration lowers to), its
-/// struct and list shapes resolved: what a tool offering the knob takes.
+/// struct and list shapes resolved: what a tool offering the knob takes. An `event` knob or
+/// struct member lists the events it may name as `values`.
 #[derive(Serialize)]
 struct KnobField {
     name: String,
@@ -643,6 +654,8 @@ struct KnobField {
     #[serde(skip_serializing_if = "Option::is_none")]
     properties: Option<Vec<KnobField>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    default: Option<orbital_core::schema::SExpression>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     label: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
@@ -650,6 +663,22 @@ struct KnobField {
     synonyms: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tier: Option<String>,
+}
+
+/// The events a knob may name: `scalar` for an `event` knob, `member` for an `event`
+/// member of a struct knob (the compiler's `trait_event_names` / `orbital_event_names`).
+struct EventVocab<'a> {
+    scalar: &'a HashSet<String>,
+    member: &'a HashSet<String>,
+}
+
+fn event_values(events: &HashSet<String>) -> Option<Vec<String>> {
+    if events.is_empty() {
+        return None;
+    }
+    let mut values: Vec<String> = events.iter().cloned().collect();
+    values.sort();
+    Some(values)
 }
 
 fn field_type_name(t: &orbital_core::schema::FieldType) -> anyhow::Result<String> {
@@ -661,38 +690,73 @@ fn field_type_name(t: &orbital_core::schema::FieldType) -> anyhow::Result<String
 
 fn sorted_fields(
     props: &HashMap<String, orbital_core::schema::FieldDefinition>,
+    events: &HashSet<String>,
 ) -> anyhow::Result<Vec<KnobField>> {
     let mut keys: Vec<&String> = props.keys().collect();
     keys.sort();
-    keys.into_iter().map(|k| field_of(k, &props[k])).collect()
+    keys.into_iter()
+        .map(|k| field_of(k, &props[k], events))
+        .collect()
 }
 
-fn field_of(name: &str, def: &orbital_core::schema::FieldDefinition) -> anyhow::Result<KnobField> {
-    let bare = |ty: String, values: Option<Vec<String>>, properties: Option<Vec<KnobField>>| KnobField {
-        name: name.to_string(),
-        ty,
-        required: def.required,
-        values,
-        properties,
-        label: None,
-        description: def.description.clone(),
-        synonyms: None,
-        tier: None,
-    };
+fn field_of(
+    name: &str,
+    def: &orbital_core::schema::FieldDefinition,
+    events: &HashSet<String>,
+) -> anyhow::Result<KnobField> {
+    let bare =
+        |ty: String, values: Option<Vec<String>>, properties: Option<Vec<KnobField>>| KnobField {
+            name: name.to_string(),
+            ty,
+            required: def.required,
+            values,
+            properties,
+            default: None,
+            label: None,
+            description: def.description.clone(),
+            synonyms: None,
+            tier: None,
+        };
     if let Some(items) = &def.items {
-        let element = field_of("", items)?;
-        return Ok(bare(format!("[{}]", element.ty), element.values, element.properties));
+        let element = field_of("", items, events)?;
+        return Ok(bare(
+            format!("[{}]", element.ty),
+            element.values,
+            element.properties,
+        ));
     }
-    let properties = def.properties.as_ref().map(sorted_fields).transpose()?;
-    Ok(bare(field_type_name(&def.field_type)?, def.values.clone(), properties))
+    let properties = def
+        .properties
+        .as_ref()
+        .map(|p| sorted_fields(p, events))
+        .transpose()?;
+    let values = match (&def.values, &def.field_type) {
+        (None, orbital_core::schema::FieldType::Event) => event_values(events),
+        (values, _) => values.clone(),
+    };
+    Ok(bare(field_type_name(&def.field_type)?, values, properties))
 }
 
-fn knob_field(key: &str, cf: &orbital_core::schema::ConfigField) -> anyhow::Result<KnobField> {
+fn knob_field(
+    key: &str,
+    cf: &orbital_core::schema::ConfigField,
+    vocab: &EventVocab<'_>,
+) -> anyhow::Result<KnobField> {
     let (ty, values, properties) = if let Some(items) = &cf.items {
-        let element = field_of("", items)?;
-        (format!("[{}]", element.ty), element.values.or_else(|| cf.values.clone()), element.properties)
+        let element = field_of("", items, vocab.member)?;
+        (
+            format!("[{}]", element.ty),
+            element.values.or_else(|| cf.values.clone()),
+            element.properties,
+        )
     } else if let Some(props) = &cf.properties {
-        ("object".to_string(), cf.values.clone(), Some(sorted_fields(props)?))
+        (
+            "object".to_string(),
+            cf.values.clone(),
+            Some(sorted_fields(props, vocab.member)?),
+        )
+    } else if cf.values.is_none() && cf.field_type == "event" {
+        (cf.field_type.clone(), event_values(vocab.scalar), None)
     } else {
         (cf.field_type.clone(), cf.values.clone(), None)
     };
@@ -702,6 +766,7 @@ fn knob_field(key: &str, cf: &orbital_core::schema::ConfigField) -> anyhow::Resu
         required: None,
         values,
         properties,
+        default: cf.default.clone(),
         label: cf.label.clone(),
         description: cf.description.clone(),
         synonyms: cf.synonyms.clone(),
@@ -711,16 +776,24 @@ fn knob_field(key: &str, cf: &orbital_core::schema::ConfigField) -> anyhow::Resu
 
 fn knob_fields(
     config: Option<&HashMap<String, orbital_core::schema::ConfigField>>,
+    vocab: &EventVocab<'_>,
 ) -> anyhow::Result<Vec<KnobField>> {
-    let mut keys: Vec<(&String, &orbital_core::schema::ConfigField)> = config.into_iter().flatten().collect();
+    let mut keys: Vec<(&String, &orbital_core::schema::ConfigField)> =
+        config.into_iter().flatten().collect();
     keys.sort_by(|a, b| a.0.cmp(b.0));
-    keys.into_iter().map(|(k, f)| knob_field(k, f)).collect()
+    keys.into_iter()
+        .map(|(k, f)| knob_field(k, f, vocab))
+        .collect()
 }
 
 #[derive(Serialize)]
 struct EntityOut {
     name: String,
     fields: Vec<orbital_core::schema::FieldDefinition>,
+    /// Tagged `[identity]`: the record `@user` resolves to.
+    identity: bool,
+    /// Stored (`persistent`, the default when undeclared) or page-only (`runtime`).
+    persistence: orbital_core::schema::Persistence,
 }
 
 #[derive(Serialize)]
@@ -730,12 +803,16 @@ struct TraitOut {
     config: DeclaredConfigOut,
     knobs: Vec<KnobField>,
     events: EventsOut,
+    /// Declared `-> @rebindable`: the trait may be bound to another record.
+    rebindable: bool,
 }
 
 #[derive(Serialize)]
 struct PageOut {
     name: String,
     path: String,
+    /// The traits the page mounts: what the behavior declares as standing on its own.
+    traits: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -748,6 +825,9 @@ struct OrbitalOut {
     /// Entities a sibling orbital owns that this one references: the names an import of it
     /// must map through `entities {}`.
     borrows: BTreeSet<String>,
+    /// What this orbital needs from its siblings, derived from the program
+    /// (`orbital_core::expects`): identity, entities, pages, events.
+    expects: Vec<orbital_core::schema::ExpectDeclaration>,
     traits: Vec<TraitOut>,
     pages: Vec<PageOut>,
 }
@@ -758,6 +838,19 @@ struct BehaviorDescriptionOut {
     config: DeclaredConfigOut,
     knobs: Vec<KnobField>,
     orbitals: Vec<OrbitalOut>,
+    /// The behaviors this one imports (`uses … from`), as written: what it already contains.
+    uses: Vec<String>,
+}
+
+/// Every behavior `schema`'s orbitals import, once each, sorted.
+fn uses_of(schema: &orbital_core::schema::OrbitalSchema) -> Vec<String> {
+    let set: BTreeSet<String> = schema
+        .orbitals
+        .iter()
+        .flat_map(|o| o.uses.iter().flatten())
+        .map(|u| u.from.clone())
+        .collect();
+    set.into_iter().collect()
 }
 
 fn declared_config_of(
@@ -802,8 +895,9 @@ fn borrowed_entities(
             })
         })
         .collect();
-    let mut probe: orbital_core::schema::OrbitalSchema =
-        serde_json::from_value(serde_json::json!({ "name": "DescribeProbe", "orbitals": orbitals }))?;
+    let mut probe: orbital_core::schema::OrbitalSchema = serde_json::from_value(
+        serde_json::json!({ "name": "DescribeProbe", "orbitals": orbitals }),
+    )?;
     let probe_path = path.with_file_name("__describe_probe__.orb");
     let mut orbital_ref = Vec::new();
     orbital_compiler::phases::inline::inline_schema_with_orbital_diagnostics(
@@ -823,10 +917,12 @@ fn borrowed_entities(
             .and_then(|r| r.strip_suffix(']'))
             .and_then(|i| i.parse::<usize>().ok())
             .ok_or_else(|| anyhow::anyhow!("unexpected import diagnostic path `{}`", d.path))?;
-        let name = names
-            .get(index)
-            .ok_or_else(|| anyhow::anyhow!("import diagnostic for orbital #{index} of {}", names.len()))?;
-        out.entry(name.clone()).or_default().extend(d.entity_unmapped.into_iter().map(|(_, e)| e));
+        let name = names.get(index).ok_or_else(|| {
+            anyhow::anyhow!("import diagnostic for orbital #{index} of {}", names.len())
+        })?;
+        out.entry(name.clone())
+            .or_default()
+            .extend(d.entity_unmapped.into_iter().map(|(_, e)| e));
     }
     Ok(out)
 }
@@ -838,6 +934,9 @@ fn describe_behavior(
     behavior: &str,
     only_orbital: Option<&str>,
 ) -> anyhow::Result<BehaviorDescriptionOut> {
+    use orbital_compiler::phases::validation::config_type::{
+        orbital_event_names, trait_event_names,
+    };
     use orbital_compiler::{resolve_schema_with_path, CompilerOptions};
     use orbital_core::schema::{EntityRef, PageRef, TraitReference};
     let resolved_src = resolve(behavior)?;
@@ -859,6 +958,14 @@ fn describe_behavior(
         _ => behavior.to_string(),
     };
     let borrows = borrowed_entities(&resolved_src.path, &program, &options)?;
+    // Derived on the resolved program: imports are inlined, so an imported orbital's own
+    // references are visible, and siblings' records keep the names an import maps.
+    let program_json = serde_json::to_value(&program)?;
+    let program_events: HashSet<String> = program
+        .orbitals
+        .iter()
+        .flat_map(orbital_event_names)
+        .collect();
     let mut orbitals = Vec::new();
     for orbital in &program.orbitals {
         if only_orbital.is_some_and(|o| o != orbital.name) {
@@ -868,9 +975,12 @@ fn describe_behavior(
             EntityRef::Inline(e) => Some(EntityOut {
                 name: e.name.clone(),
                 fields: e.fields.clone(),
+                identity: e.identity,
+                persistence: e.persistence.clone().unwrap_or_default(),
             }),
             _ => None,
         };
+        let orbital_events = orbital_event_names(orbital);
         let mut traits = Vec::new();
         for t in &orbital.traits {
             if let TraitReference::Inline(td) = t {
@@ -880,10 +990,18 @@ fn describe_behavior(
                         .filter(|e| seen.insert(e.clone()))
                         .collect::<Vec<_>>()
                 };
+                let own = trait_event_names(td);
                 traits.push(TraitOut {
+                    rebindable: td.entity_rebindable == Some(true),
                     name: td.name.clone(),
                     config: declared_config_of(td.config.as_ref()),
-                    knobs: knob_fields(td.config.as_ref())?,
+                    knobs: knob_fields(
+                        td.config.as_ref(),
+                        &EventVocab {
+                            scalar: &own,
+                            member: &orbital_events,
+                        },
+                    )?,
                     events: EventsOut {
                         emits: unique(td.emits.iter().flatten().map(|e| e.event.clone()).collect()),
                         listens: unique(
@@ -912,6 +1030,12 @@ fn describe_behavior(
                 PageRef::Inline(page) => Some(PageOut {
                     name: page.name.clone(),
                     path: page.path.clone(),
+                    traits: page
+                        .traits
+                        .iter()
+                        .flatten()
+                        .filter_map(|t| t.trait_name().map(str::to_string))
+                        .collect(),
                 }),
                 _ => None,
             })
@@ -919,8 +1043,17 @@ fn describe_behavior(
         orbitals.push(OrbitalOut {
             value: serde_json::json!({ "behavior": canonical, "orbital": orbital.name }),
             config: declared_config_of(orbital.config.as_ref()),
-            knobs: knob_fields(orbital.config.as_ref())?,
+            knobs: knob_fields(
+                orbital.config.as_ref(),
+                &EventVocab {
+                    scalar: &orbital_events,
+                    member: &orbital_events,
+                },
+            )?,
             borrows: borrows.get(&orbital.name).cloned().unwrap_or_default(),
+            expects: orbital_core::expects::derive_expectations(&program_json, &orbital.name, None)
+                .map_err(|e| anyhow::anyhow!("cannot derive `{}` expectations: {e}", orbital.name))?
+                .expectations,
             entity,
             traits,
             pages,
@@ -934,9 +1067,54 @@ fn describe_behavior(
     Ok(BehaviorDescriptionOut {
         behavior: canonical,
         config: declared_config_of(program.config.as_ref()),
-        knobs: knob_fields(program.config.as_ref())?,
+        knobs: knob_fields(
+            program.config.as_ref(),
+            &EventVocab {
+                scalar: &program_events,
+                member: &program_events,
+            },
+        )?,
         orbitals,
+        uses: uses_of(&resolved_src.schema),
     })
+}
+
+/// `orb behaviors expects`: every orbital's derived `expects`, from the behavior as written
+/// (the slice view factory generation and the edit-demote materializer need), its imports
+/// resolved through the loader.
+pub(crate) fn run_expects(spec: String, _json: bool) -> anyhow::Result<()> {
+    let file = std::path::Path::new(&spec);
+    let schema: Value = if file.is_file() {
+        serde_json::from_str(&std::fs::read_to_string(file)?)
+            .map_err(|e| anyhow::anyhow!("`{spec}` is not a .orb program: {e}"))?
+    } else {
+        serde_json::to_value(&resolve(&spec)?.schema)?
+    };
+    let loaded: std::cell::RefCell<HashMap<String, Option<Value>>> = Default::default();
+    let load = |from: &str| -> Option<Value> {
+        if let Some(hit) = loaded.borrow().get(from) {
+            return hit.clone();
+        }
+        let value = resolve(from)
+            .ok()
+            .and_then(|r| serde_json::to_value(&r.schema).ok());
+        loaded.borrow_mut().insert(from.to_string(), value.clone());
+        value
+    };
+    let mut out = serde_json::Map::new();
+    let names: Vec<String> = schema["orbitals"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|o| o["name"].as_str().map(str::to_string))
+        .collect();
+    for name in names {
+        let derived = orbital_core::expects::derive_expectations(&schema, &name, Some(&load))
+            .map_err(|e| anyhow::anyhow!("cannot derive `{name}` expectations: {e}"))?;
+        out.insert(name, serde_json::to_value(derived)?);
+    }
+    println!("{}", serde_json::to_string(&Value::Object(out))?);
+    Ok(())
 }
 
 pub(crate) fn run_describe(spec: String, _json: bool) -> anyhow::Result<()> {
@@ -1019,4 +1197,39 @@ pub(crate) fn run_source(spec: String, _json: bool) -> anyhow::Result<()> {
     };
     println!("{}", serde_json::to_string_pretty(&value)?);
     Ok(())
+}
+
+#[cfg(test)]
+mod uses_of_tests {
+    use super::uses_of;
+    use orbital_core::schema::OrbitalSchema;
+
+    fn schema(json: serde_json::Value) -> OrbitalSchema {
+        serde_json::from_value(json).expect("schema")
+    }
+
+    #[test]
+    fn lists_every_orbitals_uses_once_sorted() {
+        let s = schema(serde_json::json!({ "name": "s", "orbitals": [
+            { "name": "A", "uses": [ { "from": "almadar-behaviors/std-snake-loop", "as": "Loop" }, { "from": "std/behaviors/std-app-layout", "as": "Shell" } ],
+              "entity": { "name": "A", "fields": [] }, "traits": [], "pages": [] },
+            { "name": "B", "uses": [ { "from": "almadar-behaviors/std-snake-loop", "as": "L2" } ],
+              "entity": { "name": "B", "fields": [] }, "traits": [], "pages": [] }
+        ] }));
+        assert_eq!(
+            uses_of(&s),
+            vec![
+                "almadar-behaviors/std-snake-loop".to_string(),
+                "std/behaviors/std-app-layout".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn control_a_behavior_without_imports_uses_nothing() {
+        let s = schema(serde_json::json!({ "name": "s", "orbitals": [
+            { "name": "A", "entity": { "name": "A", "fields": [] }, "traits": [], "pages": [] }
+        ] }));
+        assert!(uses_of(&s).is_empty());
+    }
 }

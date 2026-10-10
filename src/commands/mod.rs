@@ -21,7 +21,7 @@ pub(crate) mod verify;
 pub(crate) mod verify_server;
 
 pub(crate) use behaviors::{run_install, run_list, run_remove, run_update, run_which};
-pub(crate) use behaviors_catalog::{run_catalog, run_describe, run_source};
+pub(crate) use behaviors_catalog::{run_catalog, run_describe, run_expects, run_source};
 pub(crate) use compile::compile_schema;
 pub(crate) use convert::run_convert;
 pub(crate) use dev::run_dev_mode;

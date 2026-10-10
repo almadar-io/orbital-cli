@@ -116,7 +116,9 @@ const WELL_FORMED_PERSIST: &str = r#"{
                 ]
               },
               { "event": "SAVED", "from": "saving", "to": "browsing" },
-              { "event": "SAVE_FAILED", "from": "saving", "to": "browsing", "effects": [["render-ui", "toast", { "type": "alert", "variant": "error", "message": "@payload.error" }]] }
+              { "event": "SAVE_FAILED", "from": "saving", "to": "browsing", "effects": [["render-ui", "toast", { "type": "alert", "variant": "error", "message": "@payload.error" }]] },
+              { "event": "INIT", "from": "browsing", "to": "loading", "effects": [["fetch", "Note", { "emit": { "failure": "LOAD_FAILED", "success": "LOADED" } }], ["render-ui", "main", { "type": "typography", "content": "Loading notes" }]] },
+              { "event": "INIT", "from": "saving", "to": "loading", "effects": [["fetch", "Note", { "emit": { "failure": "LOAD_FAILED", "success": "LOADED" } }], ["render-ui", "main", { "type": "typography", "content": "Loading notes" }]] }
             ]
           }
         }

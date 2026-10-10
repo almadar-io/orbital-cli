@@ -134,6 +134,11 @@ enum Commands {
         /// Fail on any warning (the 0 errors / 0 warnings bar)
         #[arg(long)]
         deny_warnings: bool,
+
+        /// The program is a finished app (where a generation concludes): expectations and
+        /// controls nothing in it satisfies are errors instead of being deferred to an importer
+        #[arg(long = "final")]
+        final_program: bool,
     },
 
     /// Parse and display schema information
@@ -324,7 +329,9 @@ enum Commands {
 
         /// Additionally emit a native shell to a temp dir and run its compile
         /// gate: `python` (real `py_compile` syntax gate) | `android`
-        /// (Kotlin structural gate) | `ios` (Swift structural gate).
+        /// (Kotlin structural gate) | `ios` (Swift structural gate). With
+        /// `--compiled`, `android`/`ios` also walk the app on the emulator /
+        /// Simulator (engine `compiled:android` / `compiled:ios`).
         #[arg(long, value_name = "SHELL")]
         shell: Option<String>,
 
@@ -350,7 +357,8 @@ enum Commands {
         runtime: bool,
 
         /// Engine: emitted TS app, 4-phase pipeline — shells out to
-        /// orbital-verify-unified.
+        /// orbital-verify-unified. With `--shell ios|android` it walks the
+        /// native app on the Simulator/emulator instead of the web client.
         #[arg(long)]
         compiled: bool,
 
@@ -802,6 +810,15 @@ enum BehaviorsCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Derive every orbital's `expects` from the behavior as written (imports resolved through
+    /// the loader): `{ <orbital>: { expectations, diagnostics } }`.
+    Expects {
+        /// `<prefix>/<name>`, `std/behaviors/<name>`, a workspace-relative `./<dir>/<name>`, or a `.orb` path.
+        spec: String,
+        /// Print as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Print a behavior's `.orb` as JSON (the file the loader resolves).
     Source {
         /// `<prefix>/<name>`, `std/behaviors/<name>` or a workspace-relative `./<dir>/<name>`.
@@ -993,6 +1010,7 @@ fn main() -> anyhow::Result<()> {
             services,
             simulate,
             deny_warnings,
+            final_program,
         }) => {
             validate_schema(
                 &path,
@@ -1000,6 +1018,7 @@ fn main() -> anyhow::Result<()> {
                 patterns.as_deref(),
                 services.as_deref(),
                 deny_warnings,
+                final_program,
             )?;
             if simulate {
                 simulate_render(&path, patterns.as_deref())?;
@@ -1213,6 +1232,7 @@ fn main() -> anyhow::Result<()> {
             } => commands::run_catalog(paths, exposure, json),
             BehaviorsCommand::Describe { spec, json } => commands::run_describe(spec, json),
             BehaviorsCommand::Source { spec, json } => commands::run_source(spec, json),
+            BehaviorsCommand::Expects { spec, json } => commands::run_expects(spec, json),
         },
         Some(Commands::Engines { command }) => match command {
             EnginesCommand::Install {

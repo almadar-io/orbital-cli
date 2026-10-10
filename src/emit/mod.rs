@@ -225,7 +225,8 @@ fn parse_any_syntax_with_prior(
 
 fn emit_code(opts: EmitOptions, source: &str, source_path: &str) -> Result<()> {
     let schema = parse_any_syntax(source, source_path)?;
-    let compiler_options = CompilerOptions::from_env();
+    let mut compiler_options = CompilerOptions::from_env();
+    compiler_options.service_runtimes = Some(crate::utils::load_services_registry(None).runtimes);
     let unresolved = schema.clone();
     let module = compile_schema(schema, &compiler_options)
         .map_err(|e| anyhow!("Schema compilation failed: {}", e))?;
@@ -238,7 +239,7 @@ fn emit_code(opts: EmitOptions, source: &str, source_path: &str) -> Result<()> {
                     EmitServer::Hono => ServerFramework::Hono,
                     EmitServer::Express => ServerFramework::Express,
                 },
-                browser_schema: if module.entities.iter().any(|e| e.local) {
+                browser_schema: if module.entities.iter().any(|e| e.local) || !module.browser_services.is_empty() {
                     Some(
                         orbital_verify::resolve_schema_with_source(unresolved, Some(Path::new(source_path)))
                             .map_err(|e| anyhow!("Failed to resolve schema for the browser store: {}", e))?,

@@ -33,6 +33,47 @@ impl Engine {
     }
 }
 
+/// A native device the compiled engine can walk instead of the web client
+/// (`tools/orbital-verify-unified --target`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NativeTarget {
+    Ios,
+    Android,
+}
+
+impl NativeTarget {
+    /// The `--target` value `tools/orbital-verify-unified` takes.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            NativeTarget::Ios => "ios",
+            NativeTarget::Android => "android",
+        }
+    }
+
+    /// Engine label in the unified report: `compiled:ios` / `compiled:android`.
+    pub(crate) fn engine_label(self) -> String {
+        format!("{}:{}", Engine::Compiled.as_str(), self.as_str())
+    }
+
+    /// The device a `--shell` compile gate language runs on, if it has one.
+    pub(crate) fn from_shell_lang(lang: orbital_verify::shell::ShellLang) -> Option<Self> {
+        use orbital_verify::shell::ShellLang;
+        match lang {
+            ShellLang::Swift => Some(NativeTarget::Ios),
+            ShellLang::Kotlin => Some(NativeTarget::Android),
+            _ => None,
+        }
+    }
+}
+
+/// The engine label for a compiled-engine run: plain `compiled`, or `compiled:<target>`.
+fn compiled_label(native: Option<NativeTarget>) -> String {
+    native.map_or_else(
+        || Engine::Compiled.as_str().to_string(),
+        NativeTarget::engine_label,
+    )
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Tier {
     Smoke,
@@ -111,8 +152,13 @@ impl EngineReport {
     /// An exit-2-class outcome: the engine itself never produced a verdict
     /// (spawn/timeout/parse/not-found) — never conflated with a defect (exit 1).
     pub(crate) fn not_available(engine: Engine, error: String) -> Self {
+        Self::not_available_as(engine.as_str().to_string(), error)
+    }
+
+    /// `not_available` under an explicit engine label (`compiled:ios`).
+    pub(crate) fn not_available_as(engine: String, error: String) -> Self {
         EngineReport {
-            engine: engine.as_str().to_string(),
+            engine,
             ran: false,
             status: "error",
             passed: 0,
@@ -718,23 +764,15 @@ fn fold_runtime_json(doc: &serde_json::Value) -> EngineReport {
 // Compiled engine (tools/orbital-verify-unified)
 // ---------------------------------------------------------------------------
 
-pub(crate) fn run_compiled_engine(
+/// The argv `tools/orbital-verify-unified` is spawned with for one compiled-engine run.
+fn compiled_args(
     target: &Path,
     tier: Tier,
-    start_dir: &Path,
-    user_store: &Path,
     port: u16,
     client_port: u16,
-    engine_timeout: Option<Duration>,
-) -> EngineReport {
-    let resolved = match resolve_node_engine(Engine::Compiled, start_dir, user_store) {
-        Ok(r) => r,
-        Err(EngineError::NotInstalled { package }) => {
-            return EngineReport::not_installed(Engine::Compiled, &package)
-        }
-        Err(e) => return EngineReport::not_available(Engine::Compiled, e.to_string()),
-    };
-
+    native: Option<NativeTarget>,
+    traits: Option<&[String]>,
+) -> Vec<String> {
     let mut args = vec![
         target.display().to_string(),
         "--headless".to_string(),
@@ -745,27 +783,62 @@ pub(crate) fn run_compiled_engine(
         "--client-port".to_string(),
         client_port.to_string(),
     ];
+    if let Some(native) = native {
+        args.push("--target".to_string());
+        args.push(native.as_str().to_string());
+    }
+    for name in traits.unwrap_or_default() {
+        args.push("--trait".to_string());
+        args.push(name.clone());
+    }
     match tier {
         Tier::Smoke => args.push("--no-browser".to_string()),
         Tier::Standard => args.push("--fast".to_string()),
         Tier::Deep => {}
     }
+    args
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_compiled_engine(
+    target: &Path,
+    tier: Tier,
+    start_dir: &Path,
+    user_store: &Path,
+    port: u16,
+    client_port: u16,
+    engine_timeout: Option<Duration>,
+    native: Option<NativeTarget>,
+    traits: Option<&[String]>,
+) -> EngineReport {
+    let label = compiled_label(native);
+    let resolved = match resolve_node_engine(Engine::Compiled, start_dir, user_store) {
+        Ok(r) => r,
+        Err(EngineError::NotInstalled { package }) => {
+            let mut report = EngineReport::not_installed(Engine::Compiled, &package);
+            report.engine = label;
+            return report;
+        }
+        Err(e) => return EngineReport::not_available_as(label, e.to_string()),
+    };
+
+    let args = compiled_args(target, tier, port, client_port, native, traits);
 
     let mut cmd = match build_command(resolved, &args) {
         Ok(c) => c,
-        Err(e) => return EngineReport::not_available(Engine::Compiled, e.to_string()),
+        Err(e) => return EngineReport::not_available_as(label, e.to_string()),
     };
     apply_shared_env(&mut cmd);
 
     let budget = engine_timeout.unwrap_or_else(|| tier.timeout());
     let outcome = match run_with_timeout(cmd, budget) {
         Ok(o) => o,
-        Err(e) => return EngineReport::not_available(Engine::Compiled, format!("{e}")),
+        Err(e) => return EngineReport::not_available_as(label, format!("{e}")),
     };
 
     if outcome.timed_out {
-        return EngineReport::not_available(
-            Engine::Compiled,
+        return EngineReport::not_available_as(
+            label,
             format!("timed out after {budget:?} (override with --engine-timeout)"),
         );
     }
@@ -775,8 +848,8 @@ pub(crate) fn run_compiled_engine(
         Ok(v) => v,
         Err(e) => {
             let stderr = String::from_utf8_lossy(&outcome.stderr);
-            return EngineReport::not_available(
-                Engine::Compiled,
+            return EngineReport::not_available_as(
+                label,
                 format!(
                     "could not parse JSON report: {e} (stderr: {})",
                     first_line(&stderr)
@@ -785,10 +858,28 @@ pub(crate) fn run_compiled_engine(
         }
     };
 
-    fold_compiled_json(&doc)
+    fold_compiled_json(&doc, &label)
 }
 
-fn fold_compiled_json(doc: &serde_json::Value) -> EngineReport {
+fn fold_compiled_json(doc: &serde_json::Value, label: &str) -> EngineReport {
+    // A project that could not run (missing toolchain, device, library build) has no verdict:
+    // the engine did not run, which is exit-2 class and never a pass.
+    if let Some(entries) = doc["inconclusive"].as_array().filter(|a| !a.is_empty()) {
+        let reasons: Vec<String> = entries
+            .iter()
+            .map(|e| {
+                format!(
+                    "{}: {}",
+                    e["project"].as_str().unwrap_or("project"),
+                    e["reason"].as_str().unwrap_or("no reason given")
+                )
+            })
+            .collect();
+        return EngineReport::not_available_as(
+            label.to_string(),
+            format!("inconclusive: {}", reasons.join("; ")),
+        );
+    }
     let checks = doc["totalChecks"].as_u64().unwrap_or(0) as usize;
     let passed = doc["totalPassed"].as_u64().unwrap_or(0) as usize;
     let failed = doc["totalFailed"].as_u64().unwrap_or(0) as usize;
@@ -845,7 +936,7 @@ fn fold_compiled_json(doc: &serde_json::Value) -> EngineReport {
     }
 
     EngineReport {
-        engine: Engine::Compiled.as_str().to_string(),
+        engine: label.to_string(),
         ran: true,
         status: "ran",
         passed,
@@ -967,7 +1058,8 @@ mod tests {
             "totalChecks": 2,
             "gapsDocumented": 0
         });
-        let report = fold_compiled_json(&doc);
+        let report = fold_compiled_json(&doc, "compiled");
+        assert_eq!(report.engine, "compiled");
         assert!(report.ran);
         assert_eq!(report.checks, 2);
         assert_eq!(report.passed, 1);
@@ -977,6 +1069,151 @@ mod tests {
         assert_eq!(report.circuit_findings.len(), 1);
         assert_eq!(report.circuit_findings[0].check, "guardParity");
         assert_eq!(report.circuit_findings[0].engine_term, "guard divergence");
+    }
+
+    #[test]
+    fn compiled_args_without_a_native_target_have_no_target_flag() {
+        let args = compiled_args(Path::new("a.orb"), Tier::Standard, 3040, 3050, None, None);
+        assert!(!args.iter().any(|a| a == "--target"));
+        assert_eq!(args[0], "a.orb");
+        assert!(args.contains(&"--fast".to_string()));
+    }
+
+    #[test]
+    fn compiled_args_route_a_native_target_to_the_tool() {
+        for (native, value) in [
+            (NativeTarget::Ios, "ios"),
+            (NativeTarget::Android, "android"),
+        ] {
+            let args = compiled_args(
+                Path::new("a.orb"),
+                Tier::Deep,
+                3040,
+                3050,
+                Some(native),
+                None,
+            );
+            let at = args
+                .iter()
+                .position(|a| a == "--target")
+                .expect("--target present");
+            assert_eq!(args[at + 1], value);
+            assert!(
+                !args.contains(&"--fast".to_string()),
+                "deep has no tier flag"
+            );
+        }
+    }
+
+    #[test]
+    fn compiled_args_forward_each_trait_to_the_tool() {
+        let traits = vec!["NoteBrowseList".to_string(), "NoteTagBrowse".to_string()];
+        let args = compiled_args(
+            Path::new("a.orb"),
+            Tier::Deep,
+            3040,
+            3050,
+            Some(NativeTarget::Ios),
+            Some(&traits),
+        );
+        let flags: Vec<&String> = args
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| *a == "--trait")
+            .map(|(i, _)| &args[i + 1])
+            .collect();
+        assert_eq!(flags, vec!["NoteBrowseList", "NoteTagBrowse"]);
+    }
+
+    #[test]
+    fn compiled_args_without_traits_carry_no_trait_flag() {
+        let args = compiled_args(Path::new("a.orb"), Tier::Deep, 3040, 3050, None, None);
+        assert!(!args.iter().any(|a| a == "--trait"));
+    }
+
+    #[test]
+    fn smoke_still_skips_the_browser_phase_for_a_native_target() {
+        let args = compiled_args(
+            Path::new("a.orb"),
+            Tier::Smoke,
+            1,
+            2,
+            Some(NativeTarget::Ios),
+            None,
+        );
+        assert!(args.contains(&"--no-browser".to_string()));
+    }
+
+    #[test]
+    fn native_target_follows_the_shell_language() {
+        use orbital_verify::shell::ShellLang;
+        assert_eq!(
+            NativeTarget::from_shell_lang(ShellLang::Swift),
+            Some(NativeTarget::Ios)
+        );
+        assert_eq!(
+            NativeTarget::from_shell_lang(ShellLang::Kotlin),
+            Some(NativeTarget::Android)
+        );
+        for lang in [ShellLang::Python, ShellLang::Rust, ShellLang::TypeScript] {
+            assert_eq!(NativeTarget::from_shell_lang(lang), None);
+        }
+    }
+
+    #[test]
+    fn engine_labels_name_the_platform() {
+        assert_eq!(compiled_label(None), "compiled");
+        assert_eq!(compiled_label(Some(NativeTarget::Ios)), "compiled:ios");
+        assert_eq!(
+            compiled_label(Some(NativeTarget::Android)),
+            "compiled:android"
+        );
+    }
+
+    #[test]
+    fn fold_compiled_json_carries_the_native_label_and_counts() {
+        let doc = serde_json::json!({
+            "projects": [],
+            "totalPassed": 5,
+            "totalFailed": 1,
+            "totalChecks": 6,
+            "gapsDocumented": 0,
+            "inconclusive": []
+        });
+        let report = fold_compiled_json(&doc, "compiled:android");
+        assert_eq!(report.engine, "compiled:android");
+        assert!(report.ran);
+        assert_eq!((report.passed, report.failed, report.checks), (5, 1, 6));
+    }
+
+    #[test]
+    fn an_inconclusive_native_run_is_not_a_pass_and_not_a_defect() {
+        let doc = serde_json::json!({
+            "projects": [],
+            "totalPassed": 0,
+            "totalFailed": 1,
+            "totalChecks": 1,
+            "gapsDocumented": 0,
+            "inconclusive": [{ "project": "demo", "reason": "xcodebuild is not available" }]
+        });
+        let report = fold_compiled_json(&doc, "compiled:ios");
+        assert_eq!(report.engine, "compiled:ios");
+        assert!(!report.ran, "no verdict was produced");
+        assert_eq!(report.status, "error");
+        let message = report.error.clone().expect("reason carried");
+        assert!(
+            message.contains("inconclusive: demo: xcodebuild is not available"),
+            "{message}"
+        );
+        let unified = UnifiedVerifyReport::new("demo".into(), Tier::Standard, vec![report]);
+        assert_eq!(unified.verdict, "engine-error");
+        assert_eq!(unified.exit_code(), 2);
+    }
+
+    #[test]
+    fn an_empty_inconclusive_list_does_not_mask_a_normal_report() {
+        let doc = serde_json::json!({ "projects": [], "totalPassed": 1, "totalFailed": 0, "totalChecks": 1, "inconclusive": [] });
+        assert!(fold_compiled_json(&doc, "compiled:ios").ran);
     }
 
     #[test]

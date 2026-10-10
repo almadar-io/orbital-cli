@@ -52,7 +52,8 @@ fn resolve_browser_schema(
 /// error, so `orb compile` must not silently proceed as if no packages were
 /// installed.
 fn compiler_options_or_bail() -> anyhow::Result<orbital_compiler::CompilerOptions> {
-    let options = orbital_compiler::CompilerOptions::from_env();
+    let mut options = orbital_compiler::CompilerOptions::from_env();
+    options.service_runtimes = Some(crate::utils::load_services_registry(None).runtimes);
     if let Some(e) = &options.discovery_error {
         anyhow::bail!(
             "[{}] {} (validator environment error — the schema was NOT compiled; retry, do not edit the schema)",
@@ -560,7 +561,8 @@ fn compile_mixed(
             }
             ShellType::Android => {
                 let android_shell = AndroidShell::new();
-                let android_backend = AndroidBackend::new();
+                let resolved_schema = resolve_native_shell_schema(&compile_path, path)?;
+                let android_backend = AndroidBackend::new().with_resolved_schema(resolved_schema);
                 let result = generate_from_file_with_source(&compile_path, path,
                     &frontend_output,
                     &android_shell,
@@ -574,7 +576,8 @@ fn compile_mixed(
             }
             ShellType::Ios => {
                 let ios_shell = IosShell::new();
-                let ios_backend = IosBackend::new();
+                let resolved_schema = resolve_native_shell_schema(&compile_path, path)?;
+                let ios_backend = IosBackend::new().with_resolved_schema(resolved_schema);
                 let result = generate_from_file_with_source(&compile_path, path,
                     &frontend_output,
                     &ios_shell,

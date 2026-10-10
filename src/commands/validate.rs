@@ -38,6 +38,7 @@ pub(crate) fn validate_schema(
     patterns_path: Option<&std::path::Path>,
     services_path: Option<&std::path::Path>,
     deny_warnings: bool,
+    final_program: bool,
 ) -> anyhow::Result<()> {
     // Load extra patterns (explicit path or auto-discover)
     let extra_patterns = load_extra_patterns(path, patterns_path);
@@ -46,13 +47,13 @@ pub(crate) fn validate_schema(
     let service_registry = load_services_registry(services_path);
 
     if json_output {
-        return validate_schema_json(path, extra_patterns, service_registry, deny_warnings);
+        return validate_schema_json(path, extra_patterns, service_registry, deny_warnings, final_program);
     }
 
     println!("Validating schema: {}", path.display());
 
     // Use native Rust validation only
-    validate_schema_native(path, extra_patterns, service_registry, deny_warnings)
+    validate_schema_native(path, extra_patterns, service_registry, deny_warnings, final_program)
 }
 
 /// The one pass rule: no errors, and no warnings either when `--deny-warnings` holds the 0/0 bar.
@@ -108,6 +109,7 @@ fn validate_schema_json(
     extra_patterns: Option<orbital_compiler::ExtraPatterns>,
     service_registry: orbital_compiler::embedded::ServiceRegistryData,
     deny_warnings: bool,
+    final_program: bool,
 ) -> anyhow::Result<()> {
     use orbital_compiler::phases::inline::inline_schema_with_orbital_diagnostics;
     use orbital_compiler::{compile_schema, validate_comprehensive_full, CompilerOptions};
@@ -364,6 +366,11 @@ fn validate_schema_json(
         &uses_config_diagnostics,
         &schema,
     );
+    if final_program {
+        comprehensive_result.merge(
+            orbital_compiler::phases::validation::final_program::validate_final_program(&schema),
+        );
+    }
 
     let mut all_errors: Vec<ValidationJsonError> = lazy_errors;
     let mut all_warnings: Vec<ValidationJsonWarning> = lazy_warnings;
@@ -644,6 +651,7 @@ pub(crate) fn run_full_validation(
     path: &std::path::Path,
     extra_patterns: Option<orbital_compiler::ExtraPatterns>,
     service_registry: orbital_compiler::embedded::ServiceRegistryData,
+    final_program: bool,
 ) -> anyhow::Result<ValidationDiagnostics> {
     use orbital_compiler::{CompilerOptions, SchemaLanguage};
 
@@ -679,6 +687,7 @@ pub(crate) fn run_full_validation(
         extra_patterns,
         service_registry,
         &default_opts,
+        final_program,
     );
     Ok(ValidationDiagnostics {
         errors: core.errors.into_iter().map(|f| f.text).collect(),
@@ -713,6 +722,7 @@ pub(crate) fn validate_lazy_children(
             extra_patterns.clone(),
             service_registry.clone(),
             options,
+            false,
         );
         let prefix = |f: Finding| {
             let path = format!("lazy[{}].{}", artifact.orbital, f.path);
@@ -751,6 +761,7 @@ pub(crate) fn validate_schema_core(
     extra_patterns: Option<orbital_compiler::ExtraPatterns>,
     service_registry: orbital_compiler::embedded::ServiceRegistryData,
     default_opts: &orbital_compiler::CompilerOptions,
+    final_program: bool,
 ) -> CoreValidation {
     use orbital_compiler::phases::enrich_schema;
     use orbital_compiler::phases::inline::inline_schema_with_orbital_diagnostics;
@@ -845,6 +856,11 @@ pub(crate) fn validate_schema_core(
         &uses_config_diagnostics,
         &schema,
     );
+    if final_program {
+        comprehensive_result.merge(
+            orbital_compiler::phases::validation::final_program::validate_final_program(&schema),
+        );
+    }
 
     // Human path: append ` @ line:col` when the L2 path resolves to a
     // `.lolo` span (`source_map` is `None` for `.orb` JSON input, and a miss
@@ -934,8 +950,9 @@ fn validate_schema_native(
     extra_patterns: Option<orbital_compiler::ExtraPatterns>,
     service_registry: orbital_compiler::embedded::ServiceRegistryData,
     deny_warnings: bool,
+    final_program: bool,
 ) -> anyhow::Result<()> {
-    let diags = run_full_validation(path, extra_patterns, service_registry)?;
+    let diags = run_full_validation(path, extra_patterns, service_registry, final_program)?;
 
     if !diags.errors.is_empty() {
         eprintln!("Schema validation errors:");
