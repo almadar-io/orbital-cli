@@ -169,25 +169,30 @@ fn live_std_corpus_validates_real_organisms() {
     let manifest_path = std.join("package.json");
     let mut manifest: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
-    manifest["orb"] = serde_json::json!({
-        "prefix": "almadar-std",
-        "source": "behaviors/lolo",
-        "index": "behaviors/behaviors-registry.json",
-        "factorySignatures": "behaviors/registry/factory-signatures.json",
-        "loloContracts": "behaviors/lolo-behavior-contracts.json",
-        "signatures": "behaviors/signatures.lolo",
+    // Link exactly what the installed std declares (the workspace and a published
+    // tarball lay their surface files out differently), minus `registry`: read live.
+    let installed: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(std_root.join("package.json")).unwrap())
+            .unwrap();
+    let declared = &installed["orb"];
+    let mut orb = serde_json::json!({
+        "prefix": declared["prefix"],
+        "source": declared["source"],
         "compiler": ">=0.0.0"
     });
+    let mut linked = vec![declared["source"].as_str().unwrap().to_string()];
+    for key in ["index", "factorySignatures", "loloContracts", "signatures"] {
+        if let Some(rel) = declared[key].as_str() {
+            orb[key] = serde_json::Value::from(rel);
+            linked.push(rel.to_string());
+        }
+    }
+    manifest["orb"] = orb;
     std::fs::write(&manifest_path, manifest.to_string()).unwrap();
-    std::fs::create_dir_all(std.join("behaviors/registry")).unwrap();
-    for rel in [
-        "behaviors/lolo",
-        "behaviors/behaviors-registry.json",
-        "behaviors/registry/factory-signatures.json",
-        "behaviors/lolo-behavior-contracts.json",
-        "behaviors/signatures.lolo",
-    ] {
-        std::os::unix::fs::symlink(std_root.join(rel), std.join(rel)).unwrap();
+    for rel in &linked {
+        let to = std.join(rel);
+        std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(std_root.join(rel), &to).unwrap();
     }
     let which = Command::new(PathBuf::from(env!("CARGO_BIN_EXE_orb")))
         .args(["behaviors", "which", "std/behaviors/std-app-layout"])
