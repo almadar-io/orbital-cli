@@ -1,7 +1,6 @@
 //! Loaders for project-supplied patterns, services registry, and component
 //! mappings consumed by the validate/compile commands.
 
-use crate::utils::strings::kebab_to_pascal;
 
 /// Load extra patterns from a patterns.json file.
 ///
@@ -94,153 +93,111 @@ pub(crate) fn load_extra_patterns(
     })
 }
 
-/// Load services registry from services-registry.json.
-/// Returns both validation projections (action names + per-action param
-/// contracts) parsed from ONE source, so they can never drift.
+/// The one language-data preflight every compiler-backed command runs first:
+/// the pattern vocabulary (installed `@almadar/core`) and the operator table
+/// (installed `@almadar/std`), so a missing or incompatible install surfaces
+/// as a structured error before any phase reads it.
+pub(crate) fn require_language_data() -> anyhow::Result<()> {
+    ensure_language_ready().map_err(|e| anyhow::anyhow!("{}: {e}", e.code()))
+}
+
+/// Turns first-run setup off (CI, or a caller that wants the raw error).
+pub(crate) const NO_AUTO_SETUP_ENV: &str = "ORB_NO_AUTO_SETUP";
+
+/// The language preflight, setting the user store up on first run: when the
+/// core and std this directory resolves are the user store's own (or nothing),
+/// and the store has not been set up for this orb (no core, or not the core it
+/// pins), run `orb update --global` once and check again. A project's own
+/// `node_modules` is never touched — its failure is returned as is.
+pub(crate) fn ensure_language_ready() -> Result<(), orbital_core::language_data::LanguageDataError>
+{
+    let first = match orbital_core::language_data::preflight() {
+        Ok(()) => return Ok(()),
+        Err(e) => e,
+    };
+    if std::env::var_os(NO_AUTO_SETUP_ENV).is_some() || !user_store_needs_setup() {
+        return Err(first);
+    }
+    eprintln!(
+        "orb: the language is not set up for this orb ({}: {first}) — running `orb update --global` (set {NO_AUTO_SETUP_ENV}=1 to skip)",
+        first.code()
+    );
+    if let Err(e) = crate::commands::packages::run_update(true) {
+        eprintln!("orb: update did not complete: {e}");
+        return Err(first);
+    }
+    orbital_core::language_data::preflight()
+}
+
+/// True when core and std resolve from the user store (or not at all) and the
+/// store's core is missing or not the one this orb pins.
+fn user_store_needs_setup() -> bool {
+    use orbital_core::behavior_packages::{find_npm_package, user_store_dir, STD_PACKAGE};
+    use orbital_core::language_data::CORE_PACKAGE;
+    let (Ok(cwd), Some(store)) = (std::env::current_dir(), user_store_dir()) else {
+        return false;
+    };
+    let store = std::fs::canonicalize(&store).unwrap_or(store);
+    let owned_by_store = |name: &str| {
+        find_npm_package(name, &cwd, &store).is_none_or(|pkg| pkg.root.starts_with(&store))
+    };
+    if !owned_by_store(CORE_PACKAGE) || !owned_by_store(STD_PACKAGE) {
+        return false;
+    }
+    let (_, pinned) = crate::baked_engine_pins::BAKED_CORE;
+    find_npm_package(CORE_PACKAGE, &cwd, &store).is_none_or(|core| core.version != pinned)
+}
+
+/// Load the services registry. Returns both validation projections (action
+/// names + per-action param contracts) parsed from ONE source, so they can
+/// never drift: `--services <path>` when given, else the installed
+/// `@almadar/core`'s registry.
 pub(crate) fn load_services_registry(
     explicit_path: Option<&std::path::Path>,
-) -> orbital_compiler::embedded::ServiceRegistryData {
-    // Precedence: --services > live CWD registry (in-repo dev picks up a fresh
-    // `almadar-sync services` with no rebuild) > baked copy in the binary
-    // (itself overridable via ORBITAL_SERVICES_JSON / ORBITAL_BAKED_DIR).
-    let registry_path = if let Some(p) = explicit_path {
-        if p.exists() {
-            Some(p.to_path_buf())
-        } else {
-            eprintln!(
-                "Warning: services registry not found: {} — falling back to the baked registry",
-                p.display()
-            );
-            None
-        }
-    } else {
-        // Auto-discover: check well-known locations in the repo. The
-        // registry moved when almadar-patterns was merged into
-        // @almadar/core; the old path is kept as a fallback for older
-        // trees that haven't picked up that merge yet.
-        let candidates = [
-            std::path::PathBuf::from("packages/almadar-core/src/patterns/services-registry.json"),
-            std::path::PathBuf::from("packages/almadar-patterns/src/services-registry.json"),
-        ];
-        candidates.into_iter().find(|p| p.exists())
-    };
-
-    let Some(registry_path) = registry_path else {
-        let baked = orbital_compiler::embedded::baked_service_registry().clone();
+) -> anyhow::Result<orbital_compiler::embedded::ServiceRegistryData> {
+    require_language_data()?;
+    let Some(path) = explicit_path else {
+        let installed = orbital_compiler::embedded::baked_service_registry().clone();
         eprintln!(
-            "Loaded {} services from the baked registry",
-            baked.actions.len()
+            "Loaded {} services from the installed @almadar/core",
+            installed.actions.len()
         );
-        return baked;
+        return Ok(installed);
     };
-
-    let content = match std::fs::read_to_string(&registry_path) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!(
-                "Warning: could not read {}: {} — falling back to the baked registry",
-                registry_path.display(),
-                e
-            );
-            return orbital_compiler::embedded::baked_service_registry().clone();
-        }
-    };
-
-    let data = match orbital_compiler::embedded::parse_service_registry_data(&content) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!(
-                "Warning: invalid JSON in {}: {} — falling back to the baked registry",
-                registry_path.display(),
-                e
-            );
-            return orbital_compiler::embedded::baked_service_registry().clone();
-        }
-    };
-
-    if data.actions.is_empty() {
-        eprintln!(
-            "Warning: services registry at {} loaded but contained no services — falling back to the baked registry",
-            registry_path.display()
-        );
-        return orbital_compiler::embedded::baked_service_registry().clone();
-    }
-
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("could not read services registry {}: {e}", path.display()))?;
+    let data = orbital_compiler::embedded::parse_service_registry_data(&content)
+        .map_err(|e| anyhow::anyhow!("invalid JSON in {}: {e}", path.display()))?;
     eprintln!(
         "Loaded {} services from {}",
         data.actions.len(),
-        registry_path.display()
+        path.display()
     );
-
-    data
+    Ok(data)
 }
 
-/// Load project-specific component mappings from patterns.json for code generation.
-/// This returns a HashMap suitable for passing to TypeScriptBackend.extra_mappings.
-pub(crate) fn load_project_component_mappings(
+/// The project's `patterns.json` (the explicit path, else beside the schema or
+/// in its `design-system/`), sent to the TypeScript shell as `projectPatterns`.
+pub(crate) fn load_project_patterns(
     schema_path: &std::path::Path,
     explicit_path: Option<&std::path::Path>,
-) -> Option<std::collections::HashMap<String, orbital_shell_typescript::ExtraComponentMapping>> {
-    use std::collections::HashMap;
-
-    let patterns_path = if let Some(p) = explicit_path {
-        if p.exists() {
-            p.to_path_buf()
-        } else {
-            return None;
-        }
-    } else {
-        // Auto-discover: same logic as load_extra_patterns
-        let schema_dir = schema_path.parent()?;
-        let candidates = [
-            schema_dir.join("patterns.json"),
-            schema_dir.join("design-system/patterns.json"),
-        ];
-        match candidates.into_iter().find(|p| p.exists()) {
-            Some(p) => p,
-            None => return None,
+) -> Option<serde_json::Value> {
+    let patterns_path = match explicit_path {
+        Some(p) if p.exists() => p.to_path_buf(),
+        Some(_) => return None,
+        None => {
+            let schema_dir = schema_path.parent()?;
+            [schema_dir.join("patterns.json"), schema_dir.join("design-system/patterns.json")]
+                .into_iter()
+                .find(|p| p.exists())?
         }
     };
-
     let content = std::fs::read_to_string(&patterns_path).ok()?;
     let json: serde_json::Value = serde_json::from_str(&content).ok()?;
-
-    let mut mappings = HashMap::new();
-
-    if let Some(patterns) = json.get("patterns").and_then(|v| v.as_object()) {
-        for (pattern_name, pattern_def) in patterns {
-            // Get component name — either from explicit "component" field or derive from pattern type
-            let component = pattern_def
-                .get("component")
-                .and_then(|v| v.as_str())
-                .map(String::from)
-                .unwrap_or_else(|| kebab_to_pascal(pattern_name));
-
-            let category = pattern_def
-                .get("category")
-                .and_then(|v| v.as_str())
-                .unwrap_or("display")
-                .to_string();
-
-            mappings.insert(
-                pattern_name.clone(),
-                orbital_shell_typescript::ExtraComponentMapping {
-                    component,
-                    category,
-                },
-            );
-        }
-    }
-
-    if mappings.is_empty() {
+    let count = json.get("patterns").and_then(|v| v.as_object()).map_or(0, |p| p.len());
+    if count == 0 {
         return None;
     }
-
-    eprintln!(
-        "Loaded {} project component mappings from {}",
-        mappings.len(),
-        patterns_path.display()
-    );
-
-    Some(mappings)
+    eprintln!("Loaded {} project component mappings from {}", count, patterns_path.display());
+    Some(json)
 }

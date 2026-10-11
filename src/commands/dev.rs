@@ -54,7 +54,7 @@ pub(crate) fn run_dev_mode(path: &PathBuf, port: u16, force_headless: bool) -> a
 
         // Start GUI client pointing to local server (also on the resolved schema).
         let server_url = format!("http://127.0.0.1:{}", port);
-        orbital_client::run_desktop(&resolved_path, Some(&server_url))?;
+        crate::utils::desktop::window(crate::utils::desktop::RENDERER, &resolved_path, Some(&server_url))?;
     } else {
         // Headless: block on the server thread so the process stays alive
         server_handle
@@ -67,18 +67,24 @@ pub(crate) fn run_dev_mode(path: &PathBuf, port: u16, force_headless: bool) -> a
 
 /// Resolve a schema (Inline + Compose + Enrich) and write the resolved `.orb` to a temp
 /// file, returning its path. The runtime entry points (`orbital_server::run`,
-/// `run_desktop`) parse a path; resolution lives here in the CLI, which owns the compiler.
+/// `orb-desktop window`) parse a path; resolution lives here in the CLI, which owns the compiler.
 fn resolve_to_temp(path: &std::path::Path) -> anyhow::Result<PathBuf> {
     let schema = orbital_compiler::parse_file(path)
         .map_err(|e| anyhow::anyhow!("parse {}: {e}", path.display()))?;
     let options = orbital_compiler::CompilerOptions::from_env();
-    let (resolved, lazy) = orbital_compiler::phases::lazy::resolve_program_with_path(schema, &options, Some(path))
-        .map_err(|e| anyhow::anyhow!("resolve {}: {e}", path.display()))?;
+    let (resolved, lazy) =
+        orbital_compiler::phases::lazy::resolve_program_with_path(schema, &options, Some(path))
+            .map_err(|e| anyhow::anyhow!("resolve {}: {e}", path.display()))?;
     let out = std::env::temp_dir().join(format!("orbital-dev-{}.orb", std::process::id()));
     std::fs::write(&out, serde_json::to_string(&resolved)?)?;
     let program_dir = path.parent().unwrap_or(std::path::Path::new("."));
     orbital_compiler::phases::messages::write_catalogs(&out, &resolved, program_dir)?;
-    crate::commands::parse::write_lazy(out.parent().unwrap_or(std::path::Path::new(".")), &lazy, program_dir, false)?;
+    crate::commands::parse::write_lazy(
+        out.parent().unwrap_or(std::path::Path::new(".")),
+        &lazy,
+        program_dir,
+        false,
+    )?;
     Ok(out)
 }
 

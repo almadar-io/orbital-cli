@@ -394,6 +394,7 @@
                 "description": "Indicates a failure to load the record data.",
                 "id": "evt_01KXG04GVS0KS8WXT183DREMAC",
                 "key": "ModalRecordLoadFailed",
+                "listened": true,
                 "name": "ModalRecord load failed",
                 "payloadSchema": [
                   {
@@ -412,6 +413,7 @@
                 "description": "Stash the row an edit-mode OPEN will pre-fill from. Hosts route the owning surface's loaded event here (e.g. RecordItemLoaded from a document look) so an OPEN carrying only { id } still opens a fully seeded form.",
                 "id": "evt_01M15CRJ6RE1E1ZFKT9Y1PXNZK",
                 "key": "SEED",
+                "listened": true,
                 "name": "Seed",
                 "payloadSchema": [
                   {
@@ -458,6 +460,7 @@
                 "description": "A request to display the modal window.",
                 "id": "evt_01KXG04GVS6WNYYGFS0H53BHKC",
                 "key": "OPEN",
+                "listened": true,
                 "name": "Open",
                 "payloadSchema": [
                   {
@@ -516,6 +519,7 @@
                 "description": "Indicates a successful data save operation.",
                 "id": "evt_01KXG04GVSB8F2AS3XHMEZ69NW",
                 "key": "SAVE",
+                "listened": true,
                 "name": "Save",
                 "payloadSchema": [
                   {

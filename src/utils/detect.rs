@@ -648,23 +648,34 @@ pub(crate) fn typed_parse_error_to_json(
                 needs_install: None,
             }]
         }
+        TypedParseError::Lolo(LoloError::Lower { inner, .. })
+            if matches!(inner.innermost(), LowerError::LanguageData(_)) =>
+        {
+            let LowerError::LanguageData(e) = inner.innermost() else {
+                unreachable!("guard matched LanguageData")
+            };
+            vec![crate::commands::validate::language_data_json_error(e)]
+        }
         TypedParseError::Lolo(LoloError::Lower { path, inner })
-            if matches!(inner.innermost(), LowerError::BehaviorPackageNotInstalled { .. }) =>
+            if matches!(
+                inner.innermost(),
+                LowerError::BehaviorPackageNotInstalled { .. }
+            ) =>
         {
             vec![ValidationJsonError {
-            code: "ORB_BEHAVIOR_PACKAGE_NOT_INSTALLED".to_string(),
-            path: path.clone(),
-            message: format!("{inner}"),
-            suggestion: Some(
-                "Run `orb behaviors install <package>` for the package that declares this \
+                code: "ORB_BEHAVIOR_PACKAGE_NOT_INSTALLED".to_string(),
+                path: path.clone(),
+                message: format!("{inner}"),
+                suggestion: Some(
+                    "Run `orb add <package>` for the package that declares this \
                  behavior, then retry — the schema was NOT evaluated."
-                    .to_string(),
-            ),
-            fix_guidance: None,
-            expected_shape: None,
-            valid_values: None,
-            position: None,
-            needs_install: Some(true),
+                        .to_string(),
+                ),
+                fix_guidance: None,
+                expected_shape: None,
+                valid_values: None,
+                position: None,
+                needs_install: Some(true),
             }]
         }
         TypedParseError::Lolo(LoloError::Lower { path, inner }) => vec![ValidationJsonError {

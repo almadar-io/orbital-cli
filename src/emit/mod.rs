@@ -17,7 +17,7 @@ use clap::ValueEnum;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use orbital_compiler::generate::{Backend, GeneratedFile, GeneratedOutput};
+use orbital_compiler::generate::{GeneratedFile, GeneratedOutput};
 use orbital_compiler::phases::{compile_schema, CompilerOptions};
 
 pub mod sourcemap;
@@ -155,9 +155,12 @@ fn emit_orb(source: &str, output: Option<&Path>, source_path: &str) -> Result<()
         Some(out) if schema.locales.as_ref().is_some_and(|l| !l.is_empty()) => {
             let path = Path::new(source_path);
             let options = orbital_compiler::CompilerOptions::from_env();
-            let (resolved, _lazy) =
-                orbital_compiler::phases::lazy::resolve_program_with_path(schema, &options, Some(path))
-                    .map_err(|e| anyhow!("Failed to resolve {} for its catalogs: {}", source_path, e))?;
+            let (resolved, _lazy) = orbital_compiler::phases::lazy::resolve_program_with_path(
+                schema,
+                &options,
+                Some(path),
+            )
+            .map_err(|e| anyhow!("Failed to resolve {} for its catalogs: {}", source_path, e))?;
             let program_dir = path.parent().unwrap_or(Path::new("."));
             orbital_compiler::phases::messages::write_catalogs(out, &resolved, program_dir)
                 .map_err(|e| anyhow!("Failed to write catalogs beside {}: {}", out.display(), e))?;
@@ -165,12 +168,20 @@ fn emit_orb(source: &str, output: Option<&Path>, source_path: &str) -> Result<()
             // from the output folder reads `<folder>/locales/<locale>/<name>.json`.
             let out_dir = out.parent().unwrap_or(Path::new("."));
             for locale in resolved.locales.iter().flatten() {
-                let file = Path::new("locales").join(locale).join(format!("{}.json", resolved.name));
+                let file = Path::new("locales")
+                    .join(locale)
+                    .join(format!("{}.json", resolved.name));
                 let (from, to) = (program_dir.join(&file), out_dir.join(&file));
                 if from.exists() && from.canonicalize().ok() != to.canonicalize().ok() {
                     std::fs::create_dir_all(to.parent().unwrap_or(out_dir))?;
-                    std::fs::copy(&from, &to)
-                        .map_err(|e| anyhow!("Failed to copy {} to {}: {}", from.display(), to.display(), e))?;
+                    std::fs::copy(&from, &to).map_err(|e| {
+                        anyhow!(
+                            "Failed to copy {} to {}: {}",
+                            from.display(),
+                            to.display(),
+                            e
+                        )
+                    })?;
                 }
             }
             Ok(())
@@ -183,8 +194,8 @@ fn emit_orb(source: &str, output: Option<&Path>, source_path: &str) -> Result<()
 
 fn emit_lolo(source: &str, output: Option<&Path>, source_path: &str) -> Result<()> {
     let schema = parse_any_syntax(source, source_path)?;
-    let lolo = orbital_lolo::schema_to_lolo(&schema)
-        .map_err(|e| anyhow!("{}: {}", source_path, e))?;
+    let lolo =
+        orbital_lolo::schema_to_lolo(&schema).map_err(|e| anyhow!("{}: {}", source_path, e))?;
     write_output(&lolo, output)
 }
 
@@ -224,38 +235,28 @@ fn parse_any_syntax_with_prior(
 // --- Target: ts | py -------------------------------------------------------
 
 fn emit_code(opts: EmitOptions, source: &str, source_path: &str) -> Result<()> {
+    crate::utils::require_language_data()?;
     let schema = parse_any_syntax(source, source_path)?;
     let mut compiler_options = CompilerOptions::from_env();
-    compiler_options.service_runtimes = Some(crate::utils::load_services_registry(None).runtimes);
+    compiler_options.service_runtimes = Some(crate::utils::load_services_registry(None)?.runtimes);
     let unresolved = schema.clone();
     let module = compile_schema(schema, &compiler_options)
         .map_err(|e| anyhow!("Schema compilation failed: {}", e))?;
 
+    let generate_options = orbital_compiler::GenerateOptions { compiler: compiler_options, ..Default::default() };
+    let program_path = Path::new(source_path);
     let output: GeneratedOutput = match opts.target {
         EmitTarget::Ts => {
-            use orbital_shell_typescript::{ServerFramework, TypeScriptBackend};
-            let backend = TypeScriptBackend {
-                server_framework: match opts.server {
-                    EmitServer::Hono => ServerFramework::Hono,
-                    EmitServer::Express => ServerFramework::Express,
-                },
-                browser_schema: if module.entities.iter().any(|e| e.local) || !module.browser_services.is_empty() {
-                    Some(
-                        orbital_verify::resolve_schema_with_source(unresolved, Some(Path::new(source_path)))
-                            .map_err(|e| anyhow!("Failed to resolve schema for the browser store: {}", e))?,
-                    )
-                } else {
-                    None
-                },
-                ..TypeScriptBackend::default()
+            let resolved = orbital_verify::resolve_schema_with_source(unresolved, Some(program_path))
+                .map_err(|e| anyhow!("Failed to resolve schema for the browser store: {}", e))?;
+            let framework = match opts.server {
+                EmitServer::Hono => "hono",
+                EmitServer::Express => "express",
             };
-            backend.generate(&module)
+            let shell_options = std::collections::BTreeMap::from([("framework".to_string(), serde_json::Value::from(framework))]);
+            crate::utils::shell_programs::emit("typescript", &module, Some(resolved), program_path, &generate_options, shell_options)?
         }
-        EmitTarget::Py => {
-            use orbital_shell_python::PythonBackend;
-            let backend = PythonBackend::new();
-            backend.generate(&module)
-        }
+        EmitTarget::Py => crate::utils::shell_programs::emit("python", &module, None, program_path, &generate_options, Default::default())?,
         EmitTarget::Orb | EmitTarget::Lolo => {
             unreachable!("orb and lolo targets are routed before code generation")
         }

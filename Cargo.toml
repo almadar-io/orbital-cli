@@ -5,34 +5,23 @@ edition.workspace = true
 license.workspace = true
 description = "Command-line interface for Orbital compiler and tools"
 
+[lib]
+doctest = false
+
 [[bin]]
 name = "orbital"
-path = "src/main.rs"
+path = "src/bin/orbital.rs"
 
 [[bin]]
 name = "orb"
-path = "src/main.rs"
-
-[features]
-# Layer-3 screenshots: `orb verify --screenshot <dir>` renders each organism's desktop
-# egui UI to a PNG via egui_kittest (offscreen wgpu).
-screenshot = ["orbital-client/screenshot"]
+path = "src/bin/orb.rs"
 
 [dependencies]
 # Core crates
-orbital-core = { path = "../orbital-core" }
+orbital-core = { path = "../orbital-core", features = ["client-http"] }
 orbital-compiler = { path = "../orbital-compiler" }
 orbital-lolo = { path = "../orbital-lolo" }
-orbital-shell-typescript = { path = "../orbital-shell-typescript" }
-orbital-shell-python = { path = "../orbital-shell-python" }
-orbital-shell-mobile = { path = "../orbital-shell-mobile" }
-orbital-shell-chrome = { path = "../orbital-shell-chrome" }
-orbital-shell-rust = { path = "../orbital-shell-rust" }
-orbital-shell-android = { path = "../orbital-shell-android" }
-orbital-shell-ios = { path = "../orbital-shell-ios" }
 orbital-server = { path = "../orbital-server" }
-# Use desktop feature without bevy (default-features = false to skip bevy-ui)
-orbital-client = { path = "../orbital-client", default-features = false, features = ["desktop", "sync-http"] }
 orbital-verify = { path = "../orbital-verify" }
 
 # CLI essentials only
@@ -43,11 +32,13 @@ serde_json.workspace = true
 
 # Source Map v3 emission for `orb emit --map` and `orb trace`
 sourcemap = "9"
-# Wire-shape fixture pass (`verify_server::run_fixture_pass`) — same sync HTTP client
-# `SyncServerBridge` uses (`orbital-client`'s `sync-http` feature), pinned identically.
-ureq = { workspace = true }
+# Wire-shape fixture pass (`verify_server::run_fixture_pass`).
+ureq = { workspace = true, features = ["tls"] }
+semver = "1"
 
 [dev-dependencies]
+orbital-test-support = { path = "../orbital-test-support" }
 pretty_assertions.workspace = true
 syn = { version = "2", features = ["full"] }
 tempfile = "3.10"
+sha2 = "0.10"

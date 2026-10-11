@@ -5,7 +5,7 @@
 //! `orb.factorySignatures`) and shapes them to the `@almadar/core`
 //! `CatalogEntrySchema` / `TraitDescriptionSchema` contracts.
 
-use orbital_compiler::loader::{index_registry, ExternalOrbitalLoader, LoaderConfig};
+use orbital_compiler::loader::{index_registry_source, ExternalOrbitalLoader, LoaderConfig};
 use orbital_core::behavior_packages::{BehaviorPackage, STD_PACKAGE};
 use serde::Serialize;
 use serde_json::Value;
@@ -129,7 +129,10 @@ fn base64_decode(input: &str) -> Option<Vec<u8>> {
 }
 
 fn package_manifests(pkg: &BehaviorPackage) -> anyhow::Result<Vec<Manifest>> {
-    pkg.embeddings.iter().map(|p| Manifest::read(p)).collect()
+    super::sidecar_fetch::resolve_embeddings(pkg, &super::sidecar_fetch::UreqFetcher)?
+        .iter()
+        .map(|p| Manifest::read(p))
+        .collect()
 }
 
 /// The single model every manifest in `manifests` was stamped with; `""` when
@@ -269,17 +272,22 @@ pub(crate) fn run_catalog(
             .get("behaviors")
             .and_then(Value::as_object)
             .ok_or_else(|| anyhow::anyhow!("{} has no `behaviors` map", pkg.index.display()))?;
-        let files = index_registry(&pkg.registry);
+        let files = index_registry_source(&pkg.registry);
         for (name, entry) in behaviors {
             let file = files.get(name).ok_or_else(|| {
                 anyhow::anyhow!(
-                    "{} lists `{name}` but {} holds no {name}.orb",
+                    "{} lists `{name}` but {} holds no {name}.{}",
                     pkg.index.display(),
-                    pkg.registry.display()
+                    pkg.registry.root().display(),
+                    pkg.registry.extension()
                 )
             })?;
-            let dir = relative_dir(&pkg.registry, file).ok_or_else(|| {
-                anyhow::anyhow!("{} is outside {}", file.display(), pkg.registry.display())
+            let dir = relative_dir(pkg.registry.root(), file).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "{} is outside {}",
+                    file.display(),
+                    pkg.registry.root().display()
+                )
             })?;
             if dir.len() < scope.dirs.len() || dir[..scope.dirs.len()] != scope.dirs[..] {
                 continue;
@@ -446,7 +454,9 @@ fn resolve(spec: &str) -> anyhow::Result<Resolved> {
         .map_err(|e| anyhow::anyhow!("cannot resolve `{spec}`: {e}"))?;
     let path = loaded.source_path.clone();
     let schema = loaded.schema.clone();
-    let package = packages.into_iter().find(|p| path.starts_with(&p.registry));
+    let package = packages
+        .into_iter()
+        .find(|p| path.starts_with(p.registry.root()));
     Ok(Resolved {
         path,
         package,
@@ -476,6 +486,22 @@ struct EventsOut {
     emits: Vec<String>,
     listens: Vec<String>,
     transitions: Vec<String>,
+    /// Events whose `emits`/`listens` declaration carries `@tier "domain"`; absent when the source has no declarations.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    domain: Option<Vec<String>>,
+}
+
+fn domain_events(td: &orbital_core::schema::TraitDefinition) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    td.emits
+        .iter()
+        .flatten()
+        .map(|e| (&e.event, &e.tier))
+        .chain(td.listens.iter().flatten().map(|l| (&l.event, &l.tier)))
+        .filter(|(_, tier)| tier.as_deref() == Some("domain"))
+        .filter(|(event, _)| seen.insert((*event).clone()))
+        .map(|(event, _)| event.clone())
+        .collect()
 }
 
 #[derive(Serialize)]
@@ -572,6 +598,7 @@ fn describe_from_signatures(
         emits: str_list(signature.get("emittedEvents")),
         listens: str_list(signature.get("listenedEvents")),
         transitions: str_list(signature.get("transitionEvents")),
+        domain: None,
     };
     let model = single_model(manifests.iter().map(|m| (pkg.name.as_str(), m)))?;
     let _ = used_vector;
@@ -631,6 +658,7 @@ fn describe_from_schema(
                 .map(|t| t.event.clone())
                 .collect(),
         ),
+        domain: Some(domain_events(td)),
     };
     Ok((knobs, events, String::new()))
 }
@@ -663,6 +691,9 @@ struct KnobField {
     synonyms: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tier: Option<String>,
+    /// The `@config.<knob>` this knob's value forwards: its text is owned (and set) there.
+    #[serde(rename = "forwardedFrom", skip_serializing_if = "Option::is_none")]
+    forwarded_from: Option<String>,
 }
 
 /// The events a knob may name: `scalar` for an `event` knob, `member` for an `event`
@@ -716,6 +747,7 @@ fn field_of(
             description: def.description.clone(),
             synonyms: None,
             tier: None,
+            forwarded_from: None,
         };
     if let Some(items) = &def.items {
         let element = field_of("", items, events)?;
@@ -771,6 +803,7 @@ fn knob_field(
         description: cf.description.clone(),
         synonyms: cf.synonyms.clone(),
         tier: cf.tier.clone(),
+        forwarded_from: cf.forwarded_from.clone(),
     })
 }
 
@@ -813,6 +846,11 @@ struct PageOut {
     path: String,
     /// The traits the page mounts: what the behavior declares as standing on its own.
     traits: Vec<String>,
+    /// The page's menu entry (`@label`/`@icon`); absent when the page declares none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    icon: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -830,6 +868,18 @@ struct OrbitalOut {
     expects: Vec<orbital_core::schema::ExpectDeclaration>,
     traits: Vec<TraitOut>,
     pages: Vec<PageOut>,
+    /// Controls this orbital leaves for an embedding organism (`emitsScope external`) that nothing in
+    /// it handles: an importer must route each one or the control is dead.
+    forwards: Vec<ForwardOut>,
+}
+
+#[derive(Serialize)]
+struct ForwardOut {
+    #[serde(rename = "trait")]
+    trait_name: String,
+    event: String,
+    /// The `pattern.prop` sites that render the control.
+    via: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -854,7 +904,7 @@ fn uses_of(schema: &orbital_core::schema::OrbitalSchema) -> Vec<String> {
 }
 
 fn declared_config_of(
-    config: Option<&std::collections::HashMap<String, orbital_core::schema::ConfigField>>,
+    config: Option<&HashMap<String, orbital_core::schema::ConfigField>>,
 ) -> DeclaredConfigOut {
     config
         .into_iter()
@@ -950,6 +1000,8 @@ fn describe_behavior(
     .map_err(|e| anyhow::anyhow!("cannot resolve `{behavior}`: {e}"))?;
     let program = resolve_schema_with_path(schema, &options, Some(&resolved_src.path))
         .map_err(|e| anyhow::anyhow!("cannot resolve `{behavior}`: {e}"))?;
+    let forwards =
+        orbital_compiler::phases::validation::final_program::forwarded_controls(&program);
     let canonical = match (
         &resolved_src.package,
         resolved_src.path.file_stem().and_then(|s| s.to_str()),
@@ -1018,6 +1070,7 @@ fn describe_behavior(
                                 .map(|t| t.event.clone())
                                 .collect(),
                         ),
+                        domain: Some(domain_events(td)),
                     },
                 });
             }
@@ -1036,6 +1089,8 @@ fn describe_behavior(
                         .flatten()
                         .filter_map(|t| t.trait_name().map(str::to_string))
                         .collect(),
+                    label: page.label.clone(),
+                    icon: page.icon.clone(),
                 }),
                 _ => None,
             })
@@ -1057,6 +1112,15 @@ fn describe_behavior(
             entity,
             traits,
             pages,
+            forwards: forwards
+                .iter()
+                .filter(|c| c.orbital == orbital.name)
+                .map(|c| ForwardOut {
+                    trait_name: c.trait_name.clone(),
+                    event: c.event.clone(),
+                    via: c.sites.clone(),
+                })
+                .collect(),
         });
     }
     if let Some(o) = only_orbital {

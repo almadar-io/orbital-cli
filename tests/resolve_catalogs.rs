@@ -1,6 +1,8 @@
 //! `orb resolve` of a program with `locales` writes each locale's merged
 //! catalog beside the resolved `.orb`; stdout has nowhere to put them.
 
+mod common;
+
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -52,7 +54,7 @@ fn folder(tag: &str, locales: bool) -> PathBuf {
 }
 
 fn orb() -> Command {
-    Command::new(PathBuf::from(env!("CARGO_BIN_EXE_orb")))
+    Command::new(common::orb())
 }
 
 #[test]

@@ -6,11 +6,13 @@
 //! `SEXPR_ARITY_MISMATCH`: `not` takes at most 1 argument (see
 //! orbital-compiler's `sexpr::validate::test_arity_mismatch`).
 
+mod common;
+
 use std::path::PathBuf;
 use std::process::Command;
 
 fn orb_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_orb"))
+    common::orb()
 }
 
 fn temp_path(name: &str, ext: &str) -> PathBuf {

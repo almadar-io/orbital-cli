@@ -3,6 +3,8 @@
 //! kernel has nothing to mount. Uses `01-basic-entity.orb`, which has no
 //! `uses` peers, so it runs in a standalone checkout.
 
+mod common;
+
 use orbital_core::schema::TraitReference;
 use std::path::PathBuf;
 use std::process::Command;
@@ -22,7 +24,7 @@ fn compile_frontend(frontend: &str, tag: &str) -> PathBuf {
         std::process::id()
     ));
     let _ = std::fs::remove_dir_all(&out_dir);
-    let output = Command::new(env!("CARGO_BIN_EXE_orbital"))
+    let output = Command::new(common::orbital())
         .args([
             "compile",
             orbital_rust_root()

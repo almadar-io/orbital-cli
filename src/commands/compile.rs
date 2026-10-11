@@ -2,48 +2,36 @@
 //! frontend/backend compilation and docker-compose emission.
 
 use crate::utils::{
-    copy_locales, detect_language, detect_syntax, find_shells_dir, load_project_component_mappings,
-    strip_json_nulls, translate_schema_content, InputSyntax,
+    detect_language, detect_syntax, load_project_patterns, shell_programs, strip_json_nulls,
+    translate_schema_content, InputSyntax,
 };
 use crate::{ServerFrameworkArg, ShellMode, ShellType};
+use serde_json::Value;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-/// Parse + resolve the schema a client bundles: a native shell's
-/// `resolved_schema.json` (Program B, §159 — the in-app kernel mounts on-device
-/// with no compiler). It needs the same flattened `OrbitalSchema` `orb verify`
-/// and `orb dev` resolve. `source_path` is the ORIGINAL `.orb`/`.lolo` location
-/// (never `compile_path`, which for a `.lolo` source is a lowered temp file),
-/// so relative `uses` imports (e.g. `almadar-behaviors/*`) resolve exactly
-/// like `orb verify` does. The one resolver:
-/// `orbital_verify::resolve_schema_with_source` wraps the same
-/// `orbital_compiler::resolve_schema_with_path` pipeline `orb verify` runs.
-fn resolve_native_shell_schema(
+/// The resolved program a shell embeds as data: `resolved_schema.json` for the native in-app
+/// kernel and `browserSchema.json` for the TypeScript client's browser-store legs. It is the
+/// program as the compiled path compiles it, lazy behaviors included (their pages are routes of
+/// the same app), resolved against the original source (never `compile_path`, which for a
+/// `.lolo` source is a lowered temp file) so relative imports find their files.
+pub(crate) fn resolve_compiled_schema(
     compile_path: &Path,
     source_path: &Path,
 ) -> anyhow::Result<orbital_core::OrbitalSchema> {
     let schema = orbital_compiler::phases::parse_file(compile_path).map_err(|e| {
-        anyhow::anyhow!("Failed to parse schema for resolved-schema resource: {}", e)
-    })?;
-    orbital_verify::resolve_schema_with_source(schema, Some(source_path)).map_err(|e| {
         anyhow::anyhow!(
-            "Failed to resolve schema for resolved-schema resource: {}",
+            "Failed to parse schema for the embedded resolved schema: {}",
             e
         )
-    })
-}
-
-/// The schema the TypeScript client bundles as `browserSchema.json` for its
-/// browser-store legs: the program as the compiled path compiles it, lazy
-/// behaviors included (their pages are route chunks of the same app).
-fn resolve_browser_schema(
-    compile_path: &Path,
-    source_path: &Path,
-) -> anyhow::Result<orbital_core::OrbitalSchema> {
-    let schema = orbital_compiler::phases::parse_file(compile_path)
-        .map_err(|e| anyhow::anyhow!("Failed to parse schema for browserSchema.json: {}", e))?;
+    })?;
     let options = compiler_options_or_bail()?;
-    orbital_compiler::phases::resolve_compiled_program_with_path(schema, &options, Some(source_path))
-        .map_err(|e| anyhow::anyhow!("Failed to resolve schema for browserSchema.json: {}", e))
+    orbital_compiler::phases::resolve_compiled_program_with_path(
+        schema,
+        &options,
+        Some(source_path),
+    )
+    .map_err(|e| anyhow::anyhow!("Failed to resolve the embedded resolved schema: {}", e))
 }
 
 /// `CompilerOptions::from_env()`, but bail with a plain error when behavior-
@@ -53,7 +41,7 @@ fn resolve_browser_schema(
 /// installed.
 fn compiler_options_or_bail() -> anyhow::Result<orbital_compiler::CompilerOptions> {
     let mut options = orbital_compiler::CompilerOptions::from_env();
-    options.service_runtimes = Some(crate::utils::load_services_registry(None).runtimes);
+    options.service_runtimes = Some(crate::utils::load_services_registry(None)?.runtimes);
     if let Some(e) = &options.discovery_error {
         anyhow::bail!(
             "[{}] {} (validator environment error — the schema was NOT compiled; retry, do not edit the schema)",
@@ -62,6 +50,19 @@ fn compiler_options_or_bail() -> anyhow::Result<orbital_compiler::CompilerOption
         );
     }
     Ok(options)
+}
+
+fn generate_options(verbose: bool, mode: orbital_compiler::ShellMode) -> anyhow::Result<orbital_compiler::GenerateOptions> {
+    Ok(orbital_compiler::GenerateOptions {
+        // from_env, not Default: `orb compile` must honor installed behavior
+        // packages exactly like `orb emit` (C-COMPILE-IGNORES-DEV-REGISTRIES).
+        compiler: compiler_options_or_bail()?,
+        copy_template: true,
+        clean: false,
+        verbose,
+        mode,
+        ..Default::default()
+    })
 }
 
 /// Compile schema to generated code
@@ -79,24 +80,9 @@ pub(crate) fn compile_schema(
     server_framework: ServerFrameworkArg,
     emit_orb: Option<&std::path::Path>,
 ) -> anyhow::Result<()> {
-    use orbital_compiler::shell::{python_shell, typescript_shell, typescript_shell_hono};
-
-    use orbital_compiler::{generate::generate_from_file_with_source, GenerateOptions};
-    use orbital_shell_android::{AndroidBackend, AndroidShell};
-    use orbital_shell_chrome::{ChromeBackend, ChromeShell};
-    use orbital_shell_ios::{IosBackend, IosShell};
-    use orbital_shell_mobile::{MobileBackend, MobileShell};
-    use orbital_shell_python::PythonBackend;
-    use orbital_shell_rust::{RustBackend, RustShell};
-    use orbital_shell_typescript::TypeScriptBackend;
-    use std::path::PathBuf;
-
-    // Get the shells directory using runtime detection
-    let shells_dir = find_shells_dir();
-
     // Handle mixed compilation (--frontend + --backend)
     if frontend.is_some() || backend.is_some() {
-        return compile_mixed(path, output, frontend, backend, &shells_dir, verbose);
+        return compile_mixed(path, output, frontend, backend, verbose);
     }
 
     println!("Compiling schema: {}", path.display());
@@ -187,247 +173,37 @@ pub(crate) fn compile_schema(
     let content_raw = std::fs::read_to_string(&compile_path)
         .map_err(|e| anyhow::anyhow!("Failed to read schema file: {}", e))?;
 
-    let options = GenerateOptions {
-        // from_env, not Default: `orb compile` must honor installed behavior
-        // packages exactly like `orb emit` — a Default here silently compiled
-        // against the embedded std registry only (C-COMPILE-IGNORES-DEV-REGISTRIES).
-        compiler: compiler_options_or_bail()?,
-        copy_template: true,
-        clean: false,
+    let options = generate_options(
         verbose,
-        mode: match mode {
+        match mode {
             ShellMode::Full => orbital_compiler::ShellMode::Full,
             ShellMode::Client => orbital_compiler::ShellMode::Client,
             ShellMode::Server => orbital_compiler::ShellMode::Server,
         },
-        ..Default::default()
-    };
+    )?;
 
-    match shell {
-        ShellType::Typescript => {
-            let sf = match server_framework {
-                ServerFrameworkArg::Express => orbital_shell_typescript::ServerFramework::Express,
-                ServerFrameworkArg::Hono => orbital_shell_typescript::ServerFramework::Hono,
-            };
-            let ts_shell = match sf {
-                orbital_shell_typescript::ServerFramework::Hono => {
-                    typescript_shell_hono(&shells_dir)
-                }
-                orbital_shell_typescript::ServerFramework::Express => typescript_shell(&shells_dir),
-            };
-            // Load project-specific component mappings for code generation
-            let extra_mappings = load_project_component_mappings(path, patterns_path);
-            let detected_lang = detect_language(&content_raw).unwrap_or_else(|| "en".to_string());
-            let backend = TypeScriptBackend {
-                extra_mappings,
-                schema_language: detected_lang,
-                dev_logs,
-                server_framework: sf,
-                browser_schema: Some(resolve_browser_schema(&compile_path, path)?),
-                ..TypeScriptBackend::default()
-            };
-            let result = generate_from_file_with_source(&compile_path, path, output, &ts_shell, &backend, &options)?;
-
-            // Copy project locales into output so the generated App.tsx import resolves
-            copy_locales(path, output);
-
-            // `public "./public"` lands at the client's public root, served as-is.
-            let lowered = orbital_compiler::parse_file(&compile_path)
-                .map_err(|e| anyhow::anyhow!("Failed to read {}: {}", compile_path.display(), e))?;
-            if let Some(public) = &lowered.public_dir {
-                let from = orbital_compiler::phases::public::resolve_public_dir(path, public)
-                    .map_err(|message| anyhow::anyhow!("{message}"))?;
-                orbital_compiler::phases::public::copy_public(&from, &output.join("packages/client/public"))
-                    .map_err(|e| anyhow::anyhow!("Failed to copy public folder: {e}"))?;
-            }
-
-            println!("\n✅ Generated {} files", result.files.len());
-
-            if !result.warnings.is_empty() {
-                println!("\nWarnings:");
-                for warning in &result.warnings {
-                    println!("  ⚠️  {}", warning);
-                }
-            }
-
-            // Write .env file with backend URL if provided
-            if let Some(url) = &backend_url {
-                let env_path = output.join(".env");
-                let env_content =
-                    format!("# Backend API URL (auto-generated)\nVITE_API_URL={}\n", url);
-                // Append to existing .env or create new
-                if env_path.exists() {
-                    let existing = std::fs::read_to_string(&env_path)?;
-                    if !existing.contains("VITE_API_URL=") {
-                        std::fs::write(&env_path, format!("{}\n{}", existing.trim(), env_content))?;
-                    } else {
-                        // Update existing VITE_API_URL
-                        let updated: String = existing
-                            .lines()
-                            .map(|line| {
-                                if line.starts_with("VITE_API_URL=") {
-                                    format!("VITE_API_URL={}", url)
-                                } else {
-                                    line.to_string()
-                                }
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        std::fs::write(&env_path, updated)?;
-                    }
-                } else {
-                    std::fs::write(&env_path, env_content)?;
-                }
-                println!("🔧 Configured backend URL: {}", url);
-            }
+    let mut shell_options = BTreeMap::new();
+    if let ShellType::Typescript = shell {
+        let framework = match server_framework {
+            ServerFrameworkArg::Express => "express",
+            ServerFrameworkArg::Hono => "hono",
+        };
+        shell_options.insert("framework".to_string(), Value::from(framework));
+        shell_options.insert(
+            "schemaLanguage".to_string(),
+            Value::from(detect_language(&content_raw).unwrap_or_else(|| "en".to_string())),
+        );
+        shell_options.insert("devLogs".to_string(), Value::from(if dev_logs { "true" } else { "false" }));
+        if let Some(patterns) = load_project_patterns(path, patterns_path) {
+            shell_options.insert("projectPatterns".to_string(), patterns);
         }
-        ShellType::Python => {
-            let py_shell = python_shell(&shells_dir);
-            let backend = PythonBackend::new();
-            let result = generate_from_file_with_source(&compile_path, path, output, &py_shell, &backend, &options)?;
-
-            println!("\n✅ Generated {} files", result.files.len());
-
-            if !result.warnings.is_empty() {
-                println!("\nWarnings:");
-                for warning in &result.warnings {
-                    println!("  ⚠️  {}", warning);
-                }
-            }
-
-            println!("\nNext steps:");
-            println!("  cd {}", output.display());
-            println!("  python -m venv .venv && source .venv/bin/activate");
-            println!("  pip install -e .");
-            println!("  python -m orbital_app.main");
-        }
-        ShellType::Mobile => {
-            let mobile_shell = MobileShell::new();
-            let mobile_backend = MobileBackend::new();
-            let result = generate_from_file_with_source(&compile_path, path,
-                output,
-                &mobile_shell,
-                &mobile_backend,
-                &options,
-            )?;
-
-            println!("\n✅ Generated {} files", result.files.len());
-
-            if !result.warnings.is_empty() {
-                println!("\nWarnings:");
-                for warning in &result.warnings {
-                    println!("  ⚠️  {}", warning);
-                }
-            }
-
-            println!("\nNext steps:");
-            println!("  cd {}", output.display());
-            println!("  npm install");
-            println!("  npx expo start");
-        }
-        ShellType::Rust => {
-            let rust_shell = RustShell::new();
-            let rust_backend = RustBackend::new();
-            let result =
-                generate_from_file_with_source(&compile_path, path, output, &rust_shell, &rust_backend, &options)?;
-
-            println!("\n✅ Generated {} files", result.files.len());
-
-            if !result.warnings.is_empty() {
-                println!("\nWarnings:");
-                for warning in &result.warnings {
-                    println!("  ⚠️  {}", warning);
-                }
-            }
-
-            println!("\nNext steps:");
-            println!("  cd {}", output.display());
-            println!("  cargo check");
-            println!("  cargo run");
-        }
-        ShellType::Android => {
-            let android_shell = AndroidShell::new();
-            let resolved_schema = resolve_native_shell_schema(&compile_path, path)?;
-            let android_backend = AndroidBackend::new().with_resolved_schema(resolved_schema);
-            let result = generate_from_file_with_source(&compile_path, path,
-                output,
-                &android_shell,
-                &android_backend,
-                &options,
-            )?;
-
-            println!("\n✅ Generated {} files", result.files.len());
-
-            if !result.warnings.is_empty() {
-                println!("\nWarnings:");
-                for warning in &result.warnings {
-                    println!("  ⚠️  {}", warning);
-                }
-            }
-
-            if std::env::var("ANDROID_HOME").is_err() && std::env::var("ANDROID_SDK_ROOT").is_err()
-            {
-                println!(
-                    "\n⚠️  Neither ANDROID_HOME nor ANDROID_SDK_ROOT is set — local.properties was not written; set one before running ./gradlew"
-                );
-            }
-
-            println!("\nNext steps:");
-            println!("  cd {}", output.display());
-            println!("  ./gradlew assembleDebug");
-        }
-        ShellType::Ios => {
-            let ios_shell = IosShell::new();
-            let resolved_schema = resolve_native_shell_schema(&compile_path, path)?;
-            let ios_backend = IosBackend::new().with_resolved_schema(resolved_schema);
-            let result =
-                generate_from_file_with_source(&compile_path, path, output, &ios_shell, &ios_backend, &options)?;
-
-            // Rung-3 prevention gate (no existing call site runs
-            // `Shell::validate_structure`/layout checks for any shell today):
-            // catch a template/generated-output layout defect right after
-            // generation, using this compile's own manifest.
-            if options.copy_template {
-                use orbital_compiler::shell::Shell as _;
-                ios_shell.validate_structure(output)?;
-                let manifest: Vec<String> = result.files.iter().map(|f| f.path.clone()).collect();
-                ios_shell.validate_generated_layout(output, &manifest)?;
-            }
-
-            println!("\n✅ Generated {} files", result.files.len());
-
-            if !result.warnings.is_empty() {
-                println!("\nWarnings:");
-                for warning in &result.warnings {
-                    println!("  ⚠️  {}", warning);
-                }
-            }
-
-            println!("\nNext steps:");
-            println!("  cd {}", output.display());
-            println!("  ./orb-build.sh");
-        }
-        ShellType::ChromeExtension => {
-            let chrome_shell = ChromeShell::new();
-            let resolved_schema = resolve_native_shell_schema(&compile_path, path)?;
-            let program_json = serde_json::to_value(&resolved_schema)?;
-            let services = crate::utils::load_services_registry(None);
-            let program = orbital_shell_chrome::check_program(&program_json, &services.runtimes)
-                .map_err(|errors| anyhow::anyhow!(errors.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("\n")))?;
-            let chrome_backend = ChromeBackend::new(resolved_schema, program);
-            let result = generate_from_file_with_source(&compile_path, path, output, &chrome_shell, &chrome_backend, &options)?;
-
-            println!("\n✅ Generated {} files", result.files.len());
-            for warning in &result.warnings {
-                println!("  ⚠️  {}", warning);
-            }
-            println!("\nNext steps:");
-            println!("  cd {}", output.display());
-            println!("  pnpm install && pnpm build");
-            println!("  Load dist/ as an unpacked extension at chrome://extensions");
+        if let Some(url) = backend_url {
+            shell_options.insert("backendUrl".to_string(), Value::from(url));
         }
     }
 
+    let response = shell_programs::generate(shell.program(), &compile_path, path, output, &options, shell_options)?;
+    shell_programs::report(&response);
     Ok(())
 }
 
@@ -437,18 +213,19 @@ fn compile_mixed(
     output: &PathBuf,
     frontend: Option<ShellType>,
     backend: Option<ShellType>,
-    shells_dir: &PathBuf,
     verbose: bool,
 ) -> anyhow::Result<()> {
-    use orbital_compiler::shell::{python_shell, typescript_shell};
-
-    use orbital_compiler::{generate::generate_from_file_with_source, GenerateOptions};
-    use orbital_shell_android::{AndroidBackend, AndroidShell};
-    use orbital_shell_ios::{IosBackend, IosShell};
-    use orbital_shell_mobile::{MobileBackend, MobileShell};
-    use orbital_shell_python::PythonBackend;
-    use orbital_shell_rust::{RustBackend, RustShell};
-    use orbital_shell_typescript::TypeScriptBackend;
+    for shell in [frontend, backend].into_iter().flatten() {
+        if let ShellType::ChromeExtension = shell {
+            anyhow::bail!("The chrome-extension shell is a whole program; compile it without --frontend/--backend");
+        }
+    }
+    match backend {
+        Some(ShellType::Mobile) => anyhow::bail!("Mobile shell cannot be used as a backend"),
+        Some(ShellType::Android) => anyhow::bail!("Android shell cannot be used as a backend"),
+        Some(ShellType::Ios) => anyhow::bail!("iOS shell cannot be used as a backend"),
+        _ => {}
+    }
 
     println!("Compiling schema: {}", path.display());
     println!("Output directory: {}", output.display());
@@ -491,169 +268,27 @@ fn compile_mixed(
 
     let mut total_files = 0;
 
-    // Compile frontend
     if let Some(frontend_shell) = frontend {
         let frontend_output = output.join("frontend");
-        println!(
-            "  Frontend: {:?} -> {}",
-            frontend_shell,
-            frontend_output.display()
-        );
-
-        let options = GenerateOptions {
-            compiler: compiler_options_or_bail()?,
-            copy_template: true,
-            clean: false,
-            verbose,
-            mode: orbital_compiler::ShellMode::Client,
-            ..Default::default()
-        };
-
-        let detected_lang_mixed = detect_language(&content_raw).unwrap_or_else(|| "en".to_string());
-        match frontend_shell {
-            ShellType::Typescript => {
-                let ts_shell = typescript_shell(shells_dir);
-                let backend = TypeScriptBackend {
-                    schema_language: detected_lang_mixed.clone(),
-                    browser_schema: Some(resolve_browser_schema(&compile_path, path)?),
-                    ..TypeScriptBackend::new()
-                };
-                let result = generate_from_file_with_source(&compile_path, path,
-                    &frontend_output,
-                    &ts_shell,
-                    &backend,
-                    &options,
-                )?;
-                total_files += result.files.len();
-            }
-            ShellType::Python => {
-                let py_shell = python_shell(shells_dir);
-                let backend = PythonBackend::new();
-                let result = generate_from_file_with_source(&compile_path, path,
-                    &frontend_output,
-                    &py_shell,
-                    &backend,
-                    &options,
-                )?;
-                total_files += result.files.len();
-            }
-            ShellType::Mobile => {
-                let mob_shell = MobileShell::new();
-                let mob_backend = MobileBackend::new();
-                let result = generate_from_file_with_source(&compile_path, path,
-                    &frontend_output,
-                    &mob_shell,
-                    &mob_backend,
-                    &options,
-                )?;
-                total_files += result.files.len();
-            }
-            ShellType::Rust => {
-                let rust_shell = RustShell::new();
-                let rust_backend = RustBackend::new();
-                let result = generate_from_file_with_source(&compile_path, path,
-                    &frontend_output,
-                    &rust_shell,
-                    &rust_backend,
-                    &options,
-                )?;
-                total_files += result.files.len();
-            }
-            ShellType::Android => {
-                let android_shell = AndroidShell::new();
-                let resolved_schema = resolve_native_shell_schema(&compile_path, path)?;
-                let android_backend = AndroidBackend::new().with_resolved_schema(resolved_schema);
-                let result = generate_from_file_with_source(&compile_path, path,
-                    &frontend_output,
-                    &android_shell,
-                    &android_backend,
-                    &options,
-                )?;
-                total_files += result.files.len();
-            }
-            ShellType::ChromeExtension => {
-                return Err(anyhow::anyhow!("The chrome-extension shell is a whole program; compile it without --frontend/--backend"));
-            }
-            ShellType::Ios => {
-                let ios_shell = IosShell::new();
-                let resolved_schema = resolve_native_shell_schema(&compile_path, path)?;
-                let ios_backend = IosBackend::new().with_resolved_schema(resolved_schema);
-                let result = generate_from_file_with_source(&compile_path, path,
-                    &frontend_output,
-                    &ios_shell,
-                    &ios_backend,
-                    &options,
-                )?;
-                total_files += result.files.len();
-            }
+        println!("  Frontend: {:?} -> {}", frontend_shell, frontend_output.display());
+        let mut shell_options = BTreeMap::new();
+        if let ShellType::Typescript = frontend_shell {
+            shell_options.insert(
+                "schemaLanguage".to_string(),
+                Value::from(detect_language(&content_raw).unwrap_or_else(|| "en".to_string())),
+            );
         }
+        let options = generate_options(verbose, orbital_compiler::ShellMode::Client)?;
+        let response = shell_programs::generate(frontend_shell.program(), &compile_path, path, &frontend_output, &options, shell_options)?;
+        total_files += response.files.len();
     }
 
-    // Compile backend
     if let Some(backend_shell) = backend {
         let backend_output = output.join("backend");
-        println!(
-            "  Backend: {:?} -> {}",
-            backend_shell,
-            backend_output.display()
-        );
-
-        let options = GenerateOptions {
-            compiler: compiler_options_or_bail()?,
-            copy_template: true,
-            clean: false,
-            verbose,
-            mode: orbital_compiler::ShellMode::Server,
-            ..Default::default()
-        };
-
-        match backend_shell {
-            ShellType::Typescript => {
-                let ts_shell = typescript_shell(shells_dir);
-                let backend = TypeScriptBackend::new();
-                let result = generate_from_file_with_source(&compile_path, path,
-                    &backend_output,
-                    &ts_shell,
-                    &backend,
-                    &options,
-                )?;
-                total_files += result.files.len();
-            }
-            ShellType::Python => {
-                let py_shell = python_shell(shells_dir);
-                let backend = PythonBackend::new();
-                let result = generate_from_file_with_source(&compile_path, path,
-                    &backend_output,
-                    &py_shell,
-                    &backend,
-                    &options,
-                )?;
-                total_files += result.files.len();
-            }
-            ShellType::Rust => {
-                let rust_shell = RustShell::new();
-                let rust_backend = RustBackend::new();
-                let result = generate_from_file_with_source(&compile_path, path,
-                    &backend_output,
-                    &rust_shell,
-                    &rust_backend,
-                    &options,
-                )?;
-                total_files += result.files.len();
-            }
-            ShellType::Mobile => {
-                return Err(anyhow::anyhow!("Mobile shell cannot be used as a backend"));
-            }
-            ShellType::Android => {
-                return Err(anyhow::anyhow!("Android shell cannot be used as a backend"));
-            }
-            ShellType::Ios => {
-                return Err(anyhow::anyhow!("iOS shell cannot be used as a backend"));
-            }
-            ShellType::ChromeExtension => {
-                return Err(anyhow::anyhow!("The chrome-extension shell is a whole program; compile it without --frontend/--backend"));
-            }
-        }
+        println!("  Backend: {:?} -> {}", backend_shell, backend_output.display());
+        let options = generate_options(verbose, orbital_compiler::ShellMode::Server)?;
+        let response = shell_programs::generate(backend_shell.program(), &compile_path, path, &backend_output, &options, BTreeMap::new())?;
+        total_files += response.files.len();
     }
 
     println!("\n✅ Generated {} total files", total_files);
@@ -835,7 +470,9 @@ fn generate_docker_compose(frontend: Option<ShellType>, backend: Option<ShellTyp
                 compose.push_str("      - backend\n");
             }
             ShellType::ChromeExtension => {
-                compose.push_str("  # Chrome extension - build with: pnpm build, then load dist/ unpacked\n");
+                compose.push_str(
+                    "  # Chrome extension - build with: pnpm build, then load dist/ unpacked\n",
+                );
             }
             ShellType::Ios => {
                 compose.push_str("  # iOS app - run locally with:\n");
@@ -847,4 +484,49 @@ fn generate_docker_compose(frontend: Option<ShellType>, backend: Option<ShellTyp
     }
 
     compose
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lazy_fixture() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../tools/verify-efficacy/fixtures/lazy-walk/good.lolo")
+    }
+
+    fn trait_names(schema: &orbital_core::OrbitalSchema) -> Vec<String> {
+        serde_json::to_value(schema).unwrap()["orbitals"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .flat_map(|o| o["traits"].as_array().cloned().unwrap_or_default())
+            .filter_map(|t| t["name"].as_str().map(str::to_string))
+            .collect()
+    }
+
+    #[test]
+    fn the_native_resolved_schema_carries_the_lazy_orbitals_traits() {
+        let path = lazy_fixture();
+        if !path.exists() {
+            eprintln!("skipping: {} is a monorepo fixture", path.display());
+            return;
+        }
+        orbital_compiler::loader::register_source_lowerer(crate::lower_lolo_file);
+        let lowered = orbital_lolo::parse_and_lower(&path).expect("lower the fixture");
+        let dir = std::env::temp_dir().join(format!("native-lazy-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let orb = dir.join("good.orb");
+        std::fs::write(&orb, serde_json::to_string(&lowered).unwrap()).unwrap();
+        let names = trait_names(&resolve_compiled_schema(&orb, &path).unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            names.iter().any(|n| n == "HomeView"),
+            "control: the eager trait: {names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n == "TeamSectionTeamRoster"),
+            "the lazy trait is in the kernel schema: {names:?}"
+        );
+    }
 }

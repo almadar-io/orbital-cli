@@ -2,13 +2,13 @@
 //! Public surface (`pub`/`pub(crate)`) is preserved verbatim.
 
 pub(crate) mod agents;
+pub(crate) mod desktop;
 pub(crate) mod detect;
 pub(crate) mod diagnostics;
 pub(crate) mod evaluate;
 pub(crate) mod i18n;
 pub(crate) mod patterns;
-pub(crate) mod shells;
-pub(crate) mod strings;
+pub(crate) mod shell_programs;
 
 pub(crate) use agents::{find_bun, spawn_agent, spawn_agent_with_args};
 pub(crate) use detect::{
@@ -18,8 +18,8 @@ pub(crate) use detect::{
 pub use detect::{parse_schema_auto_typed, parse_schema_auto_typed_with_map, TypedParseError};
 pub(crate) use diagnostics::merge_post_inline_diagnostics;
 pub(crate) use evaluate::evaluate_sexpr;
-pub(crate) use i18n::{copy_locales, detect_language, translate_schema_content};
+pub(crate) use i18n::{detect_language, translate_schema_content};
 pub(crate) use patterns::{
-    load_extra_patterns, load_project_component_mappings, load_services_registry,
+    load_extra_patterns, load_project_patterns, load_services_registry,
+    require_language_data,
 };
-pub(crate) use shells::find_shells_dir;

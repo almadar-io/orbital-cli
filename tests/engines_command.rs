@@ -34,6 +34,10 @@ impl Project {
             "{\n  \"name\": \"engines-command-test\",\n  \"private\": true\n}\n",
         )
         .unwrap();
+        orbital_test_support::link_installed_language(
+            dir.path(),
+            Path::new(env!("CARGO_MANIFEST_DIR")),
+        );
         Self { dir }
     }
 

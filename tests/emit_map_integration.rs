@@ -4,11 +4,13 @@
 //! See `docs/Almadar_Compiler_Emit_Code.md` §17. These cover file-level
 //! granularity only — per-expression spans land with Phase 5.
 
+mod common;
+
 use std::path::PathBuf;
 use std::process::Command;
 
 fn orb_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_orb"))
+    common::orb()
 }
 
 fn std_modal_orb() -> PathBuf {

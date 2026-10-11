@@ -5,11 +5,13 @@
 //! The `--json` path used to drop that `Err` (`if let Ok`) and report
 //! `valid:true`, disagreeing with plain `orb validate`.
 
+mod common;
+
 use std::path::PathBuf;
 use std::process::Command;
 
 fn orb_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_orb"))
+    common::orb()
 }
 
 fn validate_json(orb: &str, name: &str) -> serde_json::Value {

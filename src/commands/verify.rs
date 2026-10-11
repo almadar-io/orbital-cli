@@ -4,7 +4,7 @@
 //!
 //! The flagless invocation (`orb verify FILE`) is EXACTLY today's Layer 1 (kernel
 //! circuit, `orbital-verify`) + Layer 2 (client render contract,
-//! `orbital_client::render_probe`) run — `run_verify_classic` below is that path,
+//! `orb-desktop`'s render probe) run — `run_verify_classic` below is that path,
 //! untouched. Requesting another engine, a non-standard tier, or `--json` routes
 //! through `run_verify_unified`, which folds every engine's findings into one
 //! `UnifiedVerifyReport` (`commands/engines.rs`). Fail-closed: non-zero exit if
@@ -145,29 +145,21 @@ pub(crate) fn run_verify(args: VerifyCliArgs) -> Result<()> {
                 "no .orb targets (pass a FILE, a behavior NAME, or --registry [--topic <t>])"
             );
         }
-        #[cfg(feature = "screenshot")]
-        {
-            let mut ok = true;
-            for target in &targets {
-                println!("frames: {}", display(target));
-                match run_screenshot_frames(target, &dir) {
-                    Ok(_) => {}
-                    Err(e) => {
-                        ok = false;
-                        eprintln!("[ERROR] {}: {e}", display(target));
-                    }
-                }
+        let mut ok = true;
+        for target in &targets {
+            println!("frames: {}", display(target));
+            let item = target.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown").to_string();
+            let captured = orbital_verify::corpus::resolve_file(target)
+                .and_then(|schema| crate::utils::desktop::frames(&item, schema, &dir));
+            if let Err(e) = captured {
+                ok = false;
+                eprintln!("[ERROR] {}: {e}", display(target));
             }
-            if !ok {
-                std::process::exit(1);
-            }
-            return Ok(());
         }
-        #[cfg(not(feature = "screenshot"))]
-        {
-            let _ = dir;
-            anyhow::bail!("--screenshot-frames requires `orb` built with `--features screenshot`");
+        if !ok {
+            std::process::exit(1);
         }
+        return Ok(());
     }
 
     let targets = collect_targets(
@@ -529,8 +521,8 @@ pub(crate) struct VerifyOneOutcome {
     pub ok: bool,
     pub l0_errors: Vec<String>,
     pub l1: Option<orbital_verify::report::Report>,
-    pub l2: Option<orbital_client::render_probe::RenderReport>,
-    pub l2_server: Option<orbital_client::render_probe::RenderReport>,
+    pub l2: Option<orbital_core::render_report::RenderReport>,
+    pub l2_server: Option<orbital_core::render_report::RenderReport>,
     pub shell: Option<orbital_verify::observers::Verdict>,
 }
 
@@ -573,9 +565,13 @@ fn verify_one(
     // (`run_full_validation`) with `orb validate`; the two can never diverge.
     {
         let extra_patterns = crate::utils::load_extra_patterns(path, None);
-        let service_registry = crate::utils::load_services_registry(None);
-        let l0 =
-            crate::commands::validate::run_full_validation(path, extra_patterns, service_registry, false)?;
+        let service_registry = crate::utils::load_services_registry(None)?;
+        let l0 = crate::commands::validate::run_full_validation(
+            path,
+            extra_patterns,
+            service_registry,
+            false,
+        )?;
         // The 0 errors / 0 warnings bar: a warning fails Layer 0 like an error.
         let l0_ok =
             crate::commands::validate::validation_passes(l0.errors.len(), l0.warnings.len(), true);
@@ -701,20 +697,26 @@ fn verify_one(
 
     // Layer 2 — client render contract (enforces the bindings L1 deferred), in-process
     // kernel. Skipped entirely at the smoke tier (no browser/client layer at all).
-    let mut l2: Option<orbital_client::render_probe::RenderReport> = None;
-    let mut l2_server: Option<orbital_client::render_probe::RenderReport> = None;
+    let mut l2: Option<orbital_core::render_report::RenderReport> = None;
+    let mut l2_server: Option<orbital_core::render_report::RenderReport> = None;
     let mut l2_server_ok = true;
     if run_l2 {
-        let report = orbital_client::render_probe::probe_schema_scoped(
-            &item,
-            schema.clone(),
-            resolved_traits.as_deref(),
-        )?;
+        let report = crate::utils::desktop::probe(&item, schema.clone(), resolved_traits.as_deref(), false)?;
         emit(json_mode, report.headline());
         for v in &report.verdicts {
             if !v.passed {
                 emit(json_mode, format!("    L2 FAIL {} — {}", v.name, v.detail));
             }
+        }
+        if !report.stubbed.is_empty() {
+            emit(
+                json_mode,
+                format!(
+                    "    ({} stubbed by the renderer, reported not FAILed: {})",
+                    report.stubbed.len(),
+                    report.stubbed.join(", ")
+                ),
+            );
         }
         if !report.access_scoped_empty.is_empty() {
             emit(
@@ -730,11 +732,7 @@ fn verify_one(
         // Layer 2 (server) — the SAME render contract driven over real HTTP against a
         // live `orbital-server`, verifying server routes + serialization + client together.
         if server_effective {
-            let l2s = super::verify_server::probe_over_http(
-                &item,
-                schema.clone(),
-                resolved_traits.as_deref(),
-            )?;
+            let l2s = crate::utils::desktop::probe(&item, schema.clone(), resolved_traits.as_deref(), true)?;
             emit(json_mode, format!("{} [server]", l2s.headline()));
             for v in &l2s.verdicts {
                 if !v.passed {
@@ -781,24 +779,15 @@ fn verify_one(
             }
         }
 
-        // Layer 3 — headless screenshot (opt-in; only when the binary was built with it).
+        // Layer 3 — headless screenshot (opt-in).
         if let Some(dir) = screenshot_dir {
-            #[cfg(feature = "screenshot")]
-            match orbital_client::screenshot::screenshot_schema(&item, schema.clone(), dir) {
+            match crate::utils::desktop::screenshot(&item, schema.clone(), dir) {
                 Ok(paths) => {
                     for p in paths {
                         emit(json_mode, format!("    📸 {}", p.display()));
                     }
                 }
                 Err(e) => emit(json_mode, format!("    📸 screenshot FAILED — {e}")),
-            }
-            #[cfg(not(feature = "screenshot"))]
-            {
-                let _ = dir;
-                emit(
-                    json_mode,
-                    "    📸 (rebuild orb with `--features screenshot` to capture)",
-                );
             }
         }
 
@@ -846,12 +835,10 @@ fn parse_shell_lang(s: &str) -> Result<orbital_verify::shell::ShellLang> {
     }
 }
 
-/// Emit the schema at `path` to a fresh temp dir using the native shell that
-/// matches `lang`, returning the dir. Reuses the in-process `generate_from_file`
-/// path that `orb compile --shell X` uses — no codegen reimplementation, no
-/// shelling out to the `orbital` binary.
+/// Emit the schema at `path` to a fresh temp dir with the shell program that
+/// matches `lang`, returning the dir: the same program `orb compile --shell X` runs.
 fn emit_shell_to_tmp(path: &Path, lang: orbital_verify::shell::ShellLang) -> Result<PathBuf> {
-    use orbital_compiler::{generate_from_file, GenerateOptions};
+    use orbital_compiler::GenerateOptions;
     use orbital_verify::shell::ShellLang;
 
     let tmp_dir = std::env::temp_dir().join(format!(
@@ -864,11 +851,11 @@ fn emit_shell_to_tmp(path: &Path, lang: orbital_verify::shell::ShellLang) -> Res
     let _ = std::fs::remove_dir_all(&tmp_dir);
     std::fs::create_dir_all(&tmp_dir)?;
 
-    // `generate_from_file` reads `.orb` only; a `.lolo` target lowers through
-    // L1 into a sibling temp `.orb` first — the same source `orb validate`
-    // and the L1/L2 walk already accepted.
+    // The compiler reads `.orb` only; a `.lolo` target lowers through L1 into a
+    // temp `.orb` first — the same source `orb validate` and the L1/L2 walk
+    // already accepted. Relative imports still resolve from `path`.
     let lowered: PathBuf;
-    let path: &Path = if path.extension().and_then(|e| e.to_str()) == Some("lolo") {
+    let compile_path: &Path = if path.extension().and_then(|e| e.to_str()) == Some("lolo") {
         let schema = orbital_lolo::parse_and_lower(path)
             .map_err(|e| anyhow::anyhow!("lower {}: {e}", path.display()))?;
         lowered = tmp_dir.join("lowered.orb");
@@ -889,164 +876,15 @@ fn emit_shell_to_tmp(path: &Path, lang: orbital_verify::shell::ShellLang) -> Res
         ..Default::default()
     };
 
-    match lang {
-        ShellLang::Python => {
-            use orbital_compiler::shell::python_shell;
-            use orbital_shell_python::PythonBackend;
-            let shells_dir = crate::utils::find_shells_dir();
-            let shell = python_shell(&shells_dir);
-            let backend = PythonBackend::new();
-            generate_from_file(path, &tmp_dir, &shell, &backend, &options)?;
-        }
-        ShellLang::Kotlin => {
-            use orbital_shell_android::{AndroidBackend, AndroidShell};
-            let shell = AndroidShell::new();
-            let backend = AndroidBackend::new();
-            generate_from_file(path, &tmp_dir, &shell, &backend, &options)?;
-        }
-        ShellLang::Swift => {
-            use orbital_shell_ios::{IosBackend, IosShell};
-            let shell = IosShell::new();
-            let backend = IosBackend::new();
-            generate_from_file(path, &tmp_dir, &shell, &backend, &options)?;
-        }
-        ShellLang::Rust => {
-            use orbital_shell_rust::{RustBackend, RustShell};
-            let shell = RustShell::new();
-            let backend = RustBackend::new();
-            generate_from_file(path, &tmp_dir, &shell, &backend, &options)?;
-        }
-        ShellLang::TypeScript => {
-            use orbital_compiler::shell::typescript_shell;
-            use orbital_shell_typescript::TypeScriptBackend;
-            let shells_dir = crate::utils::find_shells_dir();
-            let shell = typescript_shell(&shells_dir);
-            let backend = TypeScriptBackend::new();
-            generate_from_file(path, &tmp_dir, &shell, &backend, &options)?;
-        }
-    }
+    let program = match lang {
+        ShellLang::Python => "python",
+        ShellLang::Kotlin => "android",
+        ShellLang::Swift => "ios",
+        ShellLang::Rust => "rust",
+        ShellLang::TypeScript => "typescript",
+    };
+    crate::utils::shell_programs::generate(program, compile_path, path, &tmp_dir, &options, std::collections::BTreeMap::new())?;
     Ok(tmp_dir)
-}
-
-/// Per-frame (state-transition) screenshot capture: for the primary orbital's richest
-/// trait, drive each planned transition in sequence and capture the resulting UI, writing
-/// a `frames.json` manifest (the input to the vision-review workflow). Returns true on success.
-#[cfg(feature = "screenshot")]
-pub(crate) fn run_screenshot_frames(path: &Path, out_dir: &Path) -> Result<bool> {
-    use orbital_client::bridge::{KernelBridge, ServerBridge};
-    use std::sync::Arc;
-
-    let schema = orbital_verify::corpus::resolve_file(path)?;
-    let item = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("unknown")
-        .to_string();
-    std::fs::create_dir_all(out_dir)?;
-
-    // Pick the trait that drives the VISIBLE `main` slot the most (so frames differ as
-    // it transitions) — a backend/lifecycle trait with no `render-ui main` would yield
-    // identical frames. Tie-break on state count.
-    let traits = orbital_verify::planner::inline_traits(&schema);
-    let renders_main = |t: &orbital_core::TraitDefinition| -> usize {
-        t.state_machine
-            .transitions
-            .iter()
-            .filter(|tr| {
-                tr.effects.as_ref().is_some_and(|effs| {
-                    effs.iter().any(|e| {
-                        let s = serde_json::to_string(e).unwrap_or_default();
-                        s.contains("render-ui") && s.contains("\"main\"")
-                    })
-                })
-            })
-            .count()
-    };
-    let Some(td) = traits
-        .iter()
-        .max_by_key(|t| (renders_main(t), t.state_machine.states.len()))
-        .copied()
-    else {
-        anyhow::bail!("no inline traits to walk");
-    };
-    let trait_name = td.name.clone();
-    let wl_entities = orbital_verify::planner::entity_names(&schema);
-    let steps = orbital_verify::planner::plan_trait(td, &wl_entities);
-
-    let mut frames = Vec::new();
-    let mut idx = 0usize;
-    // Frame 0 — the initial full UI (all traits INIT'd).
-    let mut entry = |i: usize, from: &str, event: &str, to: &str, png: &Path| {
-        frames.push(serde_json::json!({
-            "frame": i, "trait": trait_name, "from": from, "event": event, "to": to,
-            "png": png.to_string_lossy(),
-        }));
-    };
-
-    let build_app = || -> Result<orbital_client::rendering::desktop::DesktopApp> {
-        let bridge = Arc::new(
-            KernelBridge::new(schema.clone()).map_err(|e| anyhow::anyhow!("bridge: {e}"))?,
-        );
-        orbital_client::screenshot::seed_entities(&bridge, &schema);
-        let mut app = orbital_client::rendering::desktop::DesktopApp::new_headless(
-            schema.clone(),
-            Arc::clone(&bridge) as Arc<dyn ServerBridge>,
-        );
-        // Drive (and display) the trait we're walking, not the orbital's first trait.
-        app.set_active_trait(&trait_name);
-        app.init_all_traits_blocking();
-        Ok(app)
-    };
-
-    {
-        let mut app = build_app()?;
-        // Pump INIT's fetch→`<X>Loaded` emits to quiescence (as the real frame loop does)
-        // so the initial frame shows the natural *settled* state — a populated data table,
-        // not a frozen spinner. The per-transition frames below stay hermetic.
-        app.settle(8);
-        let png = out_dir.join(format!("{item}.frame{idx:02}.initial.png"));
-        orbital_client::screenshot::capture(&mut app, &png)?;
-        entry(idx, "·", "INIT", app.current_state_name(), &png);
-        println!(
-            "    📸 frame {idx} INIT → {} — {}",
-            app.current_state_name(),
-            png.display()
-        );
-        idx += 1;
-    }
-
-    // One hermetic frame per planned transition (replay to `from`, then fire the event).
-    for step in steps.iter().take(10) {
-        let mut app = build_app()?;
-        if let Some(path) = orbital_verify::planner::replay_path(td, &step.from, &wl_entities) {
-            for (ev, pl) in path {
-                let v = serde_json::from_value(pl).unwrap_or(orbital_core::Value::Null);
-                app.drive_blocking(&ev, Some(&trait_name), v);
-            }
-        }
-        let payload =
-            serde_json::from_value(step.payload.clone()).unwrap_or(orbital_core::Value::Null);
-        app.drive_blocking(&step.event, Some(&trait_name), payload);
-        // The planner's expected target for THIS trait (current_state_name tracks the
-        // active/first trait, not the one being driven).
-        let to = step.to.clone();
-        let png = out_dir.join(format!("{item}.frame{idx:02}.{}.png", step.event));
-        orbital_client::screenshot::capture(&mut app, &png)?;
-        entry(idx, &step.from, &step.event, &to, &png);
-        println!(
-            "    📸 frame {idx} {} --{}--> {to} — {}",
-            step.from,
-            step.event,
-            png.display()
-        );
-        idx += 1;
-    }
-
-    let manifest = serde_json::json!({ "item": item, "trait": td.name, "frames": frames });
-    let mpath = out_dir.join(format!("{item}.frames.json"));
-    std::fs::write(&mpath, serde_json::to_string_pretty(&manifest)?)?;
-    println!("    📋 manifest: {}", mpath.display());
-    Ok(true)
 }
 
 /// Resolve a TARGET argument: an existing path is used as-is; an explicit

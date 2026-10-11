@@ -1,10 +1,14 @@
 //! `orb validate` — native Rust schema validation (text + JSON output).
 
 use crate::utils::{
-    detect_language, detect_syntax, load_extra_patterns, load_services_registry, merge_post_inline_diagnostics,
-    parse_schema_auto_typed_with_map, parse_schema_auto_with_map, typed_parse_error_to_json,
+    detect_language, detect_syntax, load_extra_patterns, load_services_registry,
+    merge_post_inline_diagnostics, parse_schema_auto_typed_with_map, parse_schema_auto_with_map,
+    typed_parse_error_to_json,
 };
-use crate::{SourcePosition, ValidationJsonError, ValidationJsonOutput, ValidationJsonWarning, ValidationStats};
+use crate::{
+    SourcePosition, ValidationJsonError, ValidationJsonOutput, ValidationJsonWarning,
+    ValidationStats,
+};
 use std::path::PathBuf;
 
 /// `.lolo` source facts the lowered schema cannot carry. The pre-bracket app
@@ -27,7 +31,9 @@ pub(crate) fn source_findings(content: &str) -> Vec<Finding> {
         text: format!("[ORB_L_APP_HEADER_LEGACY] {path}: {message}"),
         path,
         message,
-        suggestion: Some("`orb format --write <file>` rewrites the header into the bracket form".to_string()),
+        suggestion: Some(
+            "`orb format --write <file>` rewrites the header into the bracket form".to_string(),
+        ),
     }]
 }
 
@@ -40,20 +46,73 @@ pub(crate) fn validate_schema(
     deny_warnings: bool,
     final_program: bool,
 ) -> anyhow::Result<()> {
+    if let Err(e) = crate::utils::patterns::ensure_language_ready() {
+        if json_output {
+            let output = ValidationJsonOutput {
+                success: true,
+                valid: false,
+                errors: Some(vec![language_data_json_error(&e)]),
+                warnings: None,
+                stats: None,
+            };
+            println!("{}", serde_json::to_string_pretty(&output)?);
+            return Ok(());
+        }
+        anyhow::bail!("{}: {e}", e.code());
+    }
+
     // Load extra patterns (explicit path or auto-discover)
     let extra_patterns = load_extra_patterns(path, patterns_path);
 
-    // Load services registry (explicit path or auto-discover)
-    let service_registry = load_services_registry(services_path);
+    // Load services registry (explicit path or the installed @almadar/core)
+    let service_registry = load_services_registry(services_path)?;
 
     if json_output {
-        return validate_schema_json(path, extra_patterns, service_registry, deny_warnings, final_program);
+        return validate_schema_json(
+            path,
+            extra_patterns,
+            service_registry,
+            deny_warnings,
+            final_program,
+        );
     }
 
     println!("Validating schema: {}", path.display());
 
     // Use native Rust validation only
-    validate_schema_native(path, extra_patterns, service_registry, deny_warnings, final_program)
+    validate_schema_native(
+        path,
+        extra_patterns,
+        service_registry,
+        deny_warnings,
+        final_program,
+    )
+}
+
+/// The JSON error for a missing/incompatible installed `@almadar/core` / `@almadar/std`
+/// (language data) — validator infrastructure, never a schema authoring error.
+pub(crate) fn language_data_json_error(
+    e: &orbital_core::language_data::LanguageDataError,
+) -> ValidationJsonError {
+    let suggestion = match e {
+        orbital_core::language_data::LanguageDataError::NotInstalled { package } => format!(
+            "Run `{}`, then retry — the schema was NOT evaluated.",
+            orbital_core::language_data::install_command(package)
+        ),
+        _ => "Validator environment error — the schema was NOT evaluated; retry, do not edit the schema"
+            .to_string(),
+    };
+    ValidationJsonError {
+        code: e.code().to_string(),
+        path: "".to_string(),
+        message: e.to_string(),
+        suggestion: Some(suggestion),
+        fix_guidance: None,
+        expected_shape: None,
+        valid_values: None,
+        position: None,
+        needs_install: e.needs_install().then_some(true),
+    }
 }
 
 /// The one pass rule: no errors, and no warnings either when `--deny-warnings` holds the 0/0 bar.
@@ -75,6 +134,7 @@ pub(crate) fn discovery_error_json_code(
     match e {
         DiscoverError::PrefixConflict { .. } => "ORB_BEHAVIOR_PREFIX_CONFLICT",
         DiscoverError::MissingDeclaredPath { .. }
+        | DiscoverError::InvalidSidecarLock { .. }
         | DiscoverError::InvalidPackageJson { .. }
         | DiscoverError::Io { .. } => "ORB_BEHAVIOR_PACKAGE_INVALID",
     }
@@ -290,9 +350,13 @@ fn validate_schema_json(
         // located at the `uses` line that declares it, matched exactly.
         let import_position = match &e {
             InlineError::Loader(LoaderError::InvalidPrimitiveImport(s)) => Some(s.as_str()),
-            InlineError::Loader(LoaderError::StdImportNotCanonical { given, .. }) => Some(given.as_str()),
+            InlineError::Loader(LoaderError::StdImportNotCanonical { given, .. }) => {
+                Some(given.as_str())
+            }
             InlineError::Loader(LoaderError::BehaviorNotFound { name, .. }) => Some(name.as_str()),
-            InlineError::Loader(LoaderError::PackageNotInstalled { prefix }) => Some(prefix.as_str()),
+            InlineError::Loader(LoaderError::PackageNotInstalled { prefix }) => {
+                Some(prefix.as_str())
+            }
             _ => None,
         }
         .and_then(|import| source_map.as_ref()?.import_span(import))
@@ -310,7 +374,7 @@ fn validate_schema_json(
                     "Validator environment error — the schema was NOT evaluated; retry, do not edit the schema"
                         .to_string()
                 } else if needs_install {
-                    "Run `orb behaviors install <package>` for the package that declares this \
+                    "Run `orb add <package>` for the package that declares this \
                      behavior, then retry — the schema was NOT evaluated."
                         .to_string()
                 } else {
@@ -374,13 +438,17 @@ fn validate_schema_json(
 
     let mut all_errors: Vec<ValidationJsonError> = lazy_errors;
     let mut all_warnings: Vec<ValidationJsonWarning> = lazy_warnings;
-    all_warnings.extend(source_findings(&content_raw).into_iter().map(|f| ValidationJsonWarning {
-        code: f.code,
-        path: f.path,
-        message: f.message,
-        suggestion: f.suggestion,
-        position: None,
-    }));
+    all_warnings.extend(
+        source_findings(&content_raw)
+            .into_iter()
+            .map(|f| ValidationJsonWarning {
+                code: f.code,
+                path: f.path,
+                message: f.message,
+                suggestion: f.suggestion,
+                position: None,
+            }),
+    );
 
     // Convert comprehensive validation errors. When the schema came from
     // `.lolo`, `source_map` resolves `error.path` (an L2 JSON-pointer-style
@@ -531,7 +599,10 @@ fn load_catalogs(
     name: &str,
     declared: &[String],
 ) -> std::collections::BTreeMap<String, Result<Option<serde_json::Value>, String>> {
-    let dir = path.parent().unwrap_or(std::path::Path::new(".")).join("locales");
+    let dir = path
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .join("locales");
     let mut locales: std::collections::BTreeSet<String> = declared.iter().cloned().collect();
     if let Ok(entries) = std::fs::read_dir(&dir) {
         for entry in entries.flatten() {
@@ -579,7 +650,10 @@ fn program_findings(
 }
 
 /// The `ORB_I18N_*` rules over a program's own `i18n/t` calls and its catalogs.
-fn catalog_findings(schema: &orbital_core::schema::OrbitalSchema, path: &std::path::Path) -> Vec<Finding> {
+fn catalog_findings(
+    schema: &orbital_core::schema::OrbitalSchema,
+    path: &std::path::Path,
+) -> Vec<Finding> {
     use orbital_core::messages::{check_catalogs, CatalogIssue};
     let declared = schema.locales.clone().unwrap_or_default();
     let mut findings = Vec::new();
@@ -596,7 +670,12 @@ fn catalog_findings(schema: &orbital_core::schema::OrbitalSchema, path: &std::pa
     let Ok(program) = serde_json::to_value(schema) else {
         return findings;
     };
-    issues.extend(check_catalogs(&program, &schema.name, schema.locales.as_deref(), &catalogs));
+    issues.extend(check_catalogs(
+        &program,
+        &schema.name,
+        schema.locales.as_deref(),
+        &catalogs,
+    ));
     for issue in issues {
         let message = issue.message();
         findings.push(Finding {
@@ -735,13 +814,20 @@ pub(crate) fn validate_lazy_children(
         errors.extend(core.errors.into_iter().map(prefix));
         warnings.extend(core.warnings.into_iter().map(prefix));
         if let Some(inlined) = &core.inlined {
-            if let Err(e) = orbital_compiler::phases::lazy::record_lazy_pages(schema, &artifact, inlined) {
+            if let Err(e) =
+                orbital_compiler::phases::lazy::record_lazy_pages(schema, &artifact, inlined)
+            {
                 errors.push(Finding {
                     code: e.structured_code().to_string(),
                     path: format!("lazy[{}]", artifact.orbital),
                     message: e.to_string(),
                     suggestion: None,
-                    text: format!("[{}] lazy[{}]: {}", e.structured_code(), artifact.orbital, e),
+                    text: format!(
+                        "[{}] lazy[{}]: {}",
+                        e.structured_code(),
+                        artifact.orbital,
+                        e
+                    ),
                 });
             }
         }
@@ -779,7 +865,8 @@ pub(crate) fn validate_schema_core(
     if check_own_catalogs {
         errors.extend(program_findings(&schema, path));
         if let Some(public) = &schema.public_dir {
-            if let Err(message) = orbital_compiler::phases::public::resolve_public_dir(path, public) {
+            if let Err(message) = orbital_compiler::phases::public::resolve_public_dir(path, public)
+            {
                 errors.push(Finding {
                     code: "ORB_PUBLIC_DIR_INVALID".to_string(),
                     path: "publicDir".to_string(),
@@ -825,13 +912,19 @@ pub(crate) fn validate_schema_core(
                 e
             ),
         });
-        return CoreValidation { errors, warnings, inlined: None };
+        return CoreValidation {
+            errors,
+            warnings,
+            inlined: None,
+        };
     }
     enrich_schema(&mut schema, &default_opts.enrichment);
 
     if let Ok(program) = serde_json::to_value(&schema) {
         for path in orbital_core::messages::render_only_violations(&program) {
-            let message = "`i18n/t` and `@locale` are render-time — use them only inside `render-ui`".to_string();
+            let message =
+                "`i18n/t` and `@locale` are render-time — use them only inside `render-ui`"
+                    .to_string();
             errors.push(Finding {
                 code: "ORB_I18N_RENDER_ONLY".to_string(),
                 text: format!("[ORB_I18N_RENDER_ONLY] {path}: {message}"),
@@ -905,7 +998,12 @@ pub(crate) fn validate_schema_core(
             let oir = OirValidator::new(&module).validate();
             for e in &oir.errors {
                 let finding = Finding {
-                    code: if e.severity == ValidationSeverity::Error { "OIR_ERROR" } else { "OIR_WARNING" }.to_string(),
+                    code: if e.severity == ValidationSeverity::Error {
+                        "OIR_ERROR"
+                    } else {
+                        "OIR_WARNING"
+                    }
+                    .to_string(),
                     path: e.path.clone(),
                     message: e.message.clone(),
                     suggestion: None,
@@ -939,7 +1037,11 @@ pub(crate) fn validate_schema_core(
         }),
     }
 
-    CoreValidation { errors, warnings, inlined: Some(inlined) }
+    CoreValidation {
+        errors,
+        warnings,
+        inlined: Some(inlined),
+    }
 }
 
 /// Native Rust schema validation (human text output). Thin formatting layer
@@ -1060,14 +1162,22 @@ mod legacy_header_tests {
 
     #[test]
     fn a_loose_line_header_is_reported_once() {
-        let found = source_findings(&format!("app Foo \"1.0.0\"\n\"Desc\"\ntheme \"orb-light\"\n{BODY}"));
-        assert_eq!(found.iter().map(|f| f.code.as_str()).collect::<Vec<_>>(), vec!["ORB_L_APP_HEADER_LEGACY"]);
+        let found = source_findings(&format!(
+            "app Foo \"1.0.0\"\n\"Desc\"\ntheme \"orb-light\"\n{BODY}"
+        ));
+        assert_eq!(
+            found.iter().map(|f| f.code.as_str()).collect::<Vec<_>>(),
+            vec!["ORB_L_APP_HEADER_LEGACY"]
+        );
         assert_eq!(found[0].path, "app:1");
     }
 
     #[test]
     fn control_the_bracket_header_is_clean() {
-        assert!(source_findings(&format!("app Foo [version: \"1.0.0\", description: \"Desc\", theme: \"orb-light\"]\n{BODY}")).is_empty());
+        assert!(source_findings(&format!(
+            "app Foo [version: \"1.0.0\", description: \"Desc\", theme: \"orb-light\"]\n{BODY}"
+        ))
+        .is_empty());
         assert!(source_findings(&format!("app Foo\n{BODY}")).is_empty());
     }
 

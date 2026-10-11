@@ -271,8 +271,9 @@ fn run_cascade(path: &Path, steps: &serde_json::Value) -> anyhow::Result<serde_j
         .map_err(|e| anyhow::anyhow!("Failed to read {}: {}", path.display(), e))?;
     let schema = parse_schema_auto(&content, &path.display().to_string())
         .map_err(|e| anyhow::anyhow!("Failed to parse {}: {}", path.display(), e))?;
-    let (resolved, _lazy) = resolve_program_with_path(schema, &CompilerOptions::from_env(), Some(path))
-        .map_err(|e| anyhow::anyhow!("Failed to resolve {}: {}", path.display(), e))?;
+    let (resolved, _lazy) =
+        resolve_program_with_path(schema, &CompilerOptions::from_env(), Some(path))
+            .map_err(|e| anyhow::anyhow!("Failed to resolve {}: {}", path.display(), e))?;
 
     let kernel = RuntimeKernel::new(
         orbital_core::RuntimeEnvironment::Server,

@@ -73,6 +73,10 @@ fn project(second_model: &str) -> tempfile::TempDir {
         &dir.path().join("package.json"),
         r#"{"name":"catalog-test","private":true}"#,
     );
+    orbital_test_support::link_installed_language(
+        dir.path(),
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+    );
     package(
         dir.path(),
         "alpha",
@@ -623,6 +627,68 @@ fn describe_marks_which_traits_another_record_may_rebind() {
     assert_eq!(
         v["orbitals"][0]["pages"],
         serde_json::json!([{"name": "RowsPage", "path": "/rows", "traits": ["RowBrowse"]}])
+    );
+}
+
+#[test]
+fn describe_reports_each_pages_menu_label_and_icon() {
+    let p = project("m1");
+    let schema = r#"{"name":"menu","orbitals":[{"name":"RowOrbital","entity":{"name":"Row","fields":[{"name":"id","type":"string","required":true}]},"traits":[{"name":"RowView","linkedEntity":"Row","stateMachine":{"states":[{"name":"s","isInitial":true}],"transitions":[{"from":"s","to":"s","event":"INIT"}]}}],"pages":[{"name":"RowsPage","path":"/rows","label":"Rows","icon":"list","traits":[{"ref":"RowView"}]},{"name":"RowDetailPage","path":"/rows/:id","traits":[{"ref":"RowView"}]}]}]}"#;
+    write(&p.path().join("orbitals/menu.orb"), schema);
+    let v = json(&orb(
+        p.path(),
+        &["behaviors", "describe", "--json", "./orbitals/menu"],
+    ));
+    let pages = &v["orbitals"][0]["pages"];
+    assert_eq!(pages[0]["label"], "Rows");
+    assert_eq!(pages[0]["icon"], "list");
+    assert!(pages[1].get("label").is_none(), "{pages}");
+    assert!(pages[1].get("icon").is_none(), "{pages}");
+}
+
+#[test]
+fn describe_marks_a_knob_whose_value_forwards_another_knob() {
+    let p = project("m1");
+    let schema = r#"{"name":"fwd","config":{"title":{"type":"string","default":"Rows"}},"orbitals":[{"name":"RowOrbital","entity":{"name":"Row","fields":[{"name":"id","type":"string","required":true}]},"traits":[{"name":"RowView","linkedEntity":"Row","config":{"heading":{"type":"string","default":"@config.title"},"note":{"type":"string","default":"plain"}},"stateMachine":{"states":[{"name":"s","isInitial":true}],"transitions":[{"from":"s","to":"s","event":"INIT"}]}}],"pages":[{"name":"RowsPage","path":"/rows","traits":[{"ref":"RowView"}]}]}]}"#;
+    write(&p.path().join("orbitals/fwd.orb"), schema);
+    let v = json(&orb(
+        p.path(),
+        &["behaviors", "describe", "--json", "./orbitals/fwd"],
+    ));
+    let knobs = v["orbitals"][0]["traits"][0]["knobs"]
+        .as_array()
+        .expect("knobs")
+        .clone();
+    let knob = |n: &str| knobs.iter().find(|k| k["name"] == n).cloned().expect(n);
+    assert_eq!(knob("heading")["default"], "Rows");
+    assert_eq!(knob("heading")["forwardedFrom"], "@config.title");
+    assert!(knob("note").get("forwardedFrom").is_none(), "{knobs:?}");
+}
+
+#[test]
+fn describe_carries_each_orbitals_forwarded_controls() {
+    let p = project("m1");
+    let schema = r#"{"name":"plain","orbitals":[{"name":"RowOrbital","entity":{"name":"Row","fields":[{"name":"id","type":"string","required":true}]},"traits":[{"name":"RowView","linkedEntity":"Row","stateMachine":{"states":[{"name":"s","isInitial":true}],"transitions":[{"from":"s","to":"s","event":"INIT"}]}}],"pages":[{"name":"RowsPage","path":"/rows","traits":[{"ref":"RowView"}]}]}]}"#;
+    write(&p.path().join("orbitals/plain.orb"), schema);
+    let v = json(&orb(
+        p.path(),
+        &["behaviors", "describe", "--json", "./orbitals/plain"],
+    ));
+    assert_eq!(v["orbitals"][0]["forwards"], serde_json::json!([]));
+}
+
+#[test]
+fn describe_lists_each_traits_domain_events() {
+    let p = project("m1");
+    let schema = r#"{"name":"club","orbitals":[{"name":"VoteOrbital","entity":{"name":"Vote","fields":[{"name":"id","type":"string","required":true}]},"traits":[{"name":"VoteBoard","linkedEntity":"Vote","emits":[{"event":"VOTED","tier":"domain"}],"listens":[{"event":"VOTE","tier":"domain"},{"event":"LOADED","tier":"internal"},{"event":"BARE"}],"stateMachine":{"states":[{"name":"s","isInitial":true}],"transitions":[{"from":"s","to":"s","event":"INIT"},{"from":"s","to":"s","event":"VOTE"},{"from":"s","to":"s","event":"LOADED"},{"from":"s","to":"s","event":"BARE"}]}}],"pages":[{"name":"VotesPage","path":"/votes","traits":[{"ref":"VoteBoard"}]}]}]}"#;
+    write(&p.path().join("orbitals/club.orb"), schema);
+    let v = json(&orb(
+        p.path(),
+        &["behaviors", "describe", "--json", "./orbitals/club"],
+    ));
+    assert_eq!(
+        v["orbitals"][0]["traits"][0]["events"]["domain"],
+        serde_json::json!(["VOTED", "VOTE"])
     );
 }
 

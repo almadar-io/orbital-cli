@@ -3,6 +3,8 @@
 //! `.lolo` (G-ORB-056). `validate --json` used to re-inline the inlined schema
 //! without its source path, resolving `./x` against the cwd instead.
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -43,7 +45,7 @@ const ORDERS: &str = r#"orbital OrderProcessing {
 
 fn orb() -> Command {
     // cwd stays the crate dir: never the fixture folder.
-    Command::new(PathBuf::from(env!("CARGO_BIN_EXE_orb")))
+    Command::new(common::orb())
 }
 
 fn folder(tag: &str, files: &[(&str, &str)]) -> PathBuf {

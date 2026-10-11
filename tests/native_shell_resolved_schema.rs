@@ -8,12 +8,14 @@
 //! both tests are `#[ignore]`d for a standalone orbital-rust checkout and
 //! run explicitly here.
 
+mod common;
+
 use orbital_core::schema::TraitReference;
 use std::path::PathBuf;
 use std::process::Command;
 
 fn orbital_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_orbital"))
+    common::orbital()
 }
 
 /// CARGO_MANIFEST_DIR = <repo-root>/orbital-rust/crates/orbital-cli

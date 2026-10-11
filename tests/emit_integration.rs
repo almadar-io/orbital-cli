@@ -4,6 +4,8 @@
 //! from `docs/Almadar_Compiler_Emit_Code.md`. Runs the compiled `orb` binary
 //! via `CARGO_BIN_EXE_orb` — no external crate dependency required.
 
+mod common;
+
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -23,7 +25,7 @@ fn std_modal_orb() -> PathBuf {
 }
 
 fn orb_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_orb"))
+    common::orb()
 }
 
 fn run_orb(args: &[&str]) -> (String, String, bool) {

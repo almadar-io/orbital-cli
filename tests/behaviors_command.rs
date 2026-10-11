@@ -47,6 +47,10 @@ impl Project {
             "{\n  \"name\": \"behaviors-command-test\",\n  \"private\": true\n}\n",
         )
         .unwrap();
+        orbital_test_support::link_installed_language(
+            dir.path(),
+            Path::new(env!("CARGO_MANIFEST_DIR")),
+        );
         Self { dir }
     }
 
@@ -294,7 +298,7 @@ fn install_succeeds_and_prints_installed_line() {
     let output = orb(
         &project,
         &bun_stub,
-        &["behaviors", "install", "@fake-io/behaviors"],
+        &["add", "@fake-io/behaviors"],
     );
     assert!(
         output.status.success(),
@@ -303,7 +307,7 @@ fn install_succeeds_and_prints_installed_line() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("installed @fake-io/behaviors@1.2.3"),
+        stdout.contains("added @fake-io/behaviors@1.2.3"),
         "stdout: {stdout}"
     );
     assert!(project.fake_pkg_dir().is_dir());
@@ -316,7 +320,7 @@ fn install_rejects_incompatible_compiler_range_and_removes_it() {
     let output = orb(
         &project,
         &bun_stub,
-        &["behaviors", "install", "@fake-io/behaviors"],
+        &["add", "@fake-io/behaviors"],
     );
     assert!(!output.status.success(), "install should have failed");
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -340,7 +344,7 @@ fn list_json_reports_prefix_and_behavior_count() {
     let bun_stub = write_bun_stub(&project, "*");
     seed_fake_package(&project, &bun_stub);
 
-    let output = orb(&project, &bun_stub, &["behaviors", "list", "--json"]);
+    let output = orb(&project, &bun_stub, &["list", "--json"]);
     assert!(
         output.status.success(),
         "{}",
@@ -351,7 +355,7 @@ fn list_json_reports_prefix_and_behavior_count() {
     let rows = rows.as_array().expect("array");
     let fake = rows
         .iter()
-        .find(|r| r["name"] == "@fake-io/behaviors")
+        .find(|r| r["package"] == "@fake-io/behaviors")
         .expect("fake package listed");
     assert_eq!(fake["prefix"], "fake-behaviors");
     assert_eq!(fake["behaviors"], 1);
@@ -447,7 +451,7 @@ fn which_std_behaviors_without_installed_std_reports_not_installed() {
         "stderr: {stderr}"
     );
     assert!(
-        stderr.contains("orb behaviors install @almadar/std"),
+        stderr.contains("orb update"),
         "stderr should name the install command: {stderr}"
     );
 }
@@ -547,7 +551,7 @@ orbital FixtureOrbital {
     let message = err["message"].as_str().expect("message string");
     assert!(
         message.contains("@almadar/std is not installed")
-            && message.contains("orb behaviors install @almadar/std"),
+            && message.contains("orb update"),
         "message: {message}"
     );
 }
@@ -560,7 +564,7 @@ fn list_json_omits_std_when_not_installed() {
     let bun_stub = write_bun_stub(&project, "*");
     seed_fake_package(&project, &bun_stub);
 
-    let output = orb(&project, &bun_stub, &["behaviors", "list", "--json"]);
+    let output = orb(&project, &bun_stub, &["list", "--json"]);
     assert!(
         output.status.success(),
         "{}",
@@ -589,7 +593,7 @@ fn remove_refuses_when_lolo_references_prefix() {
     let output = orb(
         &project,
         &bun_stub,
-        &["behaviors", "remove", "@fake-io/behaviors"],
+        &["remove", "@fake-io/behaviors"],
     );
     assert!(!output.status.success(), "remove should have been refused");
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -612,7 +616,7 @@ fn remove_succeeds_when_unreferenced() {
     let output = orb(
         &project,
         &bun_stub,
-        &["behaviors", "remove", "@fake-io/behaviors"],
+        &["remove", "@fake-io/behaviors"],
     );
     assert!(
         output.status.success(),
@@ -667,7 +671,7 @@ fn signatures_without_std_reports_not_installed() {
         "stderr: {stderr}"
     );
     assert!(
-        stderr.contains("orb behaviors install @almadar/std"),
+        stderr.contains("orb update"),
         "stderr should name the install command: {stderr}"
     );
 }
@@ -679,7 +683,7 @@ fn signatures_without_std_reports_not_installed() {
 fn install_rejects_std_with_incompatible_core_range_and_removes_it() {
     let project = Project::new();
     let std_stub = write_std_bun_stub(&project, "*", ">=99.0.0");
-    let output = orb(&project, &std_stub, &["behaviors", "install", "@fake/std"]);
+    let output = orb(&project, &std_stub, &["add", "@fake/std"]);
     assert!(!output.status.success(), "install should have failed");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -706,7 +710,7 @@ fn install_rejects_io_peer_package_when_no_std_installed() {
     let output = orb(
         &project,
         &bun_stub,
-        &["behaviors", "install", "@fake-io/peer-behaviors"],
+        &["add", "@fake-io/peer-behaviors"],
     );
     assert!(!output.status.success(), "install should have failed");
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -715,7 +719,7 @@ fn install_rejects_io_peer_package_when_no_std_installed() {
         "stderr: {stderr}"
     );
     assert!(
-        stderr.contains("orb behaviors install @almadar/std"),
+        stderr.contains("orb update"),
         "stderr should name the install command: {stderr}"
     );
     assert!(
@@ -740,7 +744,7 @@ fn install_rejects_std_via_path_spec_with_incompatible_core_range() {
     let output = orb(
         &project,
         &std_stub,
-        &["behaviors", "install", "./fake-std.tgz"],
+        &["add", "./fake-std.tgz"],
     );
     assert!(!output.status.success(), "install should have failed");
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -768,7 +772,7 @@ fn install_succeeds_via_path_spec_with_compatible_core_range() {
     let output = orb(
         &project,
         &std_stub,
-        &["behaviors", "install", "./fake-std.tgz"],
+        &["add", "./fake-std.tgz"],
     );
     assert!(
         output.status.success(),
@@ -777,7 +781,7 @@ fn install_succeeds_via_path_spec_with_compatible_core_range() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("installed @fake/std@9.9.9"),
+        stdout.contains("added @fake/std@9.9.9 (behaviors)"),
         "stdout: {stdout}"
     );
     assert!(project.fake_std_pkg_dir().is_dir());
@@ -794,20 +798,57 @@ fn install_of_package_without_orb_block_is_refused_and_removed() {
     let output = orb(
         &project,
         &bun_stub,
-        &["behaviors", "install", "@fake-plain/pkg"],
+        &["add", "@fake-plain/pkg"],
     );
     assert!(!output.status.success(), "install should have failed");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("@fake-plain/pkg@3.4.5 is not a behavior package"),
+        stderr.contains("@fake-plain/pkg: not an orb package"),
         "stderr: {stderr}"
     );
     assert!(
-        stderr.contains("no `orb` block"),
+        stderr.contains("declares none of orbLanguage, orb, orbVocabulary, orbProgram"),
         "stderr should say why: {stderr}"
     );
     assert!(
         !project.fake_plain_pkg_dir().exists(),
         "failed install should have been removed by the stub `bun remove`"
     );
+}
+
+/// No `@almadar/core` anywhere on the walk (project or `~/.orb`) and first-run
+/// setup off: validate reports `ORB_LANGUAGE_DATA_NOT_INSTALLED` with
+/// `needsInstall: true` instead of panicking or validating against an empty
+/// vocabulary.
+#[test]
+fn validate_json_without_installed_core_needs_install() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("package.json"),
+        r#"{"name":"x","private":true}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("app.orb"),
+        r#"{"name":"a","version":"1.0.0","orbitals":[]}"#,
+    )
+    .unwrap();
+    let output = Command::new(orb_bin())
+        .args(["validate", "--json", "app.orb"])
+        .current_dir(dir.path())
+        .env("HOME", home.path())
+        .env("ORB_NO_AUTO_SETUP", "1")
+        .output()
+        .expect("spawn orb");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
+    let err = &result["errors"][0];
+    assert_eq!(err["code"], "ORB_LANGUAGE_DATA_NOT_INSTALLED", "{result}");
+    assert_eq!(err["needsInstall"], true, "{result}");
+    assert_eq!(result["valid"], false);
 }

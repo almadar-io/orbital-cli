@@ -18,8 +18,7 @@ use commands::{
     compile_schema, execute_cascade_cli, execute_cascade_steps_cli, execute_schema_cli,
     format_schema, parse_schema, resolve_schema_cli, run_convert, run_dev_mode,
     run_engines_install, run_engines_list, run_engines_remove, run_engines_update, run_i18n_check,
-    run_i18n_vocab, run_install, run_list, run_remove, run_serve, run_tests, run_update, run_which,
-    simulate_render, stamp_schema_cli, validate_schema,
+    run_i18n_vocab, run_language_which, run_serve, run_tests, run_which, simulate_render, stamp_schema_cli, validate_schema,
 };
 use utils::{evaluate_sexpr, spawn_agent, spawn_agent_with_args};
 
@@ -83,6 +82,21 @@ pub enum ShellType {
     Ios,
     /// Chrome extension (Manifest V3) hosting the program in its service worker
     ChromeExtension,
+}
+
+impl ShellType {
+    /// The shell program (`orb-shell-<name>`) this target runs.
+    pub(crate) fn program(self) -> &'static str {
+        match self {
+            ShellType::Typescript => "typescript",
+            ShellType::Python => "python",
+            ShellType::Mobile => "mobile",
+            ShellType::Rust => "rust",
+            ShellType::Android => "android",
+            ShellType::Ios => "ios",
+            ShellType::ChromeExtension => "chrome",
+        }
+    }
 }
 
 /// Server framework choice for backend code generation
@@ -157,7 +171,7 @@ enum Commands {
     /// package's `orb.signatures` file plus every other installed behavior
     /// package's fragment, in walk order (Phase 2,
     /// `docs/Almadar_Behavior_Packages.md` §10) — `@almadar/std` must be
-    /// installed (`orb behaviors install @almadar/std`, or `--global`).
+    /// installed (`orb update`, or `orb update --global`).
     Signatures {
         /// Write to this file instead of stdout.
         #[arg(long, value_name = "FILE")]
@@ -212,6 +226,16 @@ enum Commands {
         /// Verbose phase logging on stderr.
         #[arg(short, long)]
         verbose: bool,
+    },
+
+    /// Lower each `.lolo` (or read each `.orb`) to its program exactly as the
+    /// loader does for a live behavior package — one NDJSON line per file,
+    /// `{"path", "orb"}` or `{"path", "error"}`, in argument order. The single
+    /// lowering entry point TS consumers use (Almadar_Behavior_Packages.md §15).
+    Lower {
+        /// The `.lolo` / `.orb` files to lower.
+        #[arg(value_name = "FILE", required = true)]
+        paths: Vec<PathBuf>,
     },
 
     /// Pure headless state-machine execution: fire one event through every
@@ -540,6 +564,10 @@ enum Commands {
         /// Server URL to connect to
         #[arg(short, long, default_value = "http://127.0.0.1:3000")]
         server: String,
+
+        /// Renderer: dioxus (window) or tui (terminal)
+        #[arg(long, default_value = "dioxus")]
+        renderer: String,
     },
 
     /// Start development server with hot-reload (not yet stable)
@@ -715,6 +743,48 @@ enum Commands {
         output: String,
     },
 
+    /// Install what orb needs and is missing (the language data it pins, std, the
+    /// first-party language packs, the TypeScript shell, orb-desktop), update
+    /// every orb package within its range, and check each loads. Also the
+    /// first-run setup: the installers run `orb update --global`.
+    Update {
+        /// Target the user store (`~/.orb`) instead of the nearest project.
+        #[arg(long)]
+        global: bool,
+    },
+
+    /// Install orb packages — behaviors, a language pack, a shell
+    /// (`@almadar/orb-shell-<name>`), orb-desktop: any npm package whose
+    /// package.json declares orbLanguage, orb, orbVocabulary or orbProgram.
+    /// A package that does not load for this orb is removed again.
+    Add {
+        /// bun specs: `name` or `name@version`.
+        #[arg(required = true)]
+        packages: Vec<String>,
+        /// Target the user store (`~/.orb`) instead of the nearest project.
+        #[arg(long)]
+        global: bool,
+    },
+
+    /// Uninstall orb packages.
+    Remove {
+        #[arg(required = true)]
+        packages: Vec<String>,
+        /// Target the user store (`~/.orb`) instead of the nearest project.
+        #[arg(long)]
+        global: bool,
+    },
+
+    /// The orb packages installed for the project (or `--global`), each with
+    /// its kinds, version and whether it loads for this orb.
+    List {
+        #[arg(long)]
+        json: bool,
+        /// Target the user store (`~/.orb`) instead of the nearest project.
+        #[arg(long)]
+        global: bool,
+    },
+
     /// Language i18n vocabulary — inspect the baked `.lolo`/`.orb` vocabulary
     /// tables and check translation coverage.
     I18n {
@@ -735,50 +805,25 @@ enum Commands {
         #[command(subcommand)]
         command: EnginesCommand,
     },
+
+    /// The language data `orb` compiles against — `@almadar/core` (patterns,
+    /// theme presets, fixtures) and `@almadar/std`'s operator table — installed,
+    /// pinned npm packages (Almadar_Behavior_Packages.md §14).
+    Language {
+        #[command(subcommand)]
+        command: LanguageCommand,
+    },
+
+}
+
+#[derive(Subcommand)]
+enum LanguageCommand {
+    /// Which copy of each language package compiles here.
+    Which,
 }
 
 #[derive(Subcommand)]
 enum BehaviorsCommand {
-    /// Install a behavior package (`bun add <pkg>`), or every package in the
-    /// project manifest when `<pkg>` is omitted (`bun install`). Verifies the
-    /// installed `orb.compiler` range and `peerDependencies["@almadar/std"]`
-    /// range, removing what bun added on a failed check.
-    Install {
-        /// Package spec, e.g. `@almadar-io/behaviors` or `@almadar-io/behaviors@^1`.
-        pkg: Option<String>,
-        /// Target the user store (`~/.orb`) instead of the nearest project.
-        #[arg(long)]
-        global: bool,
-    },
-    /// Remove an installed behavior package (`bun remove <pkg>`). Refuses if
-    /// any `.lolo`/`.orb` under the project still imports its prefix.
-    Remove {
-        /// Installed package name.
-        pkg: String,
-        /// Target the user store (`~/.orb`) instead of the nearest project.
-        #[arg(long)]
-        global: bool,
-    },
-    /// Update a behavior package (`bun update [<pkg>]`), then re-run the same
-    /// compiler/peer checks as `install`. A failed check is reported, not
-    /// auto-reverted (bun has no per-package revert).
-    Update {
-        /// Package name, or every installed behavior package when omitted.
-        pkg: Option<String>,
-        /// Target the user store (`~/.orb`) instead of the nearest project.
-        #[arg(long)]
-        global: bool,
-    },
-    /// List behavior packages installed on the walk from the working
-    /// directory: name, version, prefix, behavior count, resolved path, link.
-    List {
-        /// Print as a JSON array instead of a table.
-        #[arg(long)]
-        json: bool,
-        /// List the user store (`~/.orb`) instead of the working directory's walk.
-        #[arg(long)]
-        global: bool,
-    },
     /// Resolve one `uses` specifier ("which copy compiled?") — prints the
     /// resolved `.orb` path and the owning package.
     Which {
@@ -994,7 +1039,7 @@ fn lower_lolo_file(path: &std::path::Path) -> Result<orbital_core::schema::Orbit
         .map_err(|e| e.describe())
 }
 
-fn main() -> anyhow::Result<()> {
+pub fn run() -> anyhow::Result<()> {
     // Namespaced structured logging (mirror of @almadar/logger). Quiet by default
     // (warn/error only); enable namespaces with e.g. ALMADAR_DEBUG='almadar:runtime:*'.
     orbital_core::logging::init();
@@ -1002,6 +1047,39 @@ fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
+    let needs_language_data = !matches!(
+        &cli.command,
+        None | Some(Commands::Validate { .. })
+            | Some(Commands::I18n { .. })
+            | Some(Commands::Engines { .. })
+            | Some(Commands::Language { .. })
+            | Some(Commands::Update { .. })
+            | Some(Commands::Add { .. })
+            | Some(Commands::Remove { .. })
+            | Some(Commands::List { .. })
+            | Some(Commands::Login)
+            | Some(Commands::EmitTrace { .. })
+            | Some(Commands::Trace { .. })
+            | Some(Commands::Eval { .. })
+            | Some(Commands::Behaviors {
+                command: BehaviorsCommand::Which { .. }
+            })
+    );
+    if needs_language_data {
+        crate::utils::require_language_data()?;
+    }
+    let notify = !matches!(
+        &cli.command,
+        Some(Commands::Update { .. }) | Some(Commands::List { json: true, .. })
+    );
+    let result = dispatch(cli);
+    if notify && result.is_ok() {
+        commands::update_notice::notice();
+    }
+    result
+}
+
+fn dispatch(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
         Some(Commands::Validate {
             path,
@@ -1038,6 +1116,45 @@ fn main() -> anyhow::Result<()> {
             output,
             verbose,
         }) => resolve_schema_cli(&path, output.as_deref(), verbose),
+        Some(Commands::Lower { paths }) => {
+            use std::io::Write;
+            let lower_one = |path: &std::path::PathBuf| match lower_lolo_file(path) {
+                Ok(mut schema) => {
+                    orbital_core::stamp::ensure_stamped(&mut schema);
+                    serde_json::json!({ "path": path, "orb": schema }).to_string()
+                }
+                Err(error) => serde_json::json!({ "path": path, "error": error }).to_string(),
+            };
+            // Files lower independently; workers take every n-th file, output keeps input order.
+            let workers = std::thread::available_parallelism()
+                .map_or(1, |n| n.get())
+                .min(paths.len().max(1));
+            let mut lines: Vec<String> = vec![String::new(); paths.len()];
+            std::thread::scope(|scope| {
+                let handles: Vec<_> = (0..workers)
+                    .map(|w| {
+                        let paths = &paths;
+                        scope.spawn(move || {
+                            (w..paths.len())
+                                .step_by(workers)
+                                .map(|i| (i, lower_one(&paths[i])))
+                                .collect::<Vec<_>>()
+                        })
+                    })
+                    .collect();
+                for handle in handles {
+                    for (i, line) in handle.join().expect("lowering worker panicked") {
+                        lines[i] = line;
+                    }
+                }
+            });
+            let stdout = std::io::stdout();
+            let mut out = stdout.lock();
+            for line in lines {
+                writeln!(out, "{line}")?;
+            }
+            Ok(())
+        }
         Some(Commands::Execute {
             path,
             steps: Some(steps),
@@ -1175,7 +1292,7 @@ fn main() -> anyhow::Result<()> {
             patterns.as_deref(),
             !no_emulators,
         ),
-        Some(Commands::Gui { path, server }) => orbital_client::run_desktop(&path, Some(&server)),
+        Some(Commands::Gui { path, server, renderer }) => utils::desktop::window(&renderer, &path, Some(&server)),
         Some(Commands::Dev {
             path,
             port,
@@ -1220,10 +1337,6 @@ fn main() -> anyhow::Result<()> {
             I18nCommand::Check => run_i18n_check(),
         },
         Some(Commands::Behaviors { command }) => match command {
-            BehaviorsCommand::Install { pkg, global } => run_install(pkg, global),
-            BehaviorsCommand::Remove { pkg, global } => run_remove(pkg, global),
-            BehaviorsCommand::Update { pkg, global } => run_update(pkg, global),
-            BehaviorsCommand::List { json, global } => run_list(json, global),
             BehaviorsCommand::Which { spec } => run_which(spec),
             BehaviorsCommand::Catalog {
                 paths,
@@ -1253,6 +1366,13 @@ fn main() -> anyhow::Result<()> {
                 compiled,
             } => run_engines_remove(global, runtime, compiled),
         },
+        Some(Commands::Language { command }) => match command {
+            LanguageCommand::Which => run_language_which(),
+        },
+        Some(Commands::Update { global }) => commands::packages::run_update(global),
+        Some(Commands::Add { packages, global }) => commands::packages::run_add(packages, global),
+        Some(Commands::Remove { packages, global }) => commands::packages::run_remove(packages, global),
+        Some(Commands::List { json, global }) => commands::packages::run_list(json, global),
         // Agent-delegating commands
         Some(Commands::Fix { path }) => {
             spawn_agent_with_args(&["fix", &path.display().to_string()])

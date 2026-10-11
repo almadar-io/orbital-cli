@@ -10,11 +10,13 @@
 //!
 //! Runs the compiled `orb` binary via `CARGO_BIN_EXE_orb` (no in-process crate wiring).
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn orb_bin() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_orb"))
+    common::orb()
 }
 
 fn fixture() -> PathBuf {
