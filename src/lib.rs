@@ -74,7 +74,7 @@ pub enum ShellType {
     Python,
     /// React Native mobile application
     Mobile,
-    /// Rust native application with Axum server and egui client
+    /// Rust native application with an Axum server and a Dioxus (or TUI) client
     Rust,
     /// Native Android application with Jetpack Compose
     Android,

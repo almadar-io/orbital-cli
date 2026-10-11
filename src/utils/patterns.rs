@@ -1,7 +1,6 @@
 //! Loaders for project-supplied patterns, services registry, and component
 //! mappings consumed by the validate/compile commands.
 
-
 /// Load extra patterns from a patterns.json file.
 ///
 /// If `explicit_path` is provided, load from that path.
@@ -122,11 +121,22 @@ pub(crate) fn ensure_language_ready() -> Result<(), orbital_core::language_data:
         "orb: the language is not set up for this orb ({}: {first}) — running `orb update --global` (set {NO_AUTO_SETUP_ENV}=1 to skip)",
         first.code()
     );
-    if let Err(e) = crate::commands::packages::run_update(true) {
+    language_after_setup(
+        crate::commands::packages::run_update(true),
+        orbital_core::language_data::preflight,
+    )
+}
+
+/// After a first-run setup, the language is ready when the preflight now passes, even if the
+/// update failed on another package (that failure is reported, never hidden).
+fn language_after_setup<E>(
+    update: anyhow::Result<()>,
+    recheck: impl FnOnce() -> Result<(), E>,
+) -> Result<(), E> {
+    if let Err(e) = update {
         eprintln!("orb: update did not complete: {e}");
-        return Err(first);
     }
-    orbital_core::language_data::preflight()
+    recheck()
 }
 
 /// True when core and std resolve from the user store (or not at all) and the
@@ -187,17 +197,51 @@ pub(crate) fn load_project_patterns(
         Some(_) => return None,
         None => {
             let schema_dir = schema_path.parent()?;
-            [schema_dir.join("patterns.json"), schema_dir.join("design-system/patterns.json")]
-                .into_iter()
-                .find(|p| p.exists())?
+            [
+                schema_dir.join("patterns.json"),
+                schema_dir.join("design-system/patterns.json"),
+            ]
+            .into_iter()
+            .find(|p| p.exists())?
         }
     };
     let content = std::fs::read_to_string(&patterns_path).ok()?;
     let json: serde_json::Value = serde_json::from_str(&content).ok()?;
-    let count = json.get("patterns").and_then(|v| v.as_object()).map_or(0, |p| p.len());
+    let count = json
+        .get("patterns")
+        .and_then(|v| v.as_object())
+        .map_or(0, |p| p.len());
     if count == 0 {
         return None;
     }
-    eprintln!("Loaded {} project component mappings from {}", count, patterns_path.display());
+    eprintln!(
+        "Loaded {} project component mappings from {}",
+        count,
+        patterns_path.display()
+    );
     Some(json)
+}
+
+#[cfg(test)]
+mod setup_tests {
+    use super::language_after_setup;
+
+    #[test]
+    fn a_setup_that_failed_on_another_package_still_counts_when_the_language_loads() {
+        let outcome: Result<(), &str> =
+            language_after_setup(Err(anyhow::anyhow!("orb-desktop does not load")), || Ok(()));
+        assert_eq!(outcome, Ok(()));
+    }
+
+    #[test]
+    fn control_the_language_still_missing_after_setup_is_the_recheck_error() {
+        let outcome = language_after_setup(Err(anyhow::anyhow!("network")), || Err("core missing"));
+        assert_eq!(outcome, Err("core missing"));
+        let outcome = language_after_setup(Ok(()), || Err("std missing"));
+        assert_eq!(
+            outcome,
+            Err("std missing"),
+            "a clean update with the language still missing is not ready"
+        );
+    }
 }
