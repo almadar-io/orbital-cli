@@ -276,8 +276,10 @@ enum Commands {
         #[arg(long, requires = "trait_name")]
         cascade: bool,
 
-        /// A JSON array of `{trait, event, payload}` run as `--cascade` does, in order
-        /// against one kernel, in place of `--event`/`--trait`.
+        /// A JSON array of `{trait, event, payload, from?}` run as `--cascade` does, in order
+        /// against one kernel, in place of `--event`/`--trait`. A step with `from` plays from
+        /// that state. Each outcome reports the arm that fired, every guard tried and how each
+        /// authored effect of the fired arm ran.
         #[arg(long, conflicts_with_all = ["event", "trait_name", "payload"])]
         steps: Option<String>,
     },

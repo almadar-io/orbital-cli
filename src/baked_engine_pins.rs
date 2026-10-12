@@ -8,9 +8,9 @@
 //!
 //! DO NOT EDIT MANUALLY - changes will be overwritten on next sync.
 
-pub const RUNTIME_VERIFY_ENGINE: (&str, &str) = ("@almadar-io/runtime-verify-tool", "4.255.0");
-pub const COMPILED_VERIFY_ENGINE: (&str, &str) = ("@almadar-io/verify-tool", "3.189.0");
-pub const BAKED_CORE: (&str, &str) = ("@almadar/core", "10.125.0");
+pub const RUNTIME_VERIFY_ENGINE: (&str, &str) = ("@almadar-io/runtime-verify-tool", "4.256.0");
+pub const COMPILED_VERIFY_ENGINE: (&str, &str) = ("@almadar-io/verify-tool", "3.190.0");
+pub const BAKED_CORE: (&str, &str) = ("@almadar/core", "10.126.0");
 pub const BAKED_STD_RANGE: (&str, &str) = ("@almadar/std", "^16");
-pub const BAKED_LANGUAGE_PACKS: &[(&str, &str)] = &[("@almadar/lolo-ar", "1.1.0"), ("@almadar/lolo-sl", "1.1.0")];
+pub const BAKED_LANGUAGE_PACKS: &[(&str, &str)] = &[("@almadar/lolo-ar", "1.2.0"), ("@almadar/lolo-sl", "1.2.0")];
 pub const BAKED_PROGRAMS: &[(&str, &str)] = &[("@almadar/orb-shell-typescript", "^18"), ("@almadar/orb-desktop", "^18")];

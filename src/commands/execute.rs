@@ -259,9 +259,75 @@ fn print_cascade_report(report: anyhow::Result<serde_json::Value>) -> anyhow::Re
     Ok(())
 }
 
+/// One trait's outcome of a dispatched step: the transition, the emits, the arm that fired,
+/// every guard tried and how each authored effect of the fired arm ran.
+fn outcome_report(
+    trait_name: &str,
+    r: &orbital_core::runtime::ProcessEventResult,
+) -> serde_json::Value {
+    use orbital_core::effects::Effect;
+    use orbital_core::runtime::EffectRunStatus;
+    let emits: Vec<serde_json::Value> = r
+        .effect_results
+        .iter()
+        .filter_map(|er| match &er.effect {
+            Effect::Emit { event, payload } => Some(serde_json::json!({
+                "event": event,
+                "payload": serde_json::to_value(payload).unwrap_or(serde_json::Value::Null),
+            })),
+            _ => None,
+        })
+        .collect();
+    let guards: Vec<serde_json::Value> = r
+        .guards
+        .iter()
+        .map(|g| {
+            let mut entry = serde_json::json!({
+                "arm": g.arm,
+                "guard": serde_json::to_value(&g.guard.guard).unwrap_or(serde_json::Value::Null),
+                "passed": g.guard.passed,
+            });
+            if let Some(error) = &g.guard.error {
+                entry["error"] = serde_json::Value::String(error.clone());
+            }
+            entry
+        })
+        .collect();
+    let effects: Vec<serde_json::Value> = r
+        .effect_runs
+        .iter()
+        .map(|run| {
+            let expr = serde_json::to_value(&run.effect).unwrap_or(serde_json::Value::Null);
+            let (head, args) = match expr.as_array().map(Vec::as_slice) {
+                Some([serde_json::Value::String(head), args @ ..]) => (head.clone(), args.to_vec()),
+                _ => (String::new(), Vec::new()),
+            };
+            let status = match run.status {
+                EffectRunStatus::Executed => "executed",
+                EffectRunStatus::Failed => "failed",
+                EffectRunStatus::Skipped => "skipped",
+            };
+            let mut entry = serde_json::json!({ "type": head, "args": args, "status": status });
+            if let Some(error) = &run.error {
+                entry["error"] = serde_json::Value::String(error.clone());
+            }
+            entry
+        })
+        .collect();
+    serde_json::json!({
+        "trait": trait_name,
+        "executed": r.executed,
+        "previousState": r.previous_state,
+        "newState": r.new_state,
+        "emits": emits,
+        "firedArm": r.fired_arm,
+        "guards": guards,
+        "effects": effects,
+    })
+}
+
 fn run_cascade(path: &Path, steps: &serde_json::Value) -> anyhow::Result<serde_json::Value> {
     use orbital_compiler::{phases::lazy::resolve_program_with_path, CompilerOptions};
-    use orbital_core::effects::Effect;
     use orbital_core::runtime::{EntitySource, InMemoryEntityCache, RuntimeKernel};
 
     let steps = steps
@@ -292,6 +358,17 @@ fn run_cascade(path: &Path, steps: &serde_json::Value) -> anyhow::Result<serde_j
                 .ok_or_else(|| anyhow::anyhow!("step {i}: `{key}` must be a string"))
         };
         let (trait_name, event) = (field("trait")?, field("event")?);
+        if let Some(from) = step["from"].as_str() {
+            let entity = kernel.snapshot_trait(trait_name, None).entity;
+            kernel.restore_trait(
+                trait_name,
+                None,
+                orbital_core::TraitSnapshot {
+                    state: from.to_string(),
+                    entity,
+                },
+            );
+        }
         let payload = match &step["payload"] {
             serde_json::Value::Null => orbital_core::Value::Null,
             p => to_core_value(p)?,
@@ -299,29 +376,8 @@ fn run_cascade(path: &Path, steps: &serde_json::Value) -> anyhow::Result<serde_j
         let outcomes = kernel
             .dispatch(trait_name, None, event, payload)
             .map_err(|e| anyhow::anyhow!("step {i} dispatch failed: {e}"))?;
-        let outcomes: Vec<serde_json::Value> = outcomes
-            .iter()
-            .map(|(t, r)| {
-                let emits: Vec<serde_json::Value> = r
-                    .effect_results
-                    .iter()
-                    .filter_map(|er| match &er.effect {
-                        Effect::Emit { event, payload } => Some(serde_json::json!({
-                            "event": event,
-                            "payload": serde_json::to_value(payload).unwrap_or(serde_json::Value::Null),
-                        })),
-                        _ => None,
-                    })
-                    .collect();
-                serde_json::json!({
-                    "trait": t,
-                    "executed": r.executed,
-                    "previousState": r.previous_state,
-                    "newState": r.new_state,
-                    "emits": emits,
-                })
-            })
-            .collect();
+        let outcomes: Vec<serde_json::Value> =
+            outcomes.iter().map(|(t, r)| outcome_report(t, r)).collect();
         let states: serde_json::Map<String, serde_json::Value> = kernel
             .trait_snapshot(Some("singleton"))
             .into_iter()
@@ -452,4 +508,128 @@ fn run_execute(
         execution_time_ms: 0,
         schema_path,
     })
+}
+
+#[cfg(test)]
+mod outcome_report_tests {
+    use super::*;
+    use orbital_core::runtime::{EffectRun, EffectRunStatus, ProcessEventResult};
+    use orbital_core::state_machine::{ArmGuard, GuardResult};
+
+    fn result(fired_arm: Option<usize>, runs: Vec<EffectRun>) -> ProcessEventResult {
+        let guard: SExpression = serde_json::from_str(r#"["=", "@payload.key", "v"]"#).unwrap();
+        ProcessEventResult {
+            executed: fired_arm.is_some(),
+            previous_state: "NORMAL".into(),
+            new_state: if fired_arm.is_some() {
+                "VISUAL".into()
+            } else {
+                "NORMAL".into()
+            },
+            effects_executed: 0,
+            effect_results: Vec::new(),
+            entity_data: Value::Null,
+            linked_entity: "Doc".into(),
+            event: fired_arm.map(|_| "KEY".to_string()),
+            payload: Value::Null,
+            entry: None,
+            fired_arm,
+            guards: vec![ArmGuard {
+                arm: 1,
+                guard: GuardResult::passed(guard, Value::Bool(true)),
+            }],
+            effect_runs: runs,
+        }
+    }
+
+    #[test]
+    fn a_fired_outcome_reports_its_arm_guards_and_authored_effects() {
+        let set: SExpression =
+            serde_json::from_str(r#"["set", "@entity.mode", "visual"]"#).unwrap();
+        let report = outcome_report(
+            "Modes",
+            &result(
+                Some(1),
+                vec![EffectRun {
+                    effect: set,
+                    status: EffectRunStatus::Executed,
+                    error: None,
+                }],
+            ),
+        );
+        assert_eq!(report["firedArm"], serde_json::json!(1));
+        assert_eq!(
+            report["guards"],
+            serde_json::json!([{ "arm": 1, "guard": ["=", "@payload.key", "v"], "passed": true }])
+        );
+        assert_eq!(
+            report["effects"],
+            serde_json::json!([{ "type": "set", "args": ["@entity.mode", "visual"], "status": "executed" }])
+        );
+        assert_eq!(report["previousState"], serde_json::json!("NORMAL"));
+    }
+
+    #[test]
+    fn control_a_blocked_outcome_has_a_null_arm_and_no_effects() {
+        let report = outcome_report("Modes", &result(None, Vec::new()));
+        assert_eq!(report["firedArm"], serde_json::Value::Null);
+        assert_eq!(report["effects"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn edge_a_failed_effect_carries_its_error() {
+        let persist: SExpression =
+            serde_json::from_str(r#"["persist", "create", "Doc", "@entity"]"#).unwrap();
+        let report = outcome_report(
+            "Modes",
+            &result(
+                Some(1),
+                vec![EffectRun {
+                    effect: persist,
+                    status: EffectRunStatus::Failed,
+                    error: Some("denied".into()),
+                }],
+            ),
+        );
+        assert_eq!(report["effects"][0]["status"], serde_json::json!("failed"));
+        assert_eq!(report["effects"][0]["error"], serde_json::json!("denied"));
+    }
+}
+
+#[cfg(test)]
+mod cascade_from_tests {
+    use super::*;
+
+    const MODES: &str = r#"{"name":"EditorApp","orbitals":[{"name":"Editor","entity":{"name":"Doc","persistence":"runtime","fields":[{"name":"id","type":"string"}]},"pages":[],"traits":[{"name":"Modes","linkedEntity":"Doc","stateMachine":{"states":[{"name":"NORMAL","isInitial":true},{"name":"INSERT"},{"name":"VISUAL"}],"transitions":[{"from":"NORMAL","to":"INSERT","event":"KEY","guard":["=","@payload.key","i"]},{"from":"NORMAL","to":"VISUAL","event":"KEY","guard":["=","@payload.key","v"]}]}}]}]}"#;
+
+    fn run(steps: serde_json::Value) -> serde_json::Value {
+        let dir = std::env::temp_dir().join(format!("orb-cascade-from-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("modes.orb");
+        std::fs::write(&path, MODES).unwrap();
+        run_cascade(&path, &steps).unwrap()
+    }
+
+    #[test]
+    fn a_step_with_from_plays_from_that_state() {
+        let report = run(serde_json::json!([
+            { "trait": "Modes", "event": "KEY", "payload": { "key": "i" } },
+            { "trait": "Modes", "event": "KEY", "payload": { "key": "v" }, "from": "NORMAL" }
+        ]));
+        let second = &report["steps"][1]["outcomes"][0];
+        assert_eq!(second["previousState"], serde_json::json!("NORMAL"));
+        assert_eq!(second["newState"], serde_json::json!("VISUAL"));
+        assert_eq!(second["firedArm"], serde_json::json!(1));
+    }
+
+    #[test]
+    fn control_without_from_the_step_plays_where_the_last_one_left_the_trait() {
+        let report = run(serde_json::json!([
+            { "trait": "Modes", "event": "KEY", "payload": { "key": "i" } },
+            { "trait": "Modes", "event": "KEY", "payload": { "key": "v" } }
+        ]));
+        let second = &report["steps"][1]["outcomes"][0];
+        assert_eq!(second["previousState"], serde_json::json!("INSERT"));
+        assert_eq!(second["executed"], serde_json::json!(false));
+    }
 }

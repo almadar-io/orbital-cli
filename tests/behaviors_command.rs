@@ -287,6 +287,9 @@ fn orb(project: &Project, bun_stub: &Path, args: &[&str]) -> Output {
         .args(args)
         .current_dir(project.path())
         .env("ORB_BUN_PATH", bun_stub)
+        // The machine's own `~/.orb` user store must not join discovery.
+        .env("HOME", project.path().join("home"))
+        .env("ORB_NO_AUTO_SETUP", "1")
         .output()
         .expect("spawn orb")
 }
