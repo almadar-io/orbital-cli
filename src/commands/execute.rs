@@ -350,6 +350,7 @@ fn run_cascade(path: &Path, steps: &serde_json::Value) -> anyhow::Result<serde_j
         .register_schema(resolved)
         .map_err(|e| anyhow::anyhow!("Failed to register {}: {e}", path.display()))?;
 
+    let known = kernel.trait_snapshot(Some("singleton"));
     let mut reports = Vec::with_capacity(steps.len());
     for (i, step) in steps.iter().enumerate() {
         let field = |key: &str| {
@@ -358,6 +359,9 @@ fn run_cascade(path: &Path, steps: &serde_json::Value) -> anyhow::Result<serde_j
                 .ok_or_else(|| anyhow::anyhow!("step {i}: `{key}` must be a string"))
         };
         let (trait_name, event) = (field("trait")?, field("event")?);
+        if !known.contains_key(trait_name) {
+            anyhow::bail!("step {i}: {} has no trait \"{trait_name}\"", path.display());
+        }
         if let Some(from) = step["from"].as_str() {
             let entity = kernel.snapshot_trait(trait_name, None).entity;
             kernel.restore_trait(
@@ -602,12 +606,38 @@ mod cascade_from_tests {
 
     const MODES: &str = r#"{"name":"EditorApp","orbitals":[{"name":"Editor","entity":{"name":"Doc","persistence":"runtime","fields":[{"name":"id","type":"string"}]},"pages":[],"traits":[{"name":"Modes","linkedEntity":"Doc","stateMachine":{"states":[{"name":"NORMAL","isInitial":true},{"name":"INSERT"},{"name":"VISUAL"}],"transitions":[{"from":"NORMAL","to":"INSERT","event":"KEY","guard":["=","@payload.key","i"]},{"from":"NORMAL","to":"VISUAL","event":"KEY","guard":["=","@payload.key","v"]}]}}]}]}"#;
 
-    fn run(steps: serde_json::Value) -> serde_json::Value {
-        let dir = std::env::temp_dir().join(format!("orb-cascade-from-{}", std::process::id()));
+    /// A program file of its own per call: tests run in parallel threads of one process.
+    fn program(content: &str) -> std::path::PathBuf {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!("orb-cascade-from-{}-{n}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("modes.orb");
-        std::fs::write(&path, MODES).unwrap();
-        run_cascade(&path, &steps).unwrap()
+        std::fs::write(&path, content).unwrap();
+        path
+    }
+
+    fn run(steps: serde_json::Value) -> serde_json::Value {
+        run_cascade(&program(MODES), &steps).unwrap()
+    }
+
+    #[test]
+    fn a_step_naming_a_trait_the_program_lacks_is_refused() {
+        let error = run_cascade(
+            &program(MODES),
+            &serde_json::json!([{ "trait": "Nope", "event": "KEY" }]),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("\"Nope\""), "{error}");
+    }
+
+    #[test]
+    fn edge_an_empty_program_file_is_refused() {
+        assert!(run_cascade(
+            &program(""),
+            &serde_json::json!([{ "trait": "Modes", "event": "KEY" }])
+        )
+        .is_err());
     }
 
     #[test]
