@@ -46,18 +46,13 @@ pub(crate) fn validate_schema(
     deny_warnings: bool,
     final_program: bool,
 ) -> anyhow::Result<()> {
+    if json_output {
+        let output =
+            validation_report(path, patterns_path, services_path, deny_warnings, final_program)?;
+        println!("{}", serde_json::to_string_pretty(&output)?);
+        return Ok(());
+    }
     if let Err(e) = crate::utils::patterns::ensure_language_ready() {
-        if json_output {
-            let output = ValidationJsonOutput {
-                success: true,
-                valid: false,
-                errors: Some(vec![language_data_json_error(&e)]),
-                warnings: None,
-                stats: None,
-            };
-            println!("{}", serde_json::to_string_pretty(&output)?);
-            return Ok(());
-        }
         anyhow::bail!("{}: {e}", e.code());
     }
 
@@ -67,21 +62,40 @@ pub(crate) fn validate_schema(
     // Load services registry (explicit path or the installed @almadar/core)
     let service_registry = load_services_registry(services_path)?;
 
-    if json_output {
-        return validate_schema_json(
-            path,
-            extra_patterns,
-            service_registry,
-            deny_warnings,
-            final_program,
-        );
-    }
-
     println!("Validating schema: {}", path.display());
 
     // Use native Rust validation only
     validate_schema_native(
         path,
+        extra_patterns,
+        service_registry,
+        deny_warnings,
+        final_program,
+    )
+}
+
+/// `orb validate --json`'s report as a value — what the CLI prints and `orb mcp` returns.
+pub(crate) fn validation_report(
+    path: &std::path::Path,
+    patterns_path: Option<&std::path::Path>,
+    services_path: Option<&std::path::Path>,
+    deny_warnings: bool,
+    final_program: bool,
+) -> anyhow::Result<ValidationJsonOutput> {
+    if let Err(e) = crate::utils::patterns::ensure_language_ready() {
+        return Ok(ValidationJsonOutput {
+            success: true,
+            valid: false,
+            errors: Some(vec![language_data_json_error(&e)]),
+            warnings: None,
+            stats: None,
+        });
+    }
+    let path = path.to_path_buf();
+    let extra_patterns = load_extra_patterns(&path, patterns_path);
+    let service_registry = load_services_registry(services_path)?;
+    validate_schema_json(
+        &path,
         extra_patterns,
         service_registry,
         deny_warnings,
@@ -170,7 +184,7 @@ fn validate_schema_json(
     service_registry: orbital_compiler::embedded::ServiceRegistryData,
     deny_warnings: bool,
     final_program: bool,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<ValidationJsonOutput> {
     use orbital_compiler::phases::inline::inline_schema_with_orbital_diagnostics;
     use orbital_compiler::{compile_schema, validate_comprehensive_full, CompilerOptions};
     use orbital_core::ir::{OirValidator, ValidationSeverity};
@@ -201,8 +215,7 @@ fn validate_schema_json(
             warnings: None,
             stats: None,
         };
-        println!("{}", serde_json::to_string_pretty(&output)?);
-        return Ok(());
+        return Ok(output);
     }
 
     // Step 1: Parse schema (auto-detect LOLO vs JSON syntax)
@@ -227,8 +240,7 @@ fn validate_schema_json(
                 warnings: None,
                 stats: None,
             };
-            println!("{}", serde_json::to_string_pretty(&output)?);
-            return Ok(());
+            return Ok(output);
         }
     };
 
@@ -248,8 +260,7 @@ fn validate_schema_json(
                     warnings: None,
                     stats: None,
                 };
-                println!("{}", serde_json::to_string_pretty(&output)?);
-                return Ok(());
+                return Ok(output);
             }
         };
 
@@ -393,8 +404,7 @@ fn validate_schema_json(
             warnings: None,
             stats: None,
         };
-        println!("{}", serde_json::to_string_pretty(&output)?);
-        return Ok(());
+        return Ok(output);
     }
 
     // Collect stats
@@ -580,8 +590,7 @@ fn validate_schema_json(
         stats: Some(stats),
     };
 
-    println!("{}", serde_json::to_string_pretty(&output)?);
-    Ok(())
+    Ok(output)
 }
 
 /// Collected validation diagnostics (formatted, self-describing strings).

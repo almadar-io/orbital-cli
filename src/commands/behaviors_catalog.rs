@@ -171,7 +171,7 @@ struct BehaviorValueOut {
 }
 
 #[derive(Serialize)]
-struct CatalogEntryOut {
+pub(crate) struct CatalogEntryOut {
     behavior: String,
     package: String,
     topic: String,
@@ -244,6 +244,28 @@ pub(crate) fn run_catalog(
     exposure: Vec<String>,
     json: bool,
 ) -> anyhow::Result<()> {
+    let out = catalog(&paths, &exposure)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&out)?);
+    } else {
+        for e in out {
+            println!(
+                "{:<48} {:<9} {:<10} {}",
+                e.behavior,
+                e.level,
+                e.exposure.as_deref().unwrap_or("-"),
+                e.description
+            );
+        }
+    }
+    Ok(())
+}
+
+/// The installed behaviors under `paths` — what `orb behaviors catalog` prints and `orb mcp` returns.
+pub(crate) fn catalog(
+    paths: &[String],
+    exposure: &[String],
+) -> anyhow::Result<Vec<CatalogEntryOut>> {
     if paths.is_empty() {
         anyhow::bail!("give at least one scope path, e.g. `almadar-std/ui/core/molecules`");
     }
@@ -400,21 +422,7 @@ pub(crate) fn run_catalog(
         entry.model = model.clone();
     }
 
-    let out: Vec<&CatalogEntryOut> = entries.values().collect();
-    if json {
-        println!("{}", serde_json::to_string_pretty(&out)?);
-    } else {
-        for e in out {
-            println!(
-                "{:<48} {:<9} {:<10} {}",
-                e.behavior,
-                e.level,
-                e.exposure.as_deref().unwrap_or("-"),
-                e.description
-            );
-        }
-    }
-    Ok(())
+    Ok(entries.into_values().collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -1182,39 +1190,63 @@ pub(crate) fn run_expects(spec: String, _json: bool) -> anyhow::Result<()> {
 }
 
 pub(crate) fn run_describe(spec: String, _json: bool) -> anyhow::Result<()> {
-    let (value, behavior, trait_name) = if spec == "-" {
+    let target = if spec == "-" {
         let mut buf = String::new();
         std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)?;
-        let value: Value = serde_json::from_str(&buf)
-            .map_err(|e| anyhow::anyhow!("stdin is not a trait value: {e}"))?;
-        let field = |k: &str| {
-            value
-                .get(k)
-                .and_then(Value::as_str)
-                .map(str::to_string)
-                .ok_or_else(|| anyhow::anyhow!("trait value has no string `{k}`"))
-        };
-        if value.get("orbital").is_some() {
-            let out = describe_behavior(&field("behavior")?, Some(&field("orbital")?))?;
-            println!("{}", serde_json::to_string_pretty(&out)?);
-            return Ok(());
-        }
-        let (b, t) = (field("behavior")?, field("trait")?);
-        (Some(value), b, t)
-    } else if spec.contains(TRAITS_SEGMENT) {
-        let (b, t) = split_trait_spec(&spec)?;
-        (None, b, t)
+        DescribeTarget::Value(
+            serde_json::from_str(&buf)
+                .map_err(|e| anyhow::anyhow!("stdin is not a trait value: {e}"))?,
+        )
     } else {
-        let (behavior, orbital) = match spec.rfind(ORBITALS_SEGMENT).filter(|&i| i > 0) {
-            Some(i) => (
-                spec[..i].to_string(),
-                Some(spec[i + ORBITALS_SEGMENT.len()..].to_string()),
-            ),
-            None => (spec.clone(), None),
-        };
-        let out = describe_behavior(&behavior, orbital.as_deref())?;
-        println!("{}", serde_json::to_string_pretty(&out)?);
-        return Ok(());
+        DescribeTarget::Spec(spec)
+    };
+    println!("{}", serde_json::to_string_pretty(&describe(target)?)?);
+    Ok(())
+}
+
+/// What `orb behaviors describe` reads: a specifier, or a trait/orbital value.
+pub(crate) enum DescribeTarget {
+    Spec(String),
+    Value(Value),
+}
+
+/// `orb behaviors describe` as a value — what the CLI prints and `orb mcp` returns.
+pub(crate) fn describe(target: DescribeTarget) -> anyhow::Result<Value> {
+    let (value, behavior, trait_name) = match target {
+        DescribeTarget::Value(value) => {
+            let field = |k: &str| {
+                value
+                    .get(k)
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .ok_or_else(|| anyhow::anyhow!("trait value has no string `{k}`"))
+            };
+            if value.get("orbital").is_some() {
+                return Ok(serde_json::to_value(describe_behavior(
+                    &field("behavior")?,
+                    Some(&field("orbital")?),
+                )?)?);
+            }
+            let (b, t) = (field("behavior")?, field("trait")?);
+            (Some(value), b, t)
+        }
+        DescribeTarget::Spec(spec) if spec.contains(TRAITS_SEGMENT) => {
+            let (b, t) = split_trait_spec(&spec)?;
+            (None, b, t)
+        }
+        DescribeTarget::Spec(spec) => {
+            let (behavior, orbital) = match spec.rfind(ORBITALS_SEGMENT).filter(|&i| i > 0) {
+                Some(i) => (
+                    spec[..i].to_string(),
+                    Some(spec[i + ORBITALS_SEGMENT.len()..].to_string()),
+                ),
+                None => (spec.clone(), None),
+            };
+            return Ok(serde_json::to_value(describe_behavior(
+                &behavior,
+                orbital.as_deref(),
+            )?)?);
+        }
     };
 
     let resolved = resolve(&behavior)?;
@@ -1235,20 +1267,24 @@ pub(crate) fn run_describe(spec: String, _json: bool) -> anyhow::Result<()> {
             serde_json::json!({ "behavior": canonical, "trait": trait_name })
         }
     };
-    let out = DescriptionOut {
+    Ok(serde_json::to_value(DescriptionOut {
         value,
         knobs,
         events,
         model,
-    };
-    println!("{}", serde_json::to_string_pretty(&out)?);
-    Ok(())
+    })?)
 }
 
 pub(crate) fn run_source(spec: String, _json: bool) -> anyhow::Result<()> {
+    println!("{}", serde_json::to_string_pretty(&source(&spec)?)?);
+    Ok(())
+}
+
+/// `orb behaviors source` as a value: the behavior a specifier names, as a program.
+pub(crate) fn source(spec: &str) -> anyhow::Result<Value> {
     let behavior = match spec.rfind(TRAITS_SEGMENT) {
         Some(i) if i > 0 => spec[..i].to_string(),
-        _ => spec,
+        _ => spec.to_string(),
     };
     let resolved = resolve(&behavior)?;
     let value: Value = if resolved.path.extension().is_some_and(|e| e == "orb") {
@@ -1259,8 +1295,7 @@ pub(crate) fn run_source(spec: String, _json: bool) -> anyhow::Result<()> {
     } else {
         serde_json::to_value(&resolved.schema)?
     };
-    println!("{}", serde_json::to_string_pretty(&value)?);
-    Ok(())
+    Ok(value)
 }
 
 #[cfg(test)]
