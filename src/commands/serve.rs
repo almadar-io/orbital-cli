@@ -2,7 +2,7 @@
 
 use crate::commands::compile::compile_schema;
 use crate::utils::find_bun;
-use crate::{ServerFrameworkArg, ShellMode, ShellType};
+use crate::{HostArg, ServerFrameworkArg, ShellMode, ShellType};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
@@ -45,6 +45,7 @@ pub(crate) fn run_serve(
             false, // verbose
             false, // dev_logs
             ServerFrameworkArg::Hono,
+            HostArg::Generated,
             None, // emit_orb
         )?;
     }

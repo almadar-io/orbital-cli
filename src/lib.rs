@@ -109,6 +109,16 @@ pub enum ServerFrameworkArg {
     Hono,
 }
 
+/// Who runs a generated TypeScript app's execution steps
+#[derive(Debug, Clone, Copy, ValueEnum, Default)]
+pub enum HostArg {
+    /// The generated per-event handlers and hooks (default)
+    #[default]
+    Generated,
+    /// The embedded `@almadar/kernel` (Express server only)
+    Kernel,
+}
+
 /// Compilation mode for mixed-language support
 #[derive(Debug, Clone, Copy, ValueEnum, Default)]
 pub enum ShellMode {
@@ -480,6 +490,10 @@ enum Commands {
         /// Server framework for backend code generation (express or hono)
         #[arg(long, default_value = "express")]
         server: ServerFrameworkArg,
+
+        /// Who runs the generated TypeScript app: the generated handlers and hooks, or the embedded kernel
+        #[arg(long, default_value = "generated")]
+        host: HostArg,
 
         /// Write the lowered .orb JSON to this path (for .lolo inputs).
         /// Useful for inspecting how a .lolo file lowers without running codegen.
@@ -1256,6 +1270,7 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
             verbose,
             dev_logs,
             server,
+            host,
             emit_orb,
         }) => compile_schema(
             &path,
@@ -1269,6 +1284,7 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
             verbose,
             dev_logs,
             server,
+            host,
             emit_orb.as_deref(),
         ),
         Some(Commands::Test {

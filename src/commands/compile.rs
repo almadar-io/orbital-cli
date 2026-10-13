@@ -5,7 +5,7 @@ use crate::utils::{
     detect_language, detect_syntax, load_project_patterns, shell_programs, strip_json_nulls,
     translate_schema_content, InputSyntax,
 };
-use crate::{ServerFrameworkArg, ShellMode, ShellType};
+use crate::{HostArg, ServerFrameworkArg, ShellMode, ShellType};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -78,6 +78,7 @@ pub(crate) fn compile_schema(
     verbose: bool,
     dev_logs: bool,
     server_framework: ServerFrameworkArg,
+    host: HostArg,
     emit_orb: Option<&std::path::Path>,
 ) -> anyhow::Result<()> {
     // Handle mixed compilation (--frontend + --backend)
@@ -194,6 +195,13 @@ pub(crate) fn compile_schema(
             Value::from(detect_language(&content_raw).unwrap_or_else(|| "en".to_string())),
         );
         shell_options.insert("devLogs".to_string(), Value::from(if dev_logs { "true" } else { "false" }));
+        shell_options.insert(
+            "host".to_string(),
+            Value::from(match host {
+                HostArg::Generated => "generated",
+                HostArg::Kernel => "kernel",
+            }),
+        );
         if let Some(patterns) = load_project_patterns(path, patterns_path) {
             shell_options.insert("projectPatterns".to_string(), patterns);
         }

@@ -543,6 +543,10 @@ mod outcome_report_tests {
                 guard: GuardResult::passed(guard, Value::Bool(true)),
             }],
             effect_runs: runs,
+            consumed_emits: Vec::new(),
+            failure: None,
+            callsite_payload: None,
+            cascade_dropped: Vec::new(),
         }
     }
 
