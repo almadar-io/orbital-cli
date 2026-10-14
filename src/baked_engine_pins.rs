@@ -3,14 +3,14 @@
 //! Source: installed-package identity (or workspace package.json fallback in
 //! dev checkouts) for @almadar-io/runtime-verify-tool and @almadar-io/verify-tool.
 //!
-//! Last synced: 2026-10-12
+//! Last synced: 2026-10-14
 //! To regenerate: npx almadar-sync engine-pins (also runs as one step of `npx almadar-sync rust`)
 //!
 //! DO NOT EDIT MANUALLY - changes will be overwritten on next sync.
 
-pub const RUNTIME_VERIFY_ENGINE: (&str, &str) = ("@almadar-io/runtime-verify-tool", "4.257.0");
-pub const COMPILED_VERIFY_ENGINE: (&str, &str) = ("@almadar-io/verify-tool", "3.191.0");
-pub const BAKED_CORE: (&str, &str) = ("@almadar/core", "10.127.0");
+pub const RUNTIME_VERIFY_ENGINE: (&str, &str) = ("@almadar-io/runtime-verify-tool", "4.259.0");
+pub const COMPILED_VERIFY_ENGINE: (&str, &str) = ("@almadar-io/verify-tool", "3.193.0");
+pub const BAKED_CORE: (&str, &str) = ("@almadar/core", "10.128.0");
 pub const BAKED_STD_RANGE: (&str, &str) = ("@almadar/std", "^16");
-pub const BAKED_LANGUAGE_PACKS: &[(&str, &str)] = &[("@almadar/lolo-ar", "1.2.0"), ("@almadar/lolo-sl", "1.2.0")];
+pub const BAKED_LANGUAGE_PACKS: &[(&str, &str)] = &[("@almadar/lolo-ar", "1.3.0"), ("@almadar/lolo-sl", "1.3.0")];
 pub const BAKED_PROGRAMS: &[(&str, &str)] = &[("@almadar/orb-shell-typescript", "^18"), ("@almadar/orb-desktop", "^18")];
