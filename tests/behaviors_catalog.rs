@@ -21,6 +21,9 @@ fn write(path: &Path, content: &str) {
 
 const ORB: &str = r#"{"name":"fake","orbitals":[{"name":"FakeOrbital","entity":{"name":"Thing","fields":[]},"traits":[]}]}"#;
 
+/// A card behavior whose `CardView` declares the knobs and events the signature fixture lists.
+const CARD_ORB: &str = r#"{"name":"card","orbitals":[{"name":"CardOrbital","entity":{"name":"Card","persistence":"runtime","fields":[]},"traits":[{"name":"CardView","linkedEntity":"Card","config":{"title":{"type":"string","default":"Hello","label":"Title","tier":"domain"},"size":{"type":"number","default":3}},"emits":[{"event":"CARD_OPENED"}],"listens":[{"event":"OPEN","triggers":"OPEN"}],"stateMachine":{"states":[{"name":"shown","isInitial":true}],"events":[{"key":"OPEN","name":"Open"},{"key":"INIT","name":"Initialize"}],"transitions":[{"from":"shown","to":"shown","event":"OPEN","effects":[["emit","CARD_OPENED"]]},{"from":"shown","to":"shown","event":"INIT"}]}}]}]}"#;
+
 fn package(
     root: &Path,
     dir: &str,
@@ -33,12 +36,11 @@ fn package(
     write(
         &pkg.join("package.json"),
         &format!(
-            r#"{{"name":"{dir}","version":"1.0.0","orb":{{"prefix":"{prefix}","registry":"behaviors/registry","index":"behaviors/index.json","factorySignatures":"behaviors/registry/factory-signatures.json","loloContracts":"behaviors/contracts.json","signatures":"behaviors/signatures.lolo","embeddings":["dist/embeddings.json","dist/knobs.json"],"compiler":">=0.0.0"}}}}"#
+            r#"{{"name":"{dir}","version":"1.0.0","orb":{{"prefix":"{prefix}","registry":"behaviors/registry","index":"behaviors/index.json","loloContracts":"behaviors/contracts.json","signatures":"behaviors/signatures.lolo","embeddings":["dist/embeddings.json","dist/knobs.json"],"compiler":">=0.0.0"}}}}"#
         ),
     );
     write(&pkg.join("behaviors/index.json"), behaviors);
     write(&pkg.join("behaviors/contracts.json"), "{}");
-    write(&pkg.join("behaviors/signatures.lolo"), "");
     write(
         &pkg.join("dist/embeddings.json"),
         &format!(
@@ -65,7 +67,6 @@ fn index(prefix: &str) -> String {
     )
 }
 
-const SIGNATURES: &str = r#"{"generatedFromStdVersion":"1","knobDefs":[{"key":"title","type":"string","default":"Hello","label":"Title","tier":"domain"},{"key":"size","type":"number","default":3}],"signatures":[{"organism":"alpha-card","orbital":"CardOrbital","traits":[{"name":"CardView","emittedEvents":["CARD_OPENED"],"listenedEvents":["OPEN"],"transitionEvents":["OPEN","INIT"],"overridableConfigKeyRefs":[0,1]}]}]}"#;
 
 fn project(second_model: &str) -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
@@ -84,9 +85,8 @@ fn project(second_model: &str) -> tempfile::TempDir {
         "m1",
         &index("alpha"),
         &[
-            ("behaviors/registry/ui/core/atoms/alpha-card.orb", ORB),
+            ("behaviors/registry/ui/core/atoms/alpha-card.orb", CARD_ORB),
             ("behaviors/registry/app/organisms/alpha-board.orb", ORB),
-            ("behaviors/registry/factory-signatures.json", SIGNATURES),
         ],
     );
     package(
@@ -96,12 +96,8 @@ fn project(second_model: &str) -> tempfile::TempDir {
         second_model,
         &index("beta"),
         &[
-            ("behaviors/registry/ui/core/atoms/beta-card.orb", ORB),
+            ("behaviors/registry/ui/core/atoms/beta-card.orb", CARD_ORB),
             ("behaviors/registry/app/organisms/beta-board.orb", ORB),
-            (
-                "behaviors/registry/factory-signatures.json",
-                r#"{"signatures":[]}"#,
-            ),
         ],
     );
     dir
@@ -289,20 +285,25 @@ fn describe_returns_knobs_events_and_vectors() {
     assert_eq!(v["model"], "m1");
     assert_eq!(
         v["events"],
-        serde_json::json!({"emits":["CARD_OPENED"],"listens":["OPEN"],"transitions":["OPEN","INIT"]})
+        serde_json::json!({"emits":["CARD_OPENED"],"listens":["OPEN"],"transitions":["OPEN","INIT"],"domain":[]})
     );
     let knobs = v["knobs"].as_array().unwrap();
     assert_eq!(knobs.len(), 2);
-    assert_eq!(knobs[0]["key"], "title");
-    assert_eq!(knobs[0]["type"], "string");
-    assert_eq!(knobs[0]["default"], "Hello");
-    assert_eq!(knobs[0]["tier"], "domain");
-    assert_close(&knobs[0]["vector"], &[1.27, -0.01, -1.28, 0.1]);
     // A knob without a shipped vector carries no `vector` key.
-    assert_eq!(knobs[1]["key"], "size");
-    assert!(knobs[1].get("vector").is_none());
+    assert_eq!(knobs[0]["key"], "size");
+    assert!(knobs[0].get("vector").is_none());
+    assert_eq!(knobs[1]["key"], "title");
+    assert_eq!(knobs[1]["type"], "string");
+    assert_eq!(knobs[1]["default"], "Hello");
+    assert_eq!(knobs[1]["tier"], "domain");
+    assert_close(&knobs[1]["vector"], &[1.27, -0.01, -1.28, 0.1]);
+    assert!(v["machine"]["stateMachine"]["transitions"].is_array());
+    assert!(v["source"]["text"]
+        .as_str()
+        .unwrap()
+        .starts_with("trait CardView"));
     let top: Vec<&String> = v.as_object().unwrap().keys().collect();
-    assert_eq!(top.len(), 4, "strict key set, got {top:?}");
+    assert_eq!(top.len(), 6, "strict key set, got {top:?}");
 }
 
 #[test]
@@ -343,7 +344,7 @@ fn source_prints_the_resolved_orb_and_accepts_workspace_relative_specs() {
         p.path(),
         &["behaviors", "source", "--json", "alpha/alpha-card"],
     ));
-    assert_eq!(v["name"], "fake");
+    assert_eq!(v["name"], "card");
     write(
         &p.path().join("orbitals/mine.orb"),
         r#"{"name":"mine","orbitals":[]}"#,
@@ -717,4 +718,223 @@ fn describe_marks_the_identity_record() {
     ));
     assert_eq!(v["orbitals"][0]["entity"]["identity"], true);
     assert_eq!(v["orbitals"][1]["entity"]["identity"], false);
+}
+
+const DOOR_ORB: &str = r#"{"name":"door","orbitals":[{"name":"DoorOrbital","entity":{"name":"Door","persistence":"runtime","fields":[{"name":"open","type":"boolean","default":false}]},"traits":[{"name":"DoorLife","linkedEntity":"Door","stateMachine":{"states":[{"name":"closed","isInitial":true},{"name":"opened"}],"events":[{"key":"INIT","name":"Initialize"},{"key":"OPEN","name":"Open"},{"key":"CLOSE","name":"Close"}],"transitions":[{"from":"closed","to":"closed","event":"INIT"},{"from":"closed","to":"opened","event":"OPEN","guard":["not","@entity.open"],"effects":[["set","@entity.open",true]]},{"from":"opened","to":"closed","event":"CLOSE","effects":[["set","@entity.open",false]]}]}}]}]}"#;
+
+const PORCH_ORB: &str = r#"{"name":"porch","orbitals":[{"name":"PorchOrbital","uses":[{"from":"./door","as":"Door"}],"entity":{"name":"Porch","persistence":"runtime","fields":[]},"traits":[{"ref":"Door.traits.DoorLife","name":"FrontDoor","events":{"OPEN":"UNLOCK"}}]}]}"#;
+
+const TAGGED_DOOR_ORB: &str = r#"{"name":"door","orbitals":[{"name":"DoorOrbital","entity":{"name":"Door","persistence":"runtime","fields":[{"name":"open","type":"boolean","default":false}]},"traits":[{"name":"DoorLife","linkedEntity":"Door","capabilities":["hinged","lockable"],"stateMachine":{"states":[{"name":"closed","isInitial":true}],"transitions":[{"from":"closed","to":"closed","event":"INIT"}]}}]}]}"#;
+
+#[test]
+fn describe_reports_each_traits_composed_ref_and_capabilities() {
+    let p = project("m1");
+    write(&p.path().join("orbitals/door.orb"), TAGGED_DOOR_ORB);
+    write(&p.path().join("orbitals/porch.orb"), PORCH_ORB);
+
+    let porch = json(&orb(
+        p.path(),
+        &["behaviors", "describe", "--json", "./orbitals/porch"],
+    ));
+    let front = &porch["orbitals"][0]["traits"][0];
+    assert_eq!(front["trait"], "FrontDoor");
+    assert_eq!(front["ref"], "Door.traits.DoorLife");
+    assert_eq!(front["capabilities"], serde_json::json!(["hinged", "lockable"]));
+
+    // Control: the atom defines its own trait, so it composes nothing and keeps its tags.
+    let door = json(&orb(
+        p.path(),
+        &["behaviors", "describe", "--json", "./orbitals/door"],
+    ));
+    let life = &door["orbitals"][0]["traits"][0];
+    assert!(life.get("ref").is_none(), "{life}");
+    assert_eq!(life["capabilities"], serde_json::json!(["hinged", "lockable"]));
+}
+
+const LIB_ORB: &str = r#"{"name":"lib","orbitals":[{"name":"ItemOrbital","entity":{"name":"Item","fields":[{"name":"id","type":"string","required":true},{"name":"note","type":"relation","relation":{"entity":"Note","cardinality":"one"}}]},"traits":[],"pages":[]},{"name":"NoteOrbital","entity":{"name":"Note","fields":[{"name":"id","type":"string","required":true}]},"traits":[],"pages":[]}]}"#;
+
+const SHELF_ORB: &str = r#"{"name":"shelf","orbitals":[{"name":"ShelfItem","uses":[{"from":"./lib","as":"Lib"}],"entity":"Lib.orbitals.ItemOrbital.entity","traits":[],"pages":[],"reference":{"ref":"Lib.orbitals.ItemOrbital"}}]}"#;
+
+#[test]
+fn describe_a_behavior_whose_own_imports_leave_a_record_unmapped() {
+    let p = project("m1");
+    write(&p.path().join("orbitals/lib.orb"), LIB_ORB);
+    write(&p.path().join("orbitals/shelf.orb"), SHELF_ORB);
+    let shelf = json(&orb(
+        p.path(),
+        &["behaviors", "describe", "--json", "./orbitals/shelf"],
+    ));
+    assert_eq!(shelf["orbitals"][0]["value"]["orbital"], "ShelfItem");
+
+    // Control: the library itself still names what an import of its item must map.
+    let lib = json(&orb(
+        p.path(),
+        &["behaviors", "describe", "--json", "./orbitals/lib"],
+    ));
+    assert_eq!(lib["orbitals"][0]["borrows"], serde_json::json!(["Note"]));
+}
+
+const THING_ORB: &str = r#"{"name":"thing","orbitals":[{"name":"ThingOrbital","entity":{"name":"Thing","fields":[{"name":"id","type":"string","required":true}]},"traits":[{"name":"ThingView","linkedEntity":"Thing","stateMachine":{"states":[{"name":"s","isInitial":true}],"transitions":[{"from":"s","to":"s","event":"INIT"}]}}],"pages":[{"name":"ThingPage","path":"/things","traits":[{"ref":"ThingView"}]}]}]}"#;
+
+const HUB_ORB: &str = r#"{"name":"hub","orbitals":[{"name":"HubOrbital","entity":{"name":"Hub","fields":[{"name":"id","type":"string","required":true}]},"traits":[],"pages":[]},{"name":"LazyThing","uses":[{"from":"./thing","as":"Thing","lazy":true}],"entity":"Thing.orbitals.ThingOrbital.entity","traits":[],"pages":[],"reference":{"ref":"Thing.orbitals.ThingOrbital"}}]}"#;
+
+#[test]
+fn describe_a_behavior_that_uses_another_lazily() {
+    let p = project("m1");
+    write(&p.path().join("orbitals/thing.orb"), THING_ORB);
+    write(&p.path().join("orbitals/hub.orb"), HUB_ORB);
+    let hub = json(&orb(
+        p.path(),
+        &["behaviors", "describe", "--json", "./orbitals/hub"],
+    ));
+    let orbitals = hub["orbitals"].as_array().unwrap();
+    assert_eq!(orbitals.len(), 1, "the lazy orbital loads on its own, not here");
+    assert_eq!(orbitals[0]["value"]["orbital"], "HubOrbital");
+    assert_eq!(orbitals[0]["borrows"], serde_json::json!([]));
+}
+
+#[test]
+fn describe_carries_the_traits_state_machine_as_the_program_runs_it() {
+    let p = project("m1");
+    write(&p.path().join("orbitals/door.orb"), DOOR_ORB);
+    write(&p.path().join("orbitals/porch.orb"), PORCH_ORB);
+
+    // A composed trait: its machine is the atom's, with the call site's rename applied.
+    let v = json(&orb(
+        p.path(),
+        &[
+            "behaviors",
+            "describe",
+            "--json",
+            "./orbitals/porch.traits.FrontDoor",
+        ],
+    ));
+    assert_eq!(v["machine"]["linkedEntity"], "Door");
+    let transitions = v["machine"]["stateMachine"]["transitions"]
+        .as_array()
+        .unwrap();
+    let unlock = transitions
+        .iter()
+        .find(|t| t["event"] == "UNLOCK")
+        .expect("the renamed OPEN arm");
+    assert_eq!(unlock["from"], "closed");
+    assert_eq!(unlock["to"], "opened");
+    assert_eq!(unlock["guard"], serde_json::json!(["not", "@entity.open"]));
+    assert_eq!(
+        unlock["effects"][0],
+        serde_json::json!(["set", "@entity.open", true])
+    );
+    assert!(transitions.iter().all(|t| t["event"] != "OPEN"));
+    assert_eq!(
+        v["events"]["transitions"],
+        serde_json::json!(["INIT", "UNLOCK", "CLOSE"])
+    );
+
+    // Its printed source locates each transition by its index in the machine.
+    let unlock_index = transitions
+        .iter()
+        .position(|t| t["event"] == "UNLOCK")
+        .unwrap();
+    let text = v["source"]["text"].as_str().expect("printed source");
+    assert!(text.starts_with("trait FrontDoor"), "{text}");
+    let at = v["source"]["transitions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["index"] == unlock_index)
+        .expect("the UNLOCK arm is located");
+    let first = at["start"].as_u64().unwrap() as usize;
+    let line = text.lines().nth(first - 1).unwrap();
+    assert!(
+        line.trim_start()
+            .starts_with("UNLOCK -> opened when (not @entity.open)"),
+        "{line}"
+    );
+
+    // Control: the atom's own trait keeps OPEN.
+    let atom = json(&orb(
+        p.path(),
+        &[
+            "behaviors",
+            "describe",
+            "--json",
+            "./orbitals/door.traits.DoorLife",
+        ],
+    ));
+    let names: Vec<&str> = atom["machine"]["stateMachine"]["states"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|s| s["name"].as_str())
+        .collect();
+    assert_eq!(names, ["closed", "opened"]);
+    assert!(atom["machine"]["stateMachine"]["transitions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|t| t["event"] == "OPEN"));
+}
+
+const DIAGRAM_ORB: &str = r#"{"name":"diagram","orbitals":[{"name":"DiagramOrbital","entity":{"name":"View","persistence":"runtime","fields":[]},"traits":[{"name":"Diagram","linkedEntity":"View","stateMachine":{"states":[{"name":"loading","isInitial":true},{"name":"shown"}],"events":[{"key":"INIT","name":"Initialize"},{"key":"DESCRIBED","name":"Described"}],"transitions":[{"from":"loading","to":"loading","event":"INIT","effects":[["behavior/describe",{"behavior":"./door","trait":"DoorLife"},{"emit":{"success":"DESCRIBED","failure":"DESCRIBE_FAILED"}}],["behavior/describe","@entity.picked",{"emit":{"success":"DESCRIBED"}}]]},{"from":"loading","to":"shown","event":"DESCRIBED"}]}}]}]}"#;
+
+#[test]
+fn a_literal_describe_is_answered_when_the_program_is_resolved() {
+    let p = project("m1");
+    write(&p.path().join("orbitals/door.orb"), DOOR_ORB);
+    write(&p.path().join("orbitals/diagram.orb"), DIAGRAM_ORB);
+    let resolved = json(&orb(p.path(), &["resolve", "orbitals/diagram.orb"]));
+    let effects =
+        &resolved["orbitals"][0]["traits"][0]["stateMachine"]["transitions"][0]["effects"];
+    assert_eq!(effects[0][0], "emit");
+    assert_eq!(effects[0][1], "DESCRIBED");
+    let quoted = effects[0][2]["result"].as_array().expect("a quote call");
+    assert_eq!(quoted[0], "quote");
+    let mut answer: serde_json::Value = serde_json::from_str(quoted[1].as_str().unwrap()).unwrap();
+    let mut direct = json(&orb(
+        p.path(),
+        &[
+            "behaviors",
+            "describe",
+            "--json",
+            "./orbitals/door.traits.DoorLife",
+        ],
+    ));
+    // Each answer echoes the value as its caller spelled it: the program names the file relative to itself.
+    assert_eq!(
+        answer["value"],
+        serde_json::json!({"behavior":"./door","trait":"DoorLife"})
+    );
+    answer.as_object_mut().unwrap().remove("value");
+    direct.as_object_mut().unwrap().remove("value");
+    assert_eq!(
+        answer, direct,
+        "the build answers exactly what the host would"
+    );
+    // Control: a value known only at runtime is still the host's to answer.
+    assert_eq!(effects[1][0], "behavior/describe");
+}
+
+#[test]
+fn a_registered_trait_missing_from_stale_signatures_is_described_from_its_program() {
+    // `beta` ships an empty (stale) signatures file; its card is still installed and resolves.
+    let p = project("m1");
+    let v = json(&orb(
+        p.path(),
+        &[
+            "behaviors",
+            "describe",
+            "--json",
+            "beta/beta-card.traits.CardView",
+        ],
+    ));
+    let keys: Vec<&str> = v["knobs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|k| k["key"].as_str())
+        .collect();
+    assert_eq!(keys, ["size", "title"]);
+    assert_eq!(v["events"]["emits"], serde_json::json!(["CARD_OPENED"]));
+    assert_eq!(v["model"], "m1");
+    assert!(v["machine"]["stateMachine"]["transitions"].is_array());
 }

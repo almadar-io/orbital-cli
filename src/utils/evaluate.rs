@@ -13,7 +13,6 @@ pub(crate) fn evaluate_sexpr(
     payload_json: Option<&str>,
     output_format: &str,
 ) -> anyhow::Result<()> {
-    use orbital_core::{BindingContext, Evaluator, SExpression};
     use std::io::Read;
 
     // Read source: argument or stdin
@@ -30,9 +29,50 @@ pub(crate) fn evaluate_sexpr(
         anyhow::bail!("No S-expression provided. Pass it as an argument or via stdin.");
     }
 
-    // Parse expression
-    let expr: SExpression =
+    let entity = entity_json
+        .map(|json| {
+            serde_json::from_str(json)
+                .map_err(|e| anyhow::anyhow!("--entity JSON parse error: {}", e))
+        })
+        .transpose()?;
+    let payload = payload_json
+        .map(|json| {
+            serde_json::from_str(json)
+                .map_err(|e| anyhow::anyhow!("--payload JSON parse error: {}", e))
+        })
+        .transpose()?;
+    let expr: serde_json::Value =
         serde_json::from_str(src).map_err(|e| anyhow::anyhow!("JSON parse error: {}", e))?;
+    let result = evaluate_value(&expr, entity.as_ref(), payload.as_ref())?;
+
+    // Output
+    match output_format {
+        "json" => {
+            println!("{}", serde_json::to_string(&result)?);
+        }
+        "pretty" => {
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+        _ => {
+            // "value": human-readable — strings without quotes, numbers as integers when whole
+            println!("{}", result.to_string_value());
+        }
+    }
+
+    Ok(())
+}
+
+/// Evaluate an S-expression with optional `@entity` / `@payload` bindings — what
+/// `orb evaluate` prints and `orb mcp` returns.
+pub(crate) fn evaluate_value(
+    expr: &serde_json::Value,
+    entity: Option<&serde_json::Value>,
+    payload: Option<&serde_json::Value>,
+) -> anyhow::Result<orbital_core::Value> {
+    use orbital_core::{BindingContext, Evaluator, SExpression};
+
+    let expr: SExpression = serde_json::from_value(expr.clone())
+        .map_err(|e| anyhow::anyhow!("JSON parse error: {}", e))?;
 
     // Build context. The viewer comes from ALMADAR_PERSONA like every other
     // headless surface, so `@user.role` can be probed from the CLI instead of
@@ -52,39 +92,18 @@ pub(crate) fn evaluate_sexpr(
         }
     });
 
-    if let Some(json) = entity_json {
-        let raw: serde_json::Value = serde_json::from_str(json)
-            .map_err(|e| anyhow::anyhow!("--entity JSON parse error: {}", e))?;
-        ctx.set_entity(json_to_value(&raw));
+    if let Some(raw) = entity {
+        ctx.set_entity(json_to_value(raw));
     }
-
-    if let Some(json) = payload_json {
-        let raw: serde_json::Value = serde_json::from_str(json)
-            .map_err(|e| anyhow::anyhow!("--payload JSON parse error: {}", e))?;
-        ctx.set_payload(json_to_value(&raw));
+    if let Some(raw) = payload {
+        ctx.set_payload(json_to_value(raw));
     }
 
     // Evaluate
     let evaluator = Evaluator::new();
-    let result = evaluator
+    evaluator
         .evaluate(&expr, &ctx)
-        .map_err(|e| anyhow::anyhow!("Evaluation error: {}", e))?;
-
-    // Output
-    match output_format {
-        "json" => {
-            println!("{}", serde_json::to_string(&result)?);
-        }
-        "pretty" => {
-            println!("{}", serde_json::to_string_pretty(&result)?);
-        }
-        _ => {
-            // "value": human-readable — strings without quotes, numbers as integers when whole
-            println!("{}", result.to_string_value());
-        }
-    }
-
-    Ok(())
+        .map_err(|e| anyhow::anyhow!("Evaluation error: {}", e))
 }
 
 /// Convert serde_json::Value to orbital_core::Value

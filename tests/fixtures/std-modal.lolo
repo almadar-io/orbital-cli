@@ -26,7 +26,7 @@ orbital ModalRecordOrbital {
     name : string @description "A user-facing identifier for the modal." @synonyms "title, label, identifier"
     description : string @description "A textual explanation of the modal's content or function." @synonyms "details, explanation, notes, summary"
     status : "active" | "inactive" | "pending" @description "Current operational state of the record." @synonyms "state, condition, flag" = active
-    seedRow : Map string scalar @intrinsic @description "The row an edit-mode OPEN pre-fills from when its payload carries no row. Stashed by SEED — hosts route the surface's loaded event here (e.g. a document look's RecordItemLoaded) so scalar-only action events ({ id }) can still open a fully seeded settings form." = {}
+    seedRow : ModalRecord @intrinsic @description "The row an edit-mode OPEN pre-fills from when its payload carries no row. Stashed by SEED — hosts route the surface's loaded event here (e.g. a document look's RecordItemLoaded) so scalar-only action events ({ id }) can still open a fully seeded settings form."
     createdAt : string
   }
 
@@ -49,7 +49,7 @@ orbital ModalRecordOrbital {
       ;; (no silent first-row fallback). The @config.mode literal is
       ;; substituted at molecule inline time — atoms validate this with
       ;; @config allowed-but-unresolved.
-      OPEN -> open when (or ["=", @config.mode, create] ?row ["!=", (str/default (object/get @entity.seedRow id) ""), ""])
+      OPEN -> open when (or ["=", @config.mode, create] (validate/required ?row) ["!=", (str/default (object/get @entity.seedRow id) ""), ""])
         (set @entity.id ?id)
         (render-ui @config.detailSlot {
           children: [{
@@ -107,7 +107,7 @@ orbital ModalRecordOrbital {
       ModalRecordLoaded
         @description "Signals that the modal's data has been successfully loaded."
         @synonyms "loaded, data ready, populated"
-        @tier "domain"
+        @tier "internal"
     }
 
     listens {

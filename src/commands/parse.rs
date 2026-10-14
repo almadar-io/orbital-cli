@@ -66,10 +66,12 @@ pub(crate) fn resolve_schema_cli(
     let schema = parse_schema_auto(&content, &path.display().to_string())
         .map_err(|e| anyhow::anyhow!("Failed to parse {}: {}", path.display(), e))?;
     let mut schema = schema;
-    let lazy =
+    let mut lazy =
         orbital_compiler::phases::lazy::split_lazy_and_resolve(&mut schema, &options, Some(path))
             .map_err(|e| anyhow::anyhow!("Failed to resolve {}: {}", path.display(), e))?;
-    let resolved = resolve_schema_with_path(schema, &options, Some(path))
+    let mut resolved = resolve_schema_with_path(schema, &options, Some(path))
+        .map_err(|e| anyhow::anyhow!("Failed to resolve {}: {}", path.display(), e))?;
+    orbital_compiler::phases::reflect::fold_program(&mut resolved, &mut lazy, Some(path))
         .map_err(|e| anyhow::anyhow!("Failed to resolve {}: {}", path.display(), e))?;
     let json = resolved_json(&resolved)?;
 
@@ -153,6 +155,18 @@ pub(crate) fn write_lazy(
 }
 
 pub(crate) fn format_schema(path: &PathBuf, write: bool) -> anyhow::Result<()> {
+    let formatted = formatted_source(path)?;
+    if write {
+        std::fs::write(path, &formatted)?;
+        println!("Formatted {} ({} bytes)", path.display(), formatted.len());
+    } else {
+        println!("{}", formatted);
+    }
+    Ok(())
+}
+
+/// The file at `path`, pretty-printed in the syntax it is written in.
+pub(crate) fn formatted_source(path: &std::path::Path) -> anyhow::Result<String> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| anyhow::anyhow!("Could not read {}: {}", path.display(), e))?;
 
@@ -168,13 +182,5 @@ pub(crate) fn format_schema(path: &PathBuf, write: bool) -> anyhow::Result<()> {
             serde_json::to_string_pretty(&orbital_core::util::canonical_json(&value))?
         }
     };
-
-    if write {
-        std::fs::write(path, &formatted)?;
-        println!("Formatted {} ({} bytes)", path.display(), formatted.len());
-    } else {
-        println!("{}", formatted);
-    }
-
-    Ok(())
+    Ok(formatted)
 }

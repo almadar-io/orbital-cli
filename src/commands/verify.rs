@@ -983,17 +983,11 @@ mod tests {
         let registry_dir = pkg_dir.join("behaviors/registry/ui/atoms");
         std::fs::create_dir_all(&registry_dir).unwrap();
         std::fs::write(pkg_dir.join("behaviors/behaviors-registry.json"), "{}").unwrap();
-        std::fs::write(
-            pkg_dir.join("behaviors/registry/factory-signatures.json"),
-            "{}",
-        )
-        .unwrap();
         std::fs::write(pkg_dir.join("behaviors/lolo-behavior-contracts.json"), "{}").unwrap();
-        std::fs::write(pkg_dir.join("behaviors/signatures.lolo"), ";; fixture\n").unwrap();
         std::fs::write(
             pkg_dir.join("package.json"),
             format!(
-                "{{\n  \"name\": \"{name}\",\n  \"version\": \"1.0.0\",\n  \"orb\": {{\n    \"prefix\": \"{prefix}\",\n    \"registry\": \"behaviors/registry\",\n    \"index\": \"behaviors/behaviors-registry.json\",\n    \"factorySignatures\": \"behaviors/registry/factory-signatures.json\",\n    \"loloContracts\": \"behaviors/lolo-behavior-contracts.json\",\n    \"signatures\": \"behaviors/signatures.lolo\",\n    \"compiler\": \"*\"\n  }}\n}}\n"
+                "{{\n  \"name\": \"{name}\",\n  \"version\": \"1.0.0\",\n  \"orb\": {{\n    \"prefix\": \"{prefix}\",\n    \"registry\": \"behaviors/registry\",\n    \"index\": \"behaviors/behaviors-registry.json\",\n    \"loloContracts\": \"behaviors/lolo-behavior-contracts.json\",\n    \"signatures\": \"behaviors/signatures.lolo\",\n    \"compiler\": \"*\"\n  }}\n}}\n"
             ),
         )
         .unwrap();

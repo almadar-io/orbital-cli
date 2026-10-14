@@ -172,16 +172,24 @@ enum Commands {
         path: PathBuf,
     },
 
-    /// Print the composed lolo type-signature catalog (signatures.lolo).
-    ///
-    /// Emits the generated catalog of every operator (arity + return types),
-    /// enum/struct, binding-context rule, and std behavior entity/trait/page
-    /// contract — the canonical lolo vocabulary that agents (e.g. rabit) read
-    /// to author valid `.lolo`. Composed from the installed `@almadar/std`
-    /// package's `orb.signatures` file plus every other installed behavior
-    /// package's fragment, in walk order (Phase 2,
-    /// `docs/Almadar_Behavior_Packages.md` §10) — `@almadar/std` must be
-    /// installed (`orb update`, or `orb update --global`).
+    /// Serve the language to an agent: an MCP server on stdin/stdout whose tools are
+    /// orb's own commands (validate, complete, behaviors, describe, play, test, evaluate, …).
+    Mcp {
+        #[command(subcommand)]
+        command: Option<McpCommand>,
+    },
+
+    /// The language reference, generated from the compiler: no topic lists the
+    /// constructs, vocabulary and validation-code topics; a topic prints one
+    /// construct (with real examples from the installed std), `vocabulary`, or
+    /// `codes/<category>`.
+    Reference {
+        topic: Option<String>,
+    },
+
+    /// Print the whole language catalog as JSON, generated from the compiler and the
+    /// installed language data: every construct, the vocabulary, every validation
+    /// code with its description, every operator and every pattern.
     Signatures {
         /// Write to this file instead of stdout.
         #[arg(long, value_name = "FILE")]
@@ -967,29 +975,13 @@ enum I18nCommand {
     Check,
 }
 
-/// `orb signatures` = the installed std's `orb.signatures` file followed by
-/// every other installed behavior package's `orb.signatures` file, in walk
-/// order (Almadar_Behavior_Packages.md §6). `@almadar/std` is required — no
-/// embedded fallback remains (Phase 2, §10): an uninstalled std is a hard,
-/// actionable error.
-fn compose_lolo_signatures() -> anyhow::Result<String> {
-    let cwd = std::env::current_dir()?;
-    let user_store =
-        orbital_core::behavior_packages::user_store_dir().unwrap_or_else(|| cwd.clone());
-    let packages = orbital_core::behavior_packages::discover(&cwd, &user_store)
-        .map_err(|e| anyhow::anyhow!("failed to discover behavior packages: {e}"))?;
-
-    let mut out = String::new();
-    match packages.iter().find(|p| p.prefix == "almadar-std") {
-        Some(std_pkg) => out.push_str(&std::fs::read_to_string(&std_pkg.signatures)?),
-        None => anyhow::bail!(orbital_core::behavior_packages::not_installed_message(
-            orbital_core::behavior_packages::STD_PACKAGE
-        )),
-    }
-    for pkg in packages.iter().filter(|p| p.prefix != "almadar-std") {
-        out.push_str(&std::fs::read_to_string(&pkg.signatures)?);
-    }
-    Ok(out)
+#[derive(Subcommand)]
+enum McpCommand {
+    /// Register `orb mcp` in this project's config for an MCP client
+    Install {
+        #[arg(long, value_enum)]
+        client: commands::mcp::McpClient,
+    },
 }
 
 /// `orb complete`: the completion candidates at `offset`, as JSON on stdout.
@@ -1007,15 +999,20 @@ fn print_completions(
         (Some(path), false) => std::fs::read_to_string(path)?,
         (None, false) => anyhow::bail!("orb complete: pass a .lolo file or --stdin"),
     };
+    println!("{}", serde_json::to_string(&completions(&source, offset)?)?);
+    Ok(())
+}
+
+/// What is valid at `offset` in a `.lolo` source, against the installed behaviors.
+pub(crate) fn completions(source: &str, offset: usize) -> anyhow::Result<serde_json::Value> {
     let cwd = std::env::current_dir()?;
     let user_store =
         orbital_core::behavior_packages::user_store_dir().unwrap_or_else(|| cwd.clone());
     let packages = orbital_core::behavior_packages::discover(&cwd, &user_store)
         .map_err(|e| anyhow::anyhow!("failed to discover behavior packages: {e}"))?;
     let contracts = orbital_lolo::registry::LoloContracts::load(&packages).ok();
-    let result = orbital_lolo::complete::complete(&source, offset, contracts.as_ref());
-    println!("{}", serde_json::to_string(&result)?);
-    Ok(())
+    let result = orbital_lolo::complete::complete(source, offset, contracts.as_ref());
+    Ok(serde_json::to_value(&result)?)
 }
 
 fn print_embeds(file: Option<&std::path::Path>, stdin: bool) -> anyhow::Result<()> {
@@ -1035,15 +1032,13 @@ fn print_embeds(file: Option<&std::path::Path>, stdin: bool) -> anyhow::Result<(
 }
 
 fn print_lolo_signatures(out: Option<&std::path::Path>) -> anyhow::Result<()> {
-    let signatures = compose_lolo_signatures()?;
+    let catalog = serde_json::to_string_pretty(&commands::reference::everything()?)?;
     match out {
         Some(path) => {
-            std::fs::write(path, &signatures)?;
-            eprintln!("Wrote {} bytes to {}", signatures.len(), path.display());
+            std::fs::write(path, &catalog)?;
+            eprintln!("Wrote {} bytes to {}", catalog.len(), path.display());
         }
-        None => {
-            print!("{signatures}");
-        }
+        None => println!("{catalog}"),
     }
     Ok(())
 }
@@ -1055,11 +1050,24 @@ fn lower_lolo_file(path: &std::path::Path) -> Result<orbital_core::schema::Orbit
         .map_err(|e| e.describe())
 }
 
+/// `orb behaviors describe` for a trait value: what the compiler answers a literal describe with.
+fn describe_trait_value(
+    value: &serde_json::Value,
+    from: Option<&std::path::Path>,
+) -> Result<serde_json::Value, String> {
+    commands::behaviors_catalog::describe_from(
+        commands::behaviors_catalog::DescribeTarget::Value(value.clone()),
+        from,
+    )
+    .map_err(|e| e.to_string())
+}
+
 pub fn run() -> anyhow::Result<()> {
     // Namespaced structured logging (mirror of @almadar/logger). Quiet by default
     // (warn/error only); enable namespaces with e.g. ALMADAR_DEBUG='almadar:runtime:*'.
     orbital_core::logging::init();
     orbital_compiler::loader::register_source_lowerer(lower_lolo_file);
+    orbital_compiler::phases::reflect::register_trait_describer(describe_trait_value);
 
     let cli = Cli::parse();
 
@@ -1074,6 +1082,7 @@ pub fn run() -> anyhow::Result<()> {
             | Some(Commands::Remove { .. })
             | Some(Commands::List { .. })
             | Some(Commands::Login)
+            | Some(Commands::Mcp { .. })
             | Some(Commands::EmitTrace { .. })
             | Some(Commands::Trace { .. })
             | Some(Commands::Eval { .. })
@@ -1413,6 +1422,15 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
             spawn_agent_with_args(&args)
         }
         Some(Commands::Login) => spawn_agent_with_args(&["login"]),
+        Some(Commands::Mcp { command: None }) => commands::mcp::run_mcp(),
+        Some(Commands::Reference { topic }) => commands::reference::run_reference(topic.as_deref()),
+        Some(Commands::Mcp {
+            command: Some(McpCommand::Install { client }),
+        }) => {
+            let path = commands::mcp::install_config(&std::env::current_dir()?, client)?;
+            println!("Registered `orb mcp` in {}", path.display());
+            Ok(())
+        }
         Some(Commands::Emit {
             target,
             path,

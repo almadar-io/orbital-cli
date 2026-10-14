@@ -326,7 +326,7 @@ fn outcome_report(
     })
 }
 
-fn run_cascade(path: &Path, steps: &serde_json::Value) -> anyhow::Result<serde_json::Value> {
+pub(crate) fn run_cascade(path: &Path, steps: &serde_json::Value) -> anyhow::Result<serde_json::Value> {
     use orbital_compiler::{phases::lazy::resolve_program_with_path, CompilerOptions};
     use orbital_core::runtime::{EntitySource, InMemoryEntityCache, RuntimeKernel};
 

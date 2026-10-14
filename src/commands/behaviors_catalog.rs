@@ -1,12 +1,13 @@
 //! `orb behaviors catalog | describe | source` — the installed behavior
 //! packages as data. Resolution is the existing machinery (`discover` for the
 //! package set, `ExternalOrbitalLoader` for specifiers); this module only
-//! reads the sidecars those packages declare (`orb.index`, `orb.embeddings`,
-//! `orb.factorySignatures`) and shapes them to the `@almadar/core`
+//! reads the sidecars those packages declare (`orb.index`, `orb.embeddings`)
+//! and shapes them to the `@almadar/core`
 //! `CatalogEntrySchema` / `TraitDescriptionSchema` contracts.
 
 use orbital_compiler::loader::{index_registry_source, ExternalOrbitalLoader, LoaderConfig};
 use orbital_core::behavior_packages::{BehaviorPackage, STD_PACKAGE};
+use serde::de::{DeserializeSeed, Deserializer, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -23,64 +24,227 @@ const EXPOSURES: [&str; 5] = ["app", "experience", "palette", "both", "internal"
 // Embedding manifests
 // ---------------------------------------------------------------------------
 
-/// One `orb.embeddings` file: the model it was stamped with and its vectors,
-/// kept undecoded until asked for. Two on-disk shapes (mirroring
-/// `behaviors/embeddings.ts` and `behaviors/knob-embeddings.ts`): `vectors`
-/// keyed directly, or an interned `table` + `keys` index.
+/// The keys of an embeddings file a query needs; every other entry is skipped while the file is
+/// scanned, so a describe never holds the whole catalog's vectors. Keys are `<behavior>` and
+/// `<behavior>#capabilities` for an organism, `<behavior>/<orbital>/<trait>/<knob>` for a knob.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+enum Want {
+    Organisms,
+    KnobsOf(String),
+}
+
+impl Want {
+    fn admits(&self, key: &str) -> bool {
+        match self {
+            Want::Organisms => !key.contains('/'),
+            Want::KnobsOf(behavior) => key
+                .strip_prefix(behavior.as_str())
+                .is_some_and(|rest| rest.starts_with('/')),
+        }
+    }
+}
+
+/// The wanted part of one `orb.embeddings` file: the model it was stamped with and the selected
+/// vectors, kept undecoded until asked for. Two on-disk shapes (mirroring
+/// `behaviors/embeddings.ts` and `behaviors/knob-embeddings.ts`): `vectors` keyed directly, or an
+/// interned `table` + `keys` index, which a read resolves for the wanted keys.
 struct Manifest {
     model: String,
     vectors: HashMap<String, Value>,
-    table: Vec<Value>,
+}
+
+#[derive(Default)]
+struct Scanned {
+    model: Option<String>,
+    vectors: HashMap<String, Value>,
     keys: HashMap<String, usize>,
+    saw_vectors: bool,
+    saw_table: bool,
+}
+
+/// Pass 1 collects the model, the wanted direct vectors and the wanted `keys` entries; pass 2
+/// (an interned file only) collects the wanted `table` rows.
+enum Pass<'a> {
+    Index(&'a Want, &'a mut Scanned),
+    Table(&'a HashSet<usize>, &'a mut HashMap<usize, Value>),
+}
+
+impl<'de> DeserializeSeed<'de> for Pass<'_> {
+    type Value = ();
+
+    fn deserialize<D: Deserializer<'de>>(self, d: D) -> Result<(), D::Error> {
+        d.deserialize_map(self)
+    }
+}
+
+impl<'de> Visitor<'de> for Pass<'_> {
+    type Value = ();
+
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("an embeddings manifest object")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
+        match self {
+            Pass::Index(want, scanned) => {
+                while let Some(field) = map.next_key::<String>()? {
+                    match field.as_str() {
+                        "model" => scanned.model = Some(map.next_value()?),
+                        "vectors" => {
+                            scanned.saw_vectors = true;
+                            map.next_value_seed(Filtered { want, out: &mut scanned.vectors })?;
+                        }
+                        "keys" => {
+                            map.next_value_seed(Filtered { want, out: &mut scanned.keys })?;
+                        }
+                        "table" => {
+                            scanned.saw_table = true;
+                            map.next_value::<IgnoredAny>()?;
+                        }
+                        _ => {
+                            map.next_value::<IgnoredAny>()?;
+                        }
+                    }
+                }
+            }
+            Pass::Table(wanted, out) => {
+                while let Some(field) = map.next_key::<String>()? {
+                    if field == "table" {
+                        map.next_value_seed(Rows { wanted, out: &mut *out })?;
+                    } else {
+                        map.next_value::<IgnoredAny>()?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A JSON object read into `out`, keeping only the entries whose key `want` admits.
+struct Filtered<'a, V> {
+    want: &'a Want,
+    out: &'a mut HashMap<String, V>,
+}
+
+impl<'de, V: serde::Deserialize<'de>> DeserializeSeed<'de> for Filtered<'_, V> {
+    type Value = ();
+
+    fn deserialize<D: Deserializer<'de>>(self, d: D) -> Result<(), D::Error> {
+        d.deserialize_map(self)
+    }
+}
+
+impl<'de, V: serde::Deserialize<'de>> Visitor<'de> for Filtered<'_, V> {
+    type Value = ();
+
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("an object keyed by embedding key")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
+        while let Some(key) = map.next_key::<String>()? {
+            if self.want.admits(&key) {
+                self.out.insert(key, map.next_value()?);
+            } else {
+                map.next_value::<IgnoredAny>()?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The interned `table` array, keeping only the rows at the wanted indices.
+struct Rows<'a> {
+    wanted: &'a HashSet<usize>,
+    out: &'a mut HashMap<usize, Value>,
+}
+
+impl<'de> DeserializeSeed<'de> for Rows<'_> {
+    type Value = ();
+
+    fn deserialize<D: Deserializer<'de>>(self, d: D) -> Result<(), D::Error> {
+        d.deserialize_seq(self)
+    }
+}
+
+impl<'de> Visitor<'de> for Rows<'_> {
+    type Value = ();
+
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("an array of stored vectors")
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<(), A::Error> {
+        let mut index = 0usize;
+        loop {
+            if self.wanted.contains(&index) {
+                match seq.next_element::<Value>()? {
+                    Some(row) => {
+                        self.out.insert(index, row);
+                    }
+                    None => break,
+                }
+            } else if seq.next_element::<IgnoredAny>()?.is_none() {
+                break;
+            }
+            index += 1;
+        }
+        Ok(())
+    }
 }
 
 impl Manifest {
-    fn read(path: &Path) -> anyhow::Result<Self> {
-        let raw = std::fs::read_to_string(path)
-            .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", path.display()))?;
-        let value: Value = serde_json::from_str(&raw)
-            .map_err(|e| anyhow::anyhow!("invalid embeddings manifest {}: {e}", path.display()))?;
-        let model = value
-            .get("model")
-            .and_then(Value::as_str)
-            .ok_or_else(|| anyhow::anyhow!("{} carries no `model`", path.display()))?
-            .to_string();
-        let vectors = match value.get("vectors") {
-            Some(Value::Object(m)) => m.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
-            _ => HashMap::new(),
+    /// Streams the file once (twice when it is interned and a wanted key points into the table), so
+    /// memory follows the wanted entries, not the file: an io knob file is hundreds of megabytes.
+    fn read(path: &Path, want: &Want) -> anyhow::Result<Self> {
+        let open = || -> anyhow::Result<_> {
+            let file = std::fs::File::open(path)
+                .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", path.display()))?;
+            Ok(std::io::BufReader::with_capacity(1 << 20, file))
         };
-        let table = value
-            .get("table")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        let keys = match value.get("keys") {
-            Some(Value::Object(m)) => m
-                .iter()
-                .filter_map(|(k, v)| v.as_u64().map(|i| (k.clone(), i as usize)))
-                .collect(),
-            _ => HashMap::new(),
-        };
-        if vectors.is_empty() && table.is_empty() {
+        let invalid =
+            |e: serde_json::Error| anyhow::anyhow!("invalid embeddings manifest {}: {e}", path.display());
+        let mut scanned = Scanned::default();
+        let mut de = serde_json::Deserializer::from_reader(open()?);
+        Pass::Index(want, &mut scanned)
+            .deserialize(&mut de)
+            .and_then(|()| de.end())
+            .map_err(invalid)?;
+        let model = scanned
+            .model
+            .ok_or_else(|| anyhow::anyhow!("{} carries no `model`", path.display()))?;
+        if !scanned.saw_vectors && !scanned.saw_table {
             anyhow::bail!(
                 "{} carries neither `vectors` nor `table`/`keys`",
                 path.display()
             );
         }
-        Ok(Self {
-            model,
-            vectors,
-            table,
-            keys,
-        })
+        let mut vectors = scanned.vectors;
+        if scanned.saw_table && !scanned.keys.is_empty() {
+            let wanted: HashSet<usize> = scanned.keys.values().copied().collect();
+            let mut rows = HashMap::new();
+            let mut de = serde_json::Deserializer::from_reader(open()?);
+            Pass::Table(&wanted, &mut rows)
+                .deserialize(&mut de)
+                .and_then(|()| de.end())
+                .map_err(invalid)?;
+            for (key, index) in scanned.keys {
+                if let Some(row) = rows.get(&index) {
+                    vectors.entry(key).or_insert_with(|| row.clone());
+                }
+            }
+        }
+        Ok(Self { model, vectors })
     }
 
     fn vector(&self, key: &str) -> Option<Vec<f64>> {
-        let stored = self
-            .vectors
-            .get(key)
-            .or_else(|| self.keys.get(key).and_then(|i| self.table.get(*i)))?;
-        decode_vector(stored)
+        decode_vector(self.vectors.get(key)?)
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.vectors.len()
     }
 }
 
@@ -128,11 +292,39 @@ fn base64_decode(input: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-fn package_manifests(pkg: &BehaviorPackage) -> anyhow::Result<Vec<Manifest>> {
-    super::sidecar_fetch::resolve_embeddings(pkg, &super::sidecar_fetch::UreqFetcher)?
-        .iter()
-        .map(|p| Manifest::read(p))
-        .collect()
+/// A package's embedding manifests, read once per process: they are large, and a build that
+/// answers many describes would otherwise parse them again for every one.
+fn package_manifests(
+    pkg: &BehaviorPackage,
+    want: &Want,
+) -> anyhow::Result<std::sync::Arc<Vec<Manifest>>> {
+    let paths = super::sidecar_fetch::resolve_embeddings(pkg, &super::sidecar_fetch::UreqFetcher)?;
+    manifests_at(&paths, want)
+}
+
+fn manifests_at(paths: &[PathBuf], want: &Want) -> anyhow::Result<std::sync::Arc<Vec<Manifest>>> {
+    type Cache = std::sync::Mutex<HashMap<(Vec<PathBuf>, Want), std::sync::Arc<Vec<Manifest>>>>;
+    static CACHE: std::sync::OnceLock<Cache> = std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+    let key = (paths.to_vec(), want.clone());
+    if let Some(hit) = cache
+        .lock()
+        .map_err(|_| anyhow::anyhow!("manifest cache poisoned"))?
+        .get(&key)
+    {
+        return Ok(hit.clone());
+    }
+    let read = std::sync::Arc::new(
+        paths
+            .iter()
+            .map(|p| Manifest::read(p, want))
+            .collect::<anyhow::Result<Vec<_>>>()?,
+    );
+    cache
+        .lock()
+        .map_err(|_| anyhow::anyhow!("manifest cache poisoned"))?
+        .insert(key, read.clone());
+    Ok(read)
 }
 
 /// The single model every manifest in `manifests` was stamped with; `""` when
@@ -269,7 +461,7 @@ pub(crate) fn catalog(
     if paths.is_empty() {
         anyhow::bail!("give at least one scope path, e.g. `almadar-std/ui/core/molecules`");
     }
-    for e in &exposure {
+    for e in exposure {
         if !EXPOSURES.contains(&e.as_str()) {
             anyhow::bail!("unknown exposure `{e}` (one of {})", EXPOSURES.join(", "));
         }
@@ -388,9 +580,9 @@ pub(crate) fn catalog(
         }
     }
 
-    let mut manifests: BTreeMap<usize, Vec<Manifest>> = BTreeMap::new();
+    let mut manifests: BTreeMap<usize, std::sync::Arc<Vec<Manifest>>> = BTreeMap::new();
     for pi in &contributing {
-        manifests.insert(*pi, package_manifests(&packages[*pi])?);
+        manifests.insert(*pi, package_manifests(&packages[*pi], &Want::Organisms)?);
     }
     let model = single_model(manifests.iter().flat_map(|(pi, ms)| {
         let owner = packages[*pi].name.as_str();
@@ -413,7 +605,7 @@ pub(crate) fn catalog(
             if let Some(v) = manifests
                 .get(&pi)
                 .into_iter()
-                .flatten()
+                .flat_map(|ms| ms.iter())
                 .find_map(|m| m.vector(&key))
             {
                 entry.vectors.insert(facet.to_string(), v);
@@ -449,7 +641,14 @@ struct Resolved {
 }
 
 fn resolve(spec: &str) -> anyhow::Result<Resolved> {
+    resolve_from(spec, None)
+}
+
+/// [`resolve`], a relative specifier resolving from the program file `from` (as its `uses` do).
+fn resolve_from(spec: &str, from: Option<&Path>) -> anyhow::Result<Resolved> {
     let cwd = std::env::current_dir()?;
+    let from = from.map(|f| cwd.join(f));
+    let from = from.as_deref();
     let packages = discover_from(&cwd)?;
     let mut loader = ExternalOrbitalLoader::new(LoaderConfig {
         base_path: cwd,
@@ -458,7 +657,7 @@ fn resolve(spec: &str) -> anyhow::Result<Resolved> {
     });
     let mut chain = orbital_compiler::loader::ImportChain::new();
     let loaded = loader
-        .load(spec, None, &mut chain)
+        .load(spec, from, &mut chain)
         .map_err(|e| anyhow::anyhow!("cannot resolve `{spec}`: {e}"))?;
     let path = loaded.source_path.clone();
     let schema = loaded.schema.clone();
@@ -512,113 +711,61 @@ fn domain_events(td: &orbital_core::schema::TraitDefinition) -> Vec<String> {
         .collect()
 }
 
+/// A trait's state machine as the resolved program runs it (`TraitMachineSchema`).
+#[derive(Serialize)]
+struct MachineOut {
+    #[serde(rename = "linkedEntity", skip_serializing_if = "Option::is_none")]
+    linked_entity: Option<String>,
+    #[serde(rename = "stateMachine")]
+    state_machine: orbital_core::schema::StateMachine,
+}
+
 #[derive(Serialize)]
 struct DescriptionOut {
     value: Value,
     knobs: Vec<KnobOut>,
     events: EventsOut,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    machine: Option<MachineOut>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source: Option<orbital_lolo::unlower::PrintedTrait>,
     model: String,
 }
 
-fn knob_of(def: &Value, vector: Option<Vec<f64>>) -> anyhow::Result<KnobOut> {
-    let text = |k: &str| def.get(k).and_then(Value::as_str).map(str::to_string);
-    Ok(KnobOut {
-        key: text("key").ok_or_else(|| anyhow::anyhow!("a knob definition has no `key`"))?,
-        ty: text("type").ok_or_else(|| anyhow::anyhow!("a knob definition has no `type`"))?,
-        default: def.get("default").cloned(),
-        label: text("label"),
-        description: text("description"),
-        tier: text("tier"),
-        vector,
+/// A behavior as the runtime runs it: lazy behaviors split, every import and composed trait inlined.
+fn resolved_program(
+    r: &Resolved,
+    spec: &str,
+) -> anyhow::Result<orbital_core::schema::OrbitalSchema> {
+    use orbital_compiler::{resolve_schema_with_path, CompilerOptions};
+    let options = CompilerOptions::from_env();
+    let mut schema = r.schema.clone();
+    orbital_compiler::phases::lazy::split_lazy_and_resolve(&mut schema, &options, Some(&r.path))
+        .map_err(|e| anyhow::anyhow!("cannot resolve `{spec}`: {e}"))?;
+    resolve_schema_with_path(schema, &options, Some(&r.path))
+        .map_err(|e| anyhow::anyhow!("cannot resolve `{spec}`: {e}"))
+}
+
+/// The orbital that holds `trait_name` in a resolved program.
+fn trait_orbital<'a>(
+    program: &'a orbital_core::schema::OrbitalSchema,
+    trait_name: &str,
+) -> Option<&'a str> {
+    use orbital_core::schema::TraitReference;
+    program.orbitals.iter().find_map(|o| {
+        o.traits
+            .iter()
+            .any(|t| matches!(t, TraitReference::Inline(td) if td.name == trait_name))
+            .then_some(o.name.as_str())
     })
 }
 
-fn describe_from_signatures(
-    r: &Resolved,
-    pkg: &BehaviorPackage,
+fn inline_trait<'a>(
+    program: &'a orbital_core::schema::OrbitalSchema,
     trait_name: &str,
-) -> anyhow::Result<(Vec<KnobOut>, EventsOut, String)> {
-    let name = r
-        .path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .ok_or_else(|| anyhow::anyhow!("{} has no file stem", r.path.display()))?;
-    let raw = std::fs::read_to_string(&pkg.factory_signatures)
-        .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", pkg.factory_signatures.display()))?;
-    let catalog: Value = serde_json::from_str(&raw).map_err(|e| {
-        anyhow::anyhow!(
-            "invalid factory signatures {}: {e}",
-            pkg.factory_signatures.display()
-        )
-    })?;
-    let signatures = catalog
-        .get("signatures")
-        .and_then(Value::as_array)
-        .ok_or_else(|| {
-            anyhow::anyhow!("{} has no `signatures`", pkg.factory_signatures.display())
-        })?;
-    let knob_defs = catalog.get("knobDefs").and_then(Value::as_array);
-    let (orbital, signature) = signatures
-        .iter()
-        .filter(|s| s.get("organism").and_then(Value::as_str) == Some(name))
-        .find_map(|s| {
-            s.get("traits")
-                .and_then(Value::as_array)?
-                .iter()
-                .find(|t| t.get("name").and_then(Value::as_str) == Some(trait_name))
-                .map(|t| {
-                    (
-                        s.get("orbital").and_then(Value::as_str).unwrap_or_default(),
-                        t,
-                    )
-                })
-        })
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "`{name}` has no trait `{trait_name}` in {}",
-                pkg.factory_signatures.display()
-            )
-        })?;
-
-    let defs: Vec<&Value> = match (signature.get("overridableConfigKeyRefs"), knob_defs) {
-        (Some(Value::Array(refs)), Some(table)) => refs
-            .iter()
-            .filter_map(|i| i.as_u64().and_then(|i| table.get(i as usize)))
-            .collect(),
-        _ => signature
-            .get("overridableConfigKeys")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .collect(),
-    };
-    let manifests = package_manifests(pkg)?;
-    let mut knobs = Vec::with_capacity(defs.len());
-    let mut used_vector = false;
-    for def in defs {
-        let key = def.get("key").and_then(Value::as_str).unwrap_or_default();
-        let full = format!("{name}/{orbital}/{trait_name}/{key}");
-        let vector = manifests.iter().find_map(|m| m.vector(&full));
-        used_vector |= vector.is_some();
-        knobs.push(knob_of(def, vector)?);
-    }
-    let events = EventsOut {
-        emits: str_list(signature.get("emittedEvents")),
-        listens: str_list(signature.get("listenedEvents")),
-        transitions: str_list(signature.get("transitionEvents")),
-        domain: None,
-    };
-    let model = single_model(manifests.iter().map(|m| (pkg.name.as_str(), m)))?;
-    let _ = used_vector;
-    Ok((knobs, events, model))
-}
-
-fn describe_from_schema(
-    schema: &orbital_core::schema::OrbitalSchema,
-    trait_name: &str,
-) -> anyhow::Result<(Vec<KnobOut>, EventsOut, String)> {
+) -> Option<&'a orbital_core::schema::TraitDefinition> {
     use orbital_core::schema::TraitReference;
-    let td = schema
+    program
         .orbitals
         .iter()
         .flat_map(|o| o.traits.iter())
@@ -626,6 +773,13 @@ fn describe_from_schema(
             TraitReference::Inline(td) if td.name == trait_name => Some(td),
             _ => None,
         })
+}
+
+fn describe_from_schema(
+    schema: &orbital_core::schema::OrbitalSchema,
+    trait_name: &str,
+) -> anyhow::Result<(Vec<KnobOut>, EventsOut, String)> {
+    let td = inline_trait(schema, trait_name)
         .ok_or_else(|| anyhow::anyhow!("no inline trait `{trait_name}` in `{}`", schema.name))?;
     let mut keys: Vec<(&String, &orbital_core::schema::ConfigField)> =
         td.config.iter().flatten().collect();
@@ -846,6 +1000,11 @@ struct TraitOut {
     events: EventsOut,
     /// Declared `-> @rebindable`: the trait may be bound to another record.
     rebindable: bool,
+    /// The upstream trait this one composes (`trait X = Alias.traits.Y`), as written; absent for a trait the behavior defines itself.
+    #[serde(rename = "ref", skip_serializing_if = "Option::is_none")]
+    reference: Option<String>,
+    /// The trait's declared `@capabilities` tags.
+    capabilities: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -900,6 +1059,32 @@ struct BehaviorDescriptionOut {
     uses: Vec<String>,
 }
 
+/// The composed traits of `orbital` as the behavior is written: local name to the
+/// `Alias.traits.Y` path, for the call sites whose local name differs from the path.
+fn call_site_refs(
+    schema: &orbital_core::schema::OrbitalSchema,
+    orbital: &str,
+) -> HashMap<String, String> {
+    use orbital_core::schema::TraitReference;
+    schema
+        .orbitals
+        .iter()
+        .filter(|o| o.name == orbital)
+        .flat_map(|o| o.traits.iter())
+        .filter_map(|t| match t {
+            TraitReference::Reference {
+                reference: Some(path),
+                name,
+                ..
+            } => {
+                let local = name.as_deref().unwrap_or(path);
+                (local != path).then(|| (local.to_string(), path.clone()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 /// Every behavior `schema`'s orbitals import, once each, sorted.
 fn uses_of(schema: &orbital_core::schema::OrbitalSchema) -> Vec<String> {
     let set: BTreeSet<String> = schema
@@ -926,10 +1111,16 @@ fn declared_config_of(
 /// one references but a sibling owns.
 fn borrowed_entities(
     path: &Path,
+    source: &orbital_core::schema::OrbitalSchema,
     program: &orbital_core::schema::OrbitalSchema,
     options: &orbital_compiler::CompilerOptions,
 ) -> anyhow::Result<BTreeMap<String, BTreeSet<String>>> {
     use orbital_core::schema::EntityRef;
+    // A behavior that uses another lazily cannot be imported (the importer cannot resolve its
+    // lazy orbitals), so no import of it maps anything.
+    if !orbital_compiler::phases::lazy::split_lazy(&mut source.clone()).is_empty() {
+        return Ok(BTreeMap::new());
+    }
     let file = path
         .file_name()
         .and_then(|f| f.to_str())
@@ -969,12 +1160,16 @@ fn borrowed_entities(
     .map_err(|e| anyhow::anyhow!("cannot import the orbitals of {}: {e}", path.display()))?;
     let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for d in orbital_ref {
-        let index = d
+        // A path naming an orbital (`orbitals[name=X]`) is a reference inside an imported file,
+        // not one of the probe's own orbitals: it is that file's concern, not what the import maps.
+        let Some(index) = d
             .path
             .strip_prefix("orbitals[")
             .and_then(|r| r.strip_suffix(']'))
             .and_then(|i| i.parse::<usize>().ok())
-            .ok_or_else(|| anyhow::anyhow!("unexpected import diagnostic path `{}`", d.path))?;
+        else {
+            continue;
+        };
         let name = names.get(index).ok_or_else(|| {
             anyhow::anyhow!("import diagnostic for orbital #{index} of {}", names.len())
         })?;
@@ -995,19 +1190,11 @@ fn describe_behavior(
     use orbital_compiler::phases::validation::config_type::{
         orbital_event_names, trait_event_names,
     };
-    use orbital_compiler::{resolve_schema_with_path, CompilerOptions};
+    use orbital_compiler::CompilerOptions;
     use orbital_core::schema::{EntityRef, PageRef, TraitReference};
     let resolved_src = resolve(behavior)?;
     let options = CompilerOptions::from_env();
-    let mut schema = resolved_src.schema.clone();
-    orbital_compiler::phases::lazy::split_lazy_and_resolve(
-        &mut schema,
-        &options,
-        Some(&resolved_src.path),
-    )
-    .map_err(|e| anyhow::anyhow!("cannot resolve `{behavior}`: {e}"))?;
-    let program = resolve_schema_with_path(schema, &options, Some(&resolved_src.path))
-        .map_err(|e| anyhow::anyhow!("cannot resolve `{behavior}`: {e}"))?;
+    let program = resolved_program(&resolved_src, behavior)?;
     let forwards =
         orbital_compiler::phases::validation::final_program::forwarded_controls(&program);
     let canonical = match (
@@ -1017,7 +1204,7 @@ fn describe_behavior(
         (Some(pkg), Some(name)) => format!("{}/{name}", pkg.prefix),
         _ => behavior.to_string(),
     };
-    let borrows = borrowed_entities(&resolved_src.path, &program, &options)?;
+    let borrows = borrowed_entities(&resolved_src.path, &resolved_src.schema, &program, &options)?;
     // Derived on the resolved program: imports are inlined, so an imported orbital's own
     // references are visible, and siblings' records keep the names an import maps.
     let program_json = serde_json::to_value(&program)?;
@@ -1041,6 +1228,7 @@ fn describe_behavior(
             _ => None,
         };
         let orbital_events = orbital_event_names(orbital);
+        let refs = call_site_refs(&resolved_src.schema, &orbital.name);
         let mut traits = Vec::new();
         for t in &orbital.traits {
             if let TraitReference::Inline(td) = t {
@@ -1053,6 +1241,8 @@ fn describe_behavior(
                 let own = trait_event_names(td);
                 traits.push(TraitOut {
                     rebindable: td.entity_rebindable == Some(true),
+                    reference: refs.get(&td.name).cloned(),
+                    capabilities: td.capabilities.clone(),
                     name: td.name.clone(),
                     config: declared_config_of(td.config.as_ref()),
                     knobs: knob_fields(
@@ -1212,6 +1402,11 @@ pub(crate) enum DescribeTarget {
 
 /// `orb behaviors describe` as a value — what the CLI prints and `orb mcp` returns.
 pub(crate) fn describe(target: DescribeTarget) -> anyhow::Result<Value> {
+    describe_from(target, None)
+}
+
+/// [`describe`] of a trait value a program names: a relative value resolves from that program.
+pub(crate) fn describe_from(target: DescribeTarget, from: Option<&Path>) -> anyhow::Result<Value> {
     let (value, behavior, trait_name) = match target {
         DescribeTarget::Value(value) => {
             let field = |k: &str| {
@@ -1249,11 +1444,37 @@ pub(crate) fn describe(target: DescribeTarget) -> anyhow::Result<Value> {
         }
     };
 
-    let resolved = resolve(&behavior)?;
-    let (knobs, events, model) = match &resolved.package {
-        Some(pkg) => describe_from_signatures(&resolved, pkg, &trait_name)?,
-        None => describe_from_schema(&resolved.schema, &trait_name)?,
+    let resolved = resolve_from(&behavior, from)?;
+    let program = resolved_program(&resolved, &behavior)?;
+    // Knobs and events come from the program as it resolves; an installed package adds the
+    // embedding vectors it ships for them, keyed `<behavior>/<orbital>/<trait>/<knob>`.
+    let (mut knobs, events, _) = describe_from_schema(&program, &trait_name)?;
+    let model = match &resolved.package {
+        Some(pkg) => {
+            let name = resolved
+                .path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .ok_or_else(|| anyhow::anyhow!("{} has no file stem", resolved.path.display()))?;
+            let orbital = trait_orbital(&program, &trait_name).unwrap_or_default();
+            let manifests = package_manifests(pkg, &Want::KnobsOf(name.to_string()))?;
+            for knob in &mut knobs {
+                let key = format!("{name}/{orbital}/{trait_name}/{}", knob.key);
+                knob.vector = manifests.iter().find_map(|m| m.vector(&key));
+            }
+            single_model(manifests.iter().map(|m| (pkg.name.as_str(), m)))?
+        }
+        None => String::new(),
     };
+    let described = inline_trait(&program, &trait_name);
+    let machine = described.map(|td| MachineOut {
+        linked_entity: td.linked_entity.clone(),
+        state_machine: td.state_machine.clone(),
+    });
+    let source = described
+        .map(orbital_lolo::unlower::print_trait)
+        .transpose()
+        .map_err(|e| anyhow::anyhow!("cannot print `{trait_name}`: {e}"))?;
     let value = match value {
         Some(v) => v,
         None => {
@@ -1271,6 +1492,8 @@ pub(crate) fn describe(target: DescribeTarget) -> anyhow::Result<Value> {
         value,
         knobs,
         events,
+        machine,
+        source,
         model,
     })?)
 }
@@ -1278,6 +1501,15 @@ pub(crate) fn describe(target: DescribeTarget) -> anyhow::Result<Value> {
 pub(crate) fn run_source(spec: String, _json: bool) -> anyhow::Result<()> {
     println!("{}", serde_json::to_string_pretty(&source(&spec)?)?);
     Ok(())
+}
+
+/// The source file a behavior specifier resolves to (the `.lolo` an author reads as an example).
+pub(crate) fn behavior_source_path(spec: &str) -> anyhow::Result<PathBuf> {
+    let behavior = match spec.rfind(TRAITS_SEGMENT) {
+        Some(i) if i > 0 => &spec[..i],
+        _ => spec,
+    };
+    Ok(resolve(behavior)?.path)
 }
 
 /// `orb behaviors source` as a value: the behavior a specifier names, as a program.
@@ -1296,6 +1528,109 @@ pub(crate) fn source(spec: &str) -> anyhow::Result<Value> {
         serde_json::to_value(&resolved.schema)?
     };
     Ok(value)
+}
+
+#[cfg(test)]
+mod manifest_cache_tests {
+    use super::*;
+
+    fn knobs_of(name: &str) -> Want {
+        Want::KnobsOf(name.to_string())
+    }
+
+    #[test]
+    fn a_package_s_manifests_are_parsed_once_per_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("knobs.json");
+        std::fs::write(&file, r#"{"model":"m1","vectors":{"a/O/T/k":[0.5,0.25]}}"#).unwrap();
+        let first = manifests_at(std::slice::from_ref(&file), &knobs_of("a")).unwrap();
+        let again = manifests_at(std::slice::from_ref(&file), &knobs_of("a")).unwrap();
+        assert!(std::sync::Arc::ptr_eq(&first, &again));
+        assert_eq!(first[0].vector("a/O/T/k"), Some(vec![0.5, 0.25]));
+        // Control: another file set is its own entry.
+        let other = dir.path().join("other.json");
+        std::fs::write(&other, r#"{"model":"m2","vectors":{"x":[1.0]}}"#).unwrap();
+        let different = manifests_at(std::slice::from_ref(&other), &Want::Organisms).unwrap();
+        assert!(!std::sync::Arc::ptr_eq(&first, &different));
+        assert_eq!(different[0].model, "m2");
+        // Control: the same file read for another behavior is its own entry.
+        let other_want = manifests_at(std::slice::from_ref(&file), &knobs_of("b")).unwrap();
+        assert!(!std::sync::Arc::ptr_eq(&first, &other_want));
+    }
+
+    #[test]
+    fn a_read_keeps_only_the_keys_the_query_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("mixed.json");
+        std::fs::write(
+            &file,
+            r#"{"model":"m","vectors":{"a":[1.0],"a#capabilities":[2.0],"a/O/T/k":[3.0],"a/O/T/j":[4.0],"ab/O/T/k":[5.0],"b/O/T/k":[6.0]}}"#,
+        )
+        .unwrap();
+        let knobs = Manifest::read(&file, &knobs_of("a")).unwrap();
+        assert_eq!(knobs.vector("a/O/T/k"), Some(vec![3.0]));
+        assert_eq!(knobs.vector("a/O/T/j"), Some(vec![4.0]));
+        // Controls: another behavior sharing the name prefix, another behavior, and the organism facets are not read.
+        assert_eq!(knobs.vector("ab/O/T/k"), None);
+        assert_eq!(knobs.vector("b/O/T/k"), None);
+        assert_eq!(knobs.vector("a"), None);
+        assert_eq!(knobs.len(), 2);
+
+        let organisms = Manifest::read(&file, &Want::Organisms).unwrap();
+        assert_eq!(organisms.vector("a"), Some(vec![1.0]));
+        assert_eq!(organisms.vector("a#capabilities"), Some(vec![2.0]));
+        assert_eq!(organisms.vector("a/O/T/k"), None);
+        assert_eq!(organisms.len(), 2);
+    }
+
+    #[test]
+    fn an_interned_file_resolves_only_the_wanted_keys_through_its_table() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, body) in [
+            ("keys-first.json", r#"{"model":"m","keys":{"a/O/T/k":1,"a/O/T/j":0,"b/O/T/k":2},"table":[[1.0],[2.0],[3.0]]}"#),
+            ("table-first.json", r#"{"model":"m","table":[[1.0],[2.0],[3.0]],"keys":{"a/O/T/k":1,"a/O/T/j":0,"b/O/T/k":2}}"#),
+        ] {
+            let file = dir.path().join(name);
+            std::fs::write(&file, body).unwrap();
+            let m = Manifest::read(&file, &knobs_of("a")).unwrap();
+            assert_eq!(m.vector("a/O/T/k"), Some(vec![2.0]), "{name}");
+            assert_eq!(m.vector("a/O/T/j"), Some(vec![1.0]), "{name}");
+            assert_eq!(m.vector("b/O/T/k"), None, "{name}");
+            assert_eq!(m.len(), 2, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_direct_vector_wins_over_the_table_and_quantized_vectors_decode() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("both.json");
+        std::fs::write(
+            &file,
+            r#"{"model":"m","vectors":{"a/O/T/k":[9.0],"a/O/T/q":{"s":1.0,"d":"fwA="}},"keys":{"a/O/T/k":0},"table":[[1.0]]}"#,
+        )
+        .unwrap();
+        let m = Manifest::read(&file, &knobs_of("a")).unwrap();
+        assert_eq!(m.vector("a/O/T/k"), Some(vec![9.0]));
+        assert_eq!(m.vector("a/O/T/q"), Some(vec![1.0, 0.0]));
+    }
+
+    #[test]
+    fn a_file_with_no_vectors_or_table_is_refused_but_an_empty_selection_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let bare = dir.path().join("bare.json");
+        std::fs::write(&bare, r#"{"model":"m"}"#).unwrap();
+        let err = Manifest::read(&bare, &Want::Organisms).err().unwrap().to_string();
+        assert!(err.contains("neither `vectors` nor `table`/`keys`"), "{err}");
+        let no_model = dir.path().join("no-model.json");
+        std::fs::write(&no_model, r#"{"vectors":{"a":[1.0]}}"#).unwrap();
+        let err = Manifest::read(&no_model, &Want::Organisms).err().unwrap().to_string();
+        assert!(err.contains("carries no `model`"), "{err}");
+        let nothing_wanted = dir.path().join("other.json");
+        std::fs::write(&nothing_wanted, r#"{"model":"m","vectors":{"z/O/T/k":[1.0]}}"#).unwrap();
+        let m = Manifest::read(&nothing_wanted, &knobs_of("a")).unwrap();
+        assert_eq!(m.len(), 0);
+        assert_eq!(m.model, "m");
+    }
 }
 
 #[cfg(test)]

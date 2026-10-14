@@ -1,4 +1,4 @@
-// `orb behaviors` + `orb signatures` integration tests — drives the real
+// `orb behaviors` + `orb signatures` / `orb reference` integration tests — drives the real
 // `orb`/`orbital` binary (`CARGO_BIN_EXE_orb`) against a temp project with a
 // stub `bun` (`ORB_BUN_PATH`, no network) that materializes a fake behavior
 // package (io-shaped, or `almadar-std`-prefixed) on `add` and deletes it on
@@ -84,17 +84,13 @@ case "$1" in
     "prefix": "fake-behaviors",
     "registry": "behaviors/registry",
     "index": "behaviors/behaviors-registry.json",
-    "factorySignatures": "behaviors/registry/factory-signatures.json",
     "loloContracts": "behaviors/lolo-behavior-contracts.json",
-    "signatures": "behaviors/signatures.lolo",
     "compiler": "__COMPILER_RANGE__"
   }
 }
 PKGJSON
     echo '{}' > "node_modules/@fake-io/behaviors/behaviors/behaviors-registry.json"
-    echo '{}' > "node_modules/@fake-io/behaviors/behaviors/registry/factory-signatures.json"
     echo '{}' > "node_modules/@fake-io/behaviors/behaviors/lolo-behavior-contracts.json"
-    printf ';; fake-behaviors signatures fragment\n(fake-atom)\n' > "node_modules/@fake-io/behaviors/behaviors/signatures.lolo"
     printf '{"name":"fake-atom","orbitals":[]}\n' > "node_modules/@fake-io/behaviors/behaviors/registry/atoms/fake-atom.orb"
     ;;
   remove)
@@ -133,17 +129,13 @@ case "$1" in
     "prefix": "almadar-std",
     "registry": "behaviors/registry",
     "index": "behaviors/behaviors-registry.json",
-    "factorySignatures": "behaviors/registry/factory-signatures.json",
     "loloContracts": "behaviors/lolo-behavior-contracts.json",
-    "signatures": "behaviors/signatures.lolo",
     "compiler": "__COMPILER_RANGE__"
   }
 }
 PKGJSON
     echo '{}' > "node_modules/@fake/std/behaviors/behaviors-registry.json"
-    echo '{}' > "node_modules/@fake/std/behaviors/registry/factory-signatures.json"
     echo '{}' > "node_modules/@fake/std/behaviors/lolo-behavior-contracts.json"
-    printf ';; fake-std signatures fragment\n(fake-std-atom)\n' > "node_modules/@fake/std/behaviors/signatures.lolo"
     printf '{"name":"fake-std-atom","orbitals":[]}\n' > "node_modules/@fake/std/behaviors/registry/atoms/fake-std-atom.orb"
     ;;
   remove)
@@ -186,17 +178,13 @@ case "$1" in
     "prefix": "fake-peer-behaviors",
     "registry": "behaviors/registry",
     "index": "behaviors/behaviors-registry.json",
-    "factorySignatures": "behaviors/registry/factory-signatures.json",
     "loloContracts": "behaviors/lolo-behavior-contracts.json",
-    "signatures": "behaviors/signatures.lolo",
     "compiler": "*"
   }
 }
 PKGJSON
     echo '{}' > "node_modules/@fake-io/peer-behaviors/behaviors/behaviors-registry.json"
-    echo '{}' > "node_modules/@fake-io/peer-behaviors/behaviors/registry/factory-signatures.json"
     echo '{}' > "node_modules/@fake-io/peer-behaviors/behaviors/lolo-behavior-contracts.json"
-    printf '' > "node_modules/@fake-io/peer-behaviors/behaviors/signatures.lolo"
     ;;
   remove)
     rm -rf "node_modules/@fake-io/peer-behaviors"
@@ -629,54 +617,25 @@ fn remove_succeeds_when_unreferenced() {
     assert!(!project.fake_pkg_dir().exists());
 }
 
-/// Phase 2: `orb signatures` composes the INSTALLED std's `orb.signatures`
-/// file (first) plus every other installed package's fragment — there is no
-/// embedded fallback left.
+/// `orb reference` is generated from the compiler itself: it needs no installed package.
 #[test]
-fn signatures_composes_installed_std_and_installed_package_fragments() {
+fn reference_needs_no_installed_package() {
     let project = Project::new();
-    let std_stub = write_std_bun_stub(&project, "*", "*");
-    seed_fake_package(&project, &std_stub);
     let bun_stub = write_bun_stub(&project, "*");
-    seed_fake_package(&project, &bun_stub);
 
-    let output = orb(&project, &bun_stub, &["signatures"]);
+    let output = orb(&project, &bun_stub, &["reference"]);
     assert!(
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.starts_with(";; fake-std signatures fragment"),
-        "std fragment must come first: stdout head: {}",
-        &stdout[..stdout.len().min(80)]
-    );
-    assert!(
-        stdout.contains(";; fake-behaviors signatures fragment"),
-        "missing the installed fake package's signatures fragment"
-    );
-}
-
-/// Phase 2: with no installed std at all, `orb signatures` refuses instead of
-/// silently falling back to a baked fragment.
-#[test]
-fn signatures_without_std_reports_not_installed() {
-    let project = Project::new();
-    let bun_stub = write_bun_stub(&project, "*");
-    seed_fake_package(&project, &bun_stub);
-
-    let output = orb(&project, &bun_stub, &["signatures"]);
-    assert!(!output.status.success(), "signatures should have failed");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("@almadar/std is not installed"),
-        "stderr: {stderr}"
-    );
-    assert!(
-        stderr.contains("orb update"),
-        "stderr should name the install command: {stderr}"
-    );
+    let index: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("reference prints JSON");
+    assert!(index["constructs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|c| c["name"] == "Trait"));
 }
 
 /// `verify_package`'s new core check: a std whose `dependencies["@almadar/

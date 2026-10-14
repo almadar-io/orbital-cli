@@ -120,38 +120,45 @@ pub(crate) fn run_tests(
     Ok(())
 }
 
-/// Execute generated test cases headlessly against the OIR state machine.
-///
-/// For each test case:
-/// 1. Start at the initial state
-/// 2. Walk the setup_path (fire events to reach the from_state)
-/// 3. Fire the test event
-/// 4. Compare the resulting state to expected_state
-fn execute_tests_headless(
+/// One generated test case played headlessly.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase", rename_all_fields = "camelCase", tag = "status")]
+pub(crate) enum TestOutcome {
+    Passed {
+        trait_name: String,
+        test: String,
+    },
+    Failed {
+        trait_name: String,
+        test: String,
+        expected: String,
+        got: String,
+    },
+    Skipped {
+        trait_name: String,
+        test: String,
+        reason: String,
+    },
+}
+
+/// Play every generated test case against the OIR state machine: start at the
+/// initial state, walk the setup path to the case's `from` state, fire its event and
+/// compare the resulting state. Records each trait's pass/fail counts on `results`.
+pub(crate) fn walk_tests(
     module: &orbital_core::ir::OirModule,
-    results: &mut Vec<orbital_compiler::TraitTestResult>,
-    report: &str,
-    verbose: bool,
-) -> anyhow::Result<()> {
+    results: &mut [orbital_compiler::TraitTestResult],
+) -> Vec<TestOutcome> {
     use orbital_compiler::TestCategory;
 
-    let mut total_passed = 0usize;
-    let mut total_failed = 0usize;
-    let mut total_skipped = 0usize;
-
+    let mut outcomes = Vec::new();
     for result in results.iter_mut() {
-        // Find the OIR trait
-        let trait_def = match module.traits.iter().find(|t| t.name == result.trait_name) {
-            Some(t) => t,
-            None => {
-                if verbose {
-                    println!(
-                        "⚠ Trait '{}' not found in module, skipping",
-                        result.trait_name
-                    );
-                }
-                continue;
-            }
+        let Some(trait_def) = module.traits.iter().find(|t| t.name == result.trait_name) else {
+            outcomes.push(TestOutcome::Skipped {
+                trait_name: result.trait_name.clone(),
+                test: String::new(),
+                reason: "trait not found in the compiled module".to_string(),
+            });
+            continue;
         };
 
         let initial_state = trait_def
@@ -162,20 +169,21 @@ fn execute_tests_headless(
             .or_else(|| trait_def.states.first().map(|s| s.name.as_str()))
             .unwrap_or("idle");
 
-        let mut trait_passed = 0usize;
-        let mut trait_failed = 0usize;
-
+        let (mut trait_passed, mut trait_failed) = (0usize, 0usize);
         for test in &result.tests {
-            // Skip journey tests — they encode compound events in a single string
+            let skip = |reason: String| TestOutcome::Skipped {
+                trait_name: result.trait_name.clone(),
+                test: test.name.clone(),
+                reason,
+            };
+            // Journey tests encode compound events in a single string.
             if test.category == TestCategory::Journey {
-                total_skipped += 1;
+                outcomes.push(skip("journey test".to_string()));
                 continue;
             }
 
-            // Step 1: Walk setup_path to reach from_state
             let mut current_state = initial_state.to_string();
             let mut setup_ok = true;
-
             for step in &test.setup_path {
                 match orbital_compiler::resolve_transition(
                     trait_def,
@@ -184,38 +192,25 @@ fn execute_tests_headless(
                     step.payload.as_ref(),
                     test.entity_data.as_ref(),
                 ) {
-                    Some(new_state) => {
-                        current_state = new_state;
-                    }
+                    Some(new_state) => current_state = new_state,
                     None => {
-                        // Setup path might go through guarded transitions — skip test
                         setup_ok = false;
                         break;
                     }
                 }
             }
-
             if !setup_ok {
-                total_skipped += 1;
-                if verbose {
-                    println!("  ⊘ {} (setup path blocked)", test.name);
-                }
+                outcomes.push(skip("setup path blocked".to_string()));
                 continue;
             }
-
-            // Step 2: Verify we're at the expected from_state
             if current_state != test.from_state {
-                total_skipped += 1;
-                if verbose {
-                    println!(
-                        "  ⊘ {} (setup reached '{}', expected '{}')",
-                        test.name, current_state, test.from_state
-                    );
-                }
+                outcomes.push(skip(format!(
+                    "setup reached '{}', expected '{}'",
+                    current_state, test.from_state
+                )));
                 continue;
             }
 
-            // Step 3: Fire the test event
             let after_state = orbital_compiler::resolve_transition(
                 trait_def,
                 &current_state,
@@ -225,30 +220,102 @@ fn execute_tests_headless(
             )
             .unwrap_or_else(|| current_state.clone());
 
-            // Step 4: Compare to expected_state
-            let passed = after_state == test.expected_state;
-
-            if passed {
+            if after_state == test.expected_state {
                 trait_passed += 1;
-                total_passed += 1;
-                if verbose {
-                    println!("  ✓ {}", test.name);
-                }
+                outcomes.push(TestOutcome::Passed {
+                    trait_name: result.trait_name.clone(),
+                    test: test.name.clone(),
+                });
             } else {
                 trait_failed += 1;
-                total_failed += 1;
-                println!(
-                    "  ✗ {} — expected '{}', got '{}'",
-                    test.name, test.expected_state, after_state
-                );
+                outcomes.push(TestOutcome::Failed {
+                    trait_name: result.trait_name.clone(),
+                    test: test.name.clone(),
+                    expected: test.expected_state.clone(),
+                    got: after_state,
+                });
             }
         }
-
         result.passed = trait_passed;
         result.failed = trait_failed;
     }
+    outcomes
+}
 
-    // Output summary
+/// `orb test --execute` as a value: every generated case of every trait, played.
+pub(crate) fn exhaustive_test_report(path: &std::path::Path) -> anyhow::Result<serde_json::Value> {
+    use orbital_compiler::{compile_file, CompilerOptions, ExhaustiveTestGenerator};
+
+    let module = compile_file(path, &CompilerOptions::from_env())
+        .map_err(|e| anyhow::anyhow!("Compilation failed: {}", e))?;
+    let mut results = ExhaustiveTestGenerator::new(&module).generate_all_tests();
+    let outcomes = walk_tests(&module, &mut results);
+    let count = |status: &str| {
+        outcomes
+            .iter()
+            .filter(|o| {
+                matches!(
+                    (o, status),
+                    (TestOutcome::Passed { .. }, "passed")
+                        | (TestOutcome::Failed { .. }, "failed")
+                        | (TestOutcome::Skipped { .. }, "skipped")
+                )
+            })
+            .count()
+    };
+    Ok(serde_json::json!({
+        "passed": count("passed"),
+        "failed": count("failed"),
+        "skipped": count("skipped"),
+        "outcomes": outcomes,
+    }))
+}
+
+/// Execute generated test cases headlessly against the OIR state machine.
+fn execute_tests_headless(
+    module: &orbital_core::ir::OirModule,
+    results: &mut [orbital_compiler::TraitTestResult],
+    report: &str,
+    verbose: bool,
+) -> anyhow::Result<()> {
+    let outcomes = walk_tests(module, results);
+    let (mut total_passed, mut total_failed, mut total_skipped) = (0usize, 0usize, 0usize);
+    for outcome in &outcomes {
+        match outcome {
+            TestOutcome::Passed { test, .. } => {
+                total_passed += 1;
+                if verbose {
+                    println!("  ✓ {test}");
+                }
+            }
+            TestOutcome::Failed {
+                test,
+                expected,
+                got,
+                ..
+            } => {
+                total_failed += 1;
+                println!("  ✗ {test} — expected '{expected}', got '{got}'");
+            }
+            TestOutcome::Skipped {
+                trait_name,
+                test,
+                reason,
+            } => {
+                if test.is_empty() {
+                    if verbose {
+                        println!("⚠ Trait '{trait_name}' not found in module, skipping");
+                    }
+                    continue;
+                }
+                total_skipped += 1;
+                if verbose {
+                    println!("  ⊘ {test} ({reason})");
+                }
+            }
+        }
+    }
+
     match report {
         "json" => {
             let json = serde_json::to_string_pretty(&results)?;

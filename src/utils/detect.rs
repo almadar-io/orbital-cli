@@ -524,7 +524,11 @@ pub(crate) fn typed_parse_error_to_json(
                         // `recordObservation: (skillId: string) -> State` — a
                         // TypeScript function-type signature on an entity
                         // field (run 40b: StudySchedule).
-                        if msg.contains("expected identifier") && msg.contains("got LParen") {
+                        let at_paren = msg.contains("expected identifier") && msg.contains("got LParen");
+                        // `(name: type, …)` opens a grouped type, whose `)` the parameter's
+                        // `:` then interrupts.
+                        let in_group = msg.contains("expected )") && msg.contains("got Colon");
+                        if at_paren || in_group {
                             function_type_field_hint(s, span.line as usize)
                         } else {
                             None
@@ -619,7 +623,7 @@ pub(crate) fn typed_parse_error_to_json(
                 TypeError::GenericTypeForbidden { name, .. } => (
                     "ORB_T_GENERIC_TYPE_DEPRECATED",
                     Some(format!(
-                        "replace `{name}`: renderable content → `node`; structured data → an inline shape, a named `type` alias, or `Map K V`; a single primitive of unknown kind → `scalar`"
+                        "replace `{name}`: renderable content → `node`; structured data → an inline shape, a named `type` alias, or `Map K V`; a value of several kinds → a named tagged-union `type` alias, or the concrete primitive; the row of an entity → `@entity` / `@entity @config.<knob>`"
                     )),
                 ),
                 TypeError::PayloadSiblingUnresolved { sibling, .. } => (

@@ -11,6 +11,8 @@ pub(crate) mod engines_cmd;
 pub(crate) mod execute;
 pub(crate) mod i18n;
 pub(crate) mod language;
+pub(crate) mod mcp;
+pub(crate) mod reference;
 pub(crate) mod npm_project;
 pub(crate) mod parse;
 pub(crate) mod serve;

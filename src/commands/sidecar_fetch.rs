@@ -92,9 +92,7 @@ mod tests {
         for (rel, content) in [
             ("behaviors/registry/x.orb", "{}"),
             ("behaviors/index.json", "{}"),
-            ("behaviors/registry/factory-signatures.json", "{}"),
             ("behaviors/contracts.json", "{}"),
-            ("behaviors/signatures.lolo", ""),
         ] {
             let path = pkg_dir.join(rel);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -102,7 +100,7 @@ mod tests {
         }
         fs::write(
             pkg_dir.join("package.json"),
-            r#"{"name":"pkg-a","version":"1.0.0","orb":{"prefix":"pa","registry":"behaviors/registry","index":"behaviors/index.json","factorySignatures":"behaviors/registry/factory-signatures.json","loloContracts":"behaviors/contracts.json","signatures":"behaviors/signatures.lolo","embeddings":["dist/knob-embeddings.json"],"compiler":">=0.0.0"}}"#,
+            r#"{"name":"pkg-a","version":"1.0.0","orb":{"prefix":"pa","registry":"behaviors/registry","index":"behaviors/index.json","loloContracts":"behaviors/contracts.json","signatures":"behaviors/signatures.lolo","embeddings":["dist/knob-embeddings.json"],"compiler":">=0.0.0"}}"#,
         )
         .unwrap();
         fs::write(

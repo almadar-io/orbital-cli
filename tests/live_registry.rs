@@ -68,17 +68,13 @@ fn live_std(project: &Path) -> PathBuf {
         "prefix": "almadar-std",
         "source": "behaviors/lolo",
         "index": "behaviors/index.json",
-        "factorySignatures": "behaviors/factory-signatures.json",
         "loloContracts": "behaviors/contracts.json",
-        "signatures": "behaviors/signatures.lolo",
         "compiler": ">=0.0.0"
     });
     std::fs::write(&manifest_path, manifest.to_string()).unwrap();
     for (rel, body) in [
         ("behaviors/index.json", r#"{"behaviors":{}}"#),
-        ("behaviors/factory-signatures.json", r#"{"signatures":[]}"#),
         ("behaviors/contracts.json", r#"{"behaviors":{}}"#),
-        ("behaviors/signatures.lolo", ""),
         ("behaviors/lolo/app/atoms/std-cartx.lolo", CART),
     ] {
         let path = std.join(rel);
@@ -181,7 +177,7 @@ fn live_std_corpus_validates_real_organisms() {
         "compiler": ">=0.0.0"
     });
     let mut linked = vec![declared["source"].as_str().unwrap().to_string()];
-    for key in ["index", "factorySignatures", "loloContracts", "signatures"] {
+    for key in ["index", "loloContracts", "signatures"] {
         if let Some(rel) = declared[key].as_str() {
             orb[key] = serde_json::Value::from(rel);
             linked.push(rel.to_string());
