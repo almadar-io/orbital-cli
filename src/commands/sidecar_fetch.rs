@@ -1,5 +1,5 @@
 //! The network half of the sidecar store: a `ureq` fetcher injected into
-//! `orbital_core::sidecar_store`, and the embeddings resolver the catalog readers call.
+//! `orbital_core::sidecar_store`, and the vector snapshot resolver the catalog readers call.
 
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -27,22 +27,21 @@ impl SidecarFetcher for UreqFetcher {
     }
 }
 
-/// The readable path of every `orb.embeddings` file: package files as-is, lock-resolved
-/// ones from the cache, downloaded and verified first when absent.
-pub(crate) fn resolve_embeddings(
+/// The readable path of the package's `orb.vectors` snapshot: a package file as-is, a lock-resolved
+/// one from the cache, downloaded and verified first when absent. `None` when none is declared.
+pub(crate) fn resolve_vectors(
     pkg: &BehaviorPackage,
     fetcher: &dyn SidecarFetcher,
-) -> anyhow::Result<Vec<PathBuf>> {
-    pkg.embeddings
-        .iter()
-        .map(
-            |path| match pkg.sidecars.iter().find(|s| &s.cache_path == path) {
-                Some(sidecar) => ensure_sidecar(&pkg.name, &pkg.version, sidecar, fetcher)
-                    .map_err(anyhow::Error::from),
-                None => Ok(path.clone()),
-            },
-        )
-        .collect()
+) -> anyhow::Result<Option<PathBuf>> {
+    let Some(path) = &pkg.vectors else {
+        return Ok(None);
+    };
+    match pkg.sidecars.iter().find(|s| &s.cache_path == path) {
+        Some(sidecar) => ensure_sidecar(&pkg.name, &pkg.version, sidecar, fetcher)
+            .map(Some)
+            .map_err(anyhow::Error::from),
+        None => Ok(Some(path.clone())),
+    }
 }
 
 #[cfg(test)]
@@ -86,7 +85,7 @@ mod tests {
             .collect()
     }
 
-    /// An installed package whose only embeddings file lives in the lock, not the package.
+    /// An installed package whose only vectors snapshot lives in the lock, not the package.
     fn locked_package(root: &Path, body: &[u8], bytes: u64) -> (BehaviorPackage, PathBuf) {
         let pkg_dir = root.join("node_modules/pkg-a");
         for (rel, content) in [
@@ -100,13 +99,13 @@ mod tests {
         }
         fs::write(
             pkg_dir.join("package.json"),
-            r#"{"name":"pkg-a","version":"1.0.0","orb":{"prefix":"pa","registry":"behaviors/registry","index":"behaviors/index.json","loloContracts":"behaviors/contracts.json","signatures":"behaviors/signatures.lolo","embeddings":["dist/knob-embeddings.json"],"compiler":">=0.0.0"}}"#,
+            r#"{"name":"pkg-a","version":"1.0.0","orb":{"prefix":"pa","registry":"behaviors/registry","index":"behaviors/index.json","loloContracts":"behaviors/contracts.json","signatures":"behaviors/signatures.lolo","vectors":"dist/vectors.vec","compiler":">=0.0.0"}}"#,
         )
         .unwrap();
         fs::write(
             pkg_dir.join("sidecars.lock.json"),
             format!(
-                r#"{{"version":1,"files":{{"dist/knob-embeddings.json":{{"sha256":"{}","bytes":{bytes},"url":"https://storage.example.test/o/x?token={TOKEN}"}}}}}}"#,
+                r#"{{"version":1,"files":{{"dist/vectors.vec":{{"sha256":"{}","bytes":{bytes},"url":"https://storage.example.test/o/x?token={TOKEN}"}}}}}}"#,
                 sha(body)
             ),
         )
@@ -132,8 +131,8 @@ mod tests {
         fs::create_dir_all(&cache).unwrap();
         fs::write(cache.join(sha(body)), body).unwrap();
         let f = fake(b"unused");
-        let paths = resolve_embeddings(&pkg, &f).unwrap();
-        assert_eq!(paths, vec![cache.join(sha(body))]);
+        let paths = resolve_vectors(&pkg, &f).unwrap();
+        assert_eq!(paths, Some(cache.join(sha(body))));
         assert_eq!(f.calls.get(), 0);
     }
 
@@ -143,11 +142,11 @@ mod tests {
         let body = br#"{"model":"m"}"#;
         let (pkg, cache) = locked_package(dir.path(), body, body.len() as u64);
         let f = fake(body);
-        let paths = resolve_embeddings(&pkg, &f).unwrap();
+        let path = resolve_vectors(&pkg, &f).unwrap().unwrap();
         assert_eq!(f.calls.get(), 1);
-        assert_eq!(fs::read(&paths[0]).unwrap(), body);
-        assert_eq!(paths, vec![cache.join(sha(body))]);
-        resolve_embeddings(&pkg, &f).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), body);
+        assert_eq!(path, cache.join(sha(body)));
+        resolve_vectors(&pkg, &f).unwrap();
         assert_eq!(f.calls.get(), 1);
     }
 
@@ -156,7 +155,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let body = br#"{"model":"m"}"#;
         let (pkg, cache) = locked_package(dir.path(), body, body.len() as u64);
-        let err = resolve_embeddings(&pkg, &fake(br#"{"model":"X"}"#)).unwrap_err();
+        let err = resolve_vectors(&pkg, &fake(br#"{"model":"X"}"#)).unwrap_err();
         assert!(
             err.to_string().starts_with("ORB_SIDECAR_HASH_MISMATCH"),
             "{err}"
@@ -176,24 +175,24 @@ mod tests {
             )),
             calls: Cell::new(0),
         };
-        let msg = resolve_embeddings(&pkg, &f).unwrap_err().to_string();
+        let msg = resolve_vectors(&pkg, &f).unwrap_err().to_string();
         assert!(msg.starts_with("ORB_SIDECAR_FETCH_FAILED"), "{msg}");
         assert!(msg.contains("storage.example.test"));
-        assert!(msg.contains("dist/knob-embeddings.json"));
+        assert!(msg.contains("dist/vectors.vec"));
         assert!(!msg.contains(TOKEN), "{msg}");
         assert!(cache_is_empty(&cache));
     }
 
     #[test]
-    fn package_embeddings_not_in_the_lock_are_returned_untouched() {
+    fn a_package_file_not_in_the_lock_is_returned_untouched_and_none_when_undeclared() {
         let dir = tempfile::tempdir().unwrap();
-        let body = b"x";
-        let (mut pkg, _) = locked_package(dir.path(), body, 1);
-        let plain = dir.path().join("plain.json");
-        pkg.embeddings.push(plain.clone());
-        let f = fake(body);
-        let paths = resolve_embeddings(&pkg, &f).unwrap();
-        assert_eq!(paths[1], plain);
-        assert_eq!(f.calls.get(), 1);
+        let (mut pkg, _) = locked_package(dir.path(), b"x", 1);
+        let plain = dir.path().join("plain.vec");
+        pkg.vectors = Some(plain.clone());
+        let f = fake(b"x");
+        assert_eq!(resolve_vectors(&pkg, &f).unwrap(), Some(plain));
+        assert_eq!(f.calls.get(), 0);
+        pkg.vectors = None;
+        assert_eq!(resolve_vectors(&pkg, &f).unwrap(), None);
     }
 }

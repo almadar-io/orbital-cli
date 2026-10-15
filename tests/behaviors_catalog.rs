@@ -1,18 +1,43 @@
 // `orb behaviors catalog | describe | source` — drives the real `orb` binary
-// against a temp project holding two tiny fake behavior packages with known
-// embedding bytes, so the decode math, scope/exposure filtering, the
-// mixed-model refusal and the contract shapes are asserted exactly.
+// against a temp project holding two tiny fake behavior packages whose
+// `dist/vectors.vec` snapshots hold known vectors, so the decode math, the
+// scope/exposure filtering, the mixed-model refusal, the embed-on-miss
+// contract and the shapes are asserted exactly.
 
+use orbital_core::vector_store::{quantize, text_key, VectorStore};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+
+const CANON: &str = "baai/bge-base-en-v1.5";
 
 fn orb_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_orb"))
 }
 
-/// base64 of the signed bytes [127, -1, -128, 10] — scale 1.27 decodes to
-/// [1.27, -0.01, -1.28, 0.1].
-const QUANTIZED: &str = "f/+ACg==";
+/// The known description vector of a fixture card; stored int8-quantized, so a read decodes the quantized values.
+const CARD_VECTOR: [f32; 4] = [1.27, -0.01, -1.28, 0.1];
+const CAPABILITY_VECTOR: [f32; 4] = [0.5, 0.25, -0.5, 1.0];
+
+fn decoded(v: &[f32]) -> Vec<f64> {
+    let q = quantize(v);
+    let scale: f64 = q.scale.to_string().parse().unwrap();
+    q.bytes
+        .iter()
+        .map(|b| (f64::from(*b as i8) * scale) / 127.0)
+        .collect()
+}
+
+/// The embedding text of a fixture card (`index`) and of its capabilities.
+fn card_texts(prefix: &str) -> (String, String) {
+    (
+        format!("{prefix}-card\nA card.\nCapabilities (organism): display"),
+        "Capabilities (organism): display".to_string(),
+    )
+}
+
+fn board_text(prefix: &str) -> String {
+    format!("{prefix}-board\nA board.")
+}
 
 fn write(path: &Path, content: &str) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -36,23 +61,23 @@ fn package(
     write(
         &pkg.join("package.json"),
         &format!(
-            r#"{{"name":"{dir}","version":"1.0.0","orb":{{"prefix":"{prefix}","registry":"behaviors/registry","index":"behaviors/index.json","loloContracts":"behaviors/contracts.json","signatures":"behaviors/signatures.lolo","embeddings":["dist/embeddings.json","dist/knobs.json"],"compiler":">=0.0.0"}}}}"#
+            r#"{{"name":"{dir}","version":"1.0.0","orb":{{"prefix":"{prefix}","registry":"behaviors/registry","index":"behaviors/index.json","vectors":"dist/vectors.vec","loloContracts":"behaviors/contracts.json","signatures":"behaviors/signatures.lolo","compiler":">=0.0.0"}}}}"#
         ),
     );
     write(&pkg.join("behaviors/index.json"), behaviors);
     write(&pkg.join("behaviors/contracts.json"), "{}");
-    write(
-        &pkg.join("dist/embeddings.json"),
-        &format!(
-            r#"{{"version":"1","model":"{model}","dimensions":4,"encoding":"int8-b64","vectors":{{"{prefix}-card":{{"s":1.27,"d":"{QUANTIZED}"}},"{prefix}-card#capabilities":[0.5,0.25]}}}}"#
-        ),
-    );
-    write(
-        &pkg.join("dist/knobs.json"),
-        &format!(
-            r#"{{"version":"1","model":"{model}","dimensions":4,"encoding":"int8-b64","table":[{{"s":1.27,"d":"{QUANTIZED}"}}],"keys":{{"{prefix}-card/CardOrbital/CardView/title":0}}}}"#
-        ),
-    );
+    let (card, capability) = card_texts(prefix);
+    VectorStore::insert_many(
+        &pkg.join("dist/vectors.vec"),
+        model,
+        4,
+        vec![
+            (text_key(model, &card), quantize(&CARD_VECTOR)),
+            (text_key(model, &capability), quantize(&CAPABILITY_VECTOR)),
+            (text_key(model, &board_text(prefix)), quantize(&CARD_VECTOR)),
+        ],
+    )
+    .unwrap();
     for (rel, content) in extra {
         write(&pkg.join(rel), content);
     }
@@ -61,12 +86,11 @@ fn package(
 fn index(prefix: &str) -> String {
     format!(
         r#"{{"behaviors":{{
- "{prefix}-card":{{"name":"{prefix}-card","level":"atom","topic":"ui/core","exposure":"palette","description":"A card.","capabilities":["display"],"traits":[{{"name":"CardView"}}]}},
- "{prefix}-board":{{"name":"{prefix}-board","level":"organism","topic":"app","description":"A board.","traits":[{{"name":"BoardMain"}},{{"name":"BoardSide"}}]}}
+ "{prefix}-card":{{"name":"{prefix}-card","level":"atom","topic":"ui/core","exposure":"palette","description":"A card.","capabilities":"display","traits":["CardView"]}},
+ "{prefix}-board":{{"name":"{prefix}-board","level":"organism","topic":"app","description":"A board.","traits":["BoardMain","BoardSide"]}}
 }}}}"#
     )
 }
-
 
 fn project(second_model: &str) -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
@@ -103,10 +127,16 @@ fn project(second_model: &str) -> tempfile::TempDir {
     dir
 }
 
+/// No embedding provider, and a user vector store inside `dir`: a text with no stored vector is an error, never a network call.
 fn orb(dir: &Path, args: &[&str]) -> Output {
     Command::new(orb_bin())
         .args(args)
         .current_dir(dir)
+        .env("ALMADAR_VECTORS_DIR", dir.join(".user-vectors"))
+        .env_remove("EMBEDDING_PROVIDER")
+        .env_remove("EMBEDDING_API_KEY")
+        .env_remove("OPEN_ROUTER_API_KEY")
+        .env_remove("OPENAI_API_KEY")
         .output()
         .expect("spawn orb")
 }
@@ -148,7 +178,6 @@ fn catalog_decodes_int8_vectors_and_shapes_entries() {
     assert_eq!(e["topic"], "ui/core");
     assert_eq!(e["level"], "atom");
     assert_eq!(e["exposure"], "palette");
-    assert_eq!(e["capabilities"], serde_json::json!(["display"]));
     assert_eq!(
         e["traits"],
         serde_json::json!([{"behavior":"alpha/alpha-card","trait":"CardView"}])
@@ -158,8 +187,9 @@ fn catalog_decodes_int8_vectors_and_shapes_entries() {
         serde_json::json!({"behavior":"alpha/alpha-card"})
     );
     assert_eq!(e["model"], "m1");
-    assert_close(&e["vectors"]["description"], &[1.27, -0.01, -1.28, 0.1]);
-    assert_close(&e["vectors"]["capabilities"], &[0.5, 0.25]);
+    assert_eq!(e["capabilities"], serde_json::json!(["display"]));
+    assert_close(&e["vectors"]["description"], &decoded(&CARD_VECTOR));
+    assert_close(&e["vectors"]["capabilities"], &decoded(&CAPABILITY_VECTOR));
     let keys: Vec<&String> = e.as_object().unwrap().keys().collect();
     assert!(keys.len() == 11, "strict key set, got {keys:?}");
 }
@@ -230,7 +260,7 @@ fn catalog_refuses_mixed_embedding_models() {
     assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(
-        err.contains("different models") && err.contains("m1") && err.contains("m2"),
+        err.contains("ORB_VECTOR_MODEL_MISMATCH") && err.contains("m1") && err.contains("m2"),
         "{err}"
     );
     // Control: either package alone is fine.
@@ -267,7 +297,7 @@ fn catalog_rejects_unknown_scope_and_exposure() {
 }
 
 #[test]
-fn describe_returns_knobs_events_and_vectors() {
+fn describe_returns_knobs_and_events_without_knob_vectors_by_default() {
     let p = project("m1");
     let v = json(&orb(
         p.path(),
@@ -282,21 +312,21 @@ fn describe_returns_knobs_events_and_vectors() {
         v["value"],
         serde_json::json!({"behavior":"alpha/alpha-card","trait":"CardView"})
     );
-    assert_eq!(v["model"], "m1");
+    assert_eq!(v["model"], "");
     assert_eq!(
         v["events"],
         serde_json::json!({"emits":["CARD_OPENED"],"listens":["OPEN"],"transitions":["OPEN","INIT"],"domain":[]})
     );
     let knobs = v["knobs"].as_array().unwrap();
     assert_eq!(knobs.len(), 2);
-    // A knob without a shipped vector carries no `vector` key.
+    // Knob vectors are attached only on request: no knob carries a `vector` key.
     assert_eq!(knobs[0]["key"], "size");
     assert!(knobs[0].get("vector").is_none());
     assert_eq!(knobs[1]["key"], "title");
     assert_eq!(knobs[1]["type"], "string");
     assert_eq!(knobs[1]["default"], "Hello");
     assert_eq!(knobs[1]["tier"], "domain");
-    assert_close(&knobs[1]["vector"], &[1.27, -0.01, -1.28, 0.1]);
+    assert!(knobs[1].get("vector").is_none());
     assert!(v["machine"]["stateMachine"]["transitions"].is_array());
     assert!(v["source"]["text"]
         .as_str()
@@ -304,6 +334,82 @@ fn describe_returns_knobs_events_and_vectors() {
         .starts_with("trait CardView"));
     let top: Vec<&String> = v.as_object().unwrap().keys().collect();
     assert_eq!(top.len(), 6, "strict key set, got {top:?}");
+}
+
+#[test]
+fn describe_attaches_knob_vectors_only_with_the_flag_and_reads_them_from_the_store() {
+    let p = project("m1");
+    let spec = "alpha/alpha-card.traits.CardView";
+    // The knob texts `orb` builds, stored as the user store would hold them after an embed.
+    let texts = json(&orb(
+        p.path(),
+        &["behaviors", "texts", "--json", "alpha", "--kind", "knob"],
+    ));
+    let knob_texts: Vec<(String, String)> = texts
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|t| t["key"].as_str().unwrap().starts_with("alpha-card/"))
+        .map(|t| {
+            (
+                t["key"].as_str().unwrap().to_string(),
+                t["text"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(knob_texts.len(), 2, "{knob_texts:?}");
+    let user = p.path().join(".user-vectors");
+    VectorStore::insert_many(
+        &user.join("m1.vec"),
+        "m1",
+        4,
+        knob_texts
+            .iter()
+            .map(|(_, text)| (text_key("m1", text), quantize(&CARD_VECTOR)))
+            .collect(),
+    )
+    .unwrap();
+
+    let with = json(&orb(
+        p.path(),
+        &["behaviors", "describe", "--json", spec, "--knob-vectors"],
+    ));
+    assert_eq!(with["model"], "m1");
+    for knob in with["knobs"].as_array().unwrap() {
+        assert_close(&knob["vector"], &decoded(&CARD_VECTOR));
+    }
+    // Control: the same describe without the flag carries none.
+    let without = json(&orb(p.path(), &["behaviors", "describe", "--json", spec]));
+    assert!(without["knobs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|k| k.get("vector").is_none()));
+}
+
+#[test]
+fn a_text_with_no_vector_and_no_provider_is_an_error_naming_the_variables() {
+    let p = project("m1");
+    // Beta's user store is empty and its snapshot lacks the knob texts.
+    let out = orb(
+        p.path(),
+        &[
+            "behaviors",
+            "describe",
+            "--json",
+            "beta/beta-card.traits.CardView",
+            "--knob-vectors",
+        ],
+    );
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("ORB_VECTOR_PROVIDER_MISSING"), "{err}");
+    assert!(err.contains("OPEN_ROUTER_API_KEY"), "{err}");
+    assert!(err.contains("beta-card/CardOrbital/CardView/"), "{err}");
+    // Control: a catalog whose every text is in the snapshot needs no provider.
+    assert!(orb(p.path(), &["behaviors", "catalog", "--json", "beta"])
+        .status
+        .success());
 }
 
 #[test]
@@ -579,20 +685,40 @@ fn expects_derives_every_orbital_of_the_organism_as_written() {
     assert_eq!(by_path, v, "a .orb path reads the same program");
 }
 
-/// Smoke against the real monorepo std package; skipped in a standalone checkout.
+/// Smoke against the real monorepo std package, answered from its own `orb.vectors` snapshot with an
+/// empty user store; skipped in a standalone checkout or before the package declares a snapshot.
 #[test]
 fn smoke_real_std_package() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
-    if !root
-        .join("packages/almadar-std/dist/behaviors-embeddings.json")
-        .is_file()
+    let std_dir = root.join("packages/almadar-std");
+    let declares_vectors = std::fs::read_to_string(std_dir.join("package.json"))
+        .map(|p| p.contains("\"vectors\""))
+        .unwrap_or(false);
+    if !std_dir.join("dist/behaviors-registry.json").is_file()
+        || !std_dir.join("dist/vectors.vec").is_file()
+        || !declares_vectors
     {
         return;
     }
-    let v = json(&orb(
-        &root,
-        &["behaviors", "catalog", "--json", "std/ui/core/molecules"],
-    ));
+    let store = tempfile::tempdir().unwrap();
+    let real = |args: &[&str]| {
+        Command::new(orb_bin())
+            .args(args)
+            .current_dir(&root)
+            .env("ALMADAR_VECTORS_DIR", store.path())
+            .env_remove("EMBEDDING_PROVIDER")
+            .env_remove("OPEN_ROUTER_API_KEY")
+            .env_remove("OPENAI_API_KEY")
+            .env_remove("EMBEDDING_API_KEY")
+            .output()
+            .expect("spawn orb")
+    };
+    let v = json(&real(&[
+        "behaviors",
+        "catalog",
+        "--json",
+        "std/ui/core/molecules",
+    ]));
     let entries = v.as_array().unwrap();
     assert!(!entries.is_empty());
     let first = &entries[0];
@@ -606,9 +732,87 @@ fn smoke_real_std_package() {
     );
     let name = first["traits"][0]["trait"].as_str().unwrap().to_string();
     let spec = format!("{}.traits.{}", first["behavior"].as_str().unwrap(), name);
-    let d = json(&orb(&root, &["behaviors", "describe", "--json", &spec]));
+    let d = json(&real(&["behaviors", "describe", "--json", &spec]));
     assert_eq!(d["value"]["trait"], name.as_str());
     assert!(d["events"]["transitions"].is_array());
+}
+
+#[test]
+fn snapshot_writes_exactly_the_package_texts_deterministically_and_needs_a_provider_for_misses() {
+    let p = project("m1");
+    let root = p.path();
+    let pkg = root.join("node_modules/alpha");
+    let out = root.join("alpha.vec");
+    let snapshot = || {
+        orb(
+            root,
+            &[
+                "behaviors",
+                "vectors",
+                "snapshot",
+                "--package",
+                pkg.to_str().unwrap(),
+                "--out",
+                out.to_str().unwrap(),
+            ],
+        )
+    };
+    // Control: no stored vector and no provider fails and writes nothing.
+    let failed = snapshot();
+    assert!(!failed.status.success());
+    assert!(
+        String::from_utf8_lossy(&failed.stderr).contains("ORB_VECTOR_PROVIDER_MISSING"),
+        "{}",
+        String::from_utf8_lossy(&failed.stderr)
+    );
+    assert!(!out.exists());
+    // Seed the user store with the package's own organism + capability texts.
+    let mut records = Vec::new();
+    for kind in ["organism", "capability"] {
+        let texts = json(&orb(
+            root,
+            &["behaviors", "texts", "--json", "--kind", kind, "alpha"],
+        ));
+        for t in texts.as_array().unwrap() {
+            records.push((
+                text_key(CANON, t["text"].as_str().unwrap()),
+                quantize(&CARD_VECTOR),
+            ));
+        }
+    }
+    let wanted = records.len();
+    assert!(wanted >= 3, "two organisms and one capability text");
+    VectorStore::insert_many(
+        &root.join(".user-vectors/baai_bge-base-en-v1.5.vec"),
+        CANON,
+        4,
+        records,
+    )
+    .unwrap();
+    // A vector the package does not want stays out of the snapshot.
+    VectorStore::insert_many(
+        &root.join(".user-vectors/baai_bge-base-en-v1.5.vec"),
+        CANON,
+        4,
+        vec![(text_key(CANON, "unrelated"), quantize(&CAPABILITY_VECTOR))],
+    )
+    .unwrap();
+    let ok = snapshot();
+    assert!(
+        ok.status.success(),
+        "{}",
+        String::from_utf8_lossy(&ok.stderr)
+    );
+    let first = std::fs::read(&out).unwrap();
+    let store = VectorStore::open(&out).unwrap();
+    assert_eq!(store.len(), wanted);
+    assert!(store.get(&text_key(CANON, "unrelated")).is_none());
+    assert!(snapshot().status.success());
+    assert_eq!(
+        std::fs::read(&out).unwrap(),
+        first,
+        "same inputs, same bytes"
+    );
 }
 
 #[test]
@@ -739,7 +943,10 @@ fn describe_reports_each_traits_composed_ref_and_capabilities() {
     let front = &porch["orbitals"][0]["traits"][0];
     assert_eq!(front["trait"], "FrontDoor");
     assert_eq!(front["ref"], "Door.traits.DoorLife");
-    assert_eq!(front["capabilities"], serde_json::json!(["hinged", "lockable"]));
+    assert_eq!(
+        front["capabilities"],
+        serde_json::json!(["hinged", "lockable"])
+    );
 
     // Control: the atom defines its own trait, so it composes nothing and keeps its tags.
     let door = json(&orb(
@@ -748,7 +955,10 @@ fn describe_reports_each_traits_composed_ref_and_capabilities() {
     ));
     let life = &door["orbitals"][0]["traits"][0];
     assert!(life.get("ref").is_none(), "{life}");
-    assert_eq!(life["capabilities"], serde_json::json!(["hinged", "lockable"]));
+    assert_eq!(
+        life["capabilities"],
+        serde_json::json!(["hinged", "lockable"])
+    );
 }
 
 const LIB_ORB: &str = r#"{"name":"lib","orbitals":[{"name":"ItemOrbital","entity":{"name":"Item","fields":[{"name":"id","type":"string","required":true},{"name":"note","type":"relation","relation":{"entity":"Note","cardinality":"one"}}]},"traits":[],"pages":[]},{"name":"NoteOrbital","entity":{"name":"Note","fields":[{"name":"id","type":"string","required":true}]},"traits":[],"pages":[]}]}"#;
@@ -788,7 +998,11 @@ fn describe_a_behavior_that_uses_another_lazily() {
         &["behaviors", "describe", "--json", "./orbitals/hub"],
     ));
     let orbitals = hub["orbitals"].as_array().unwrap();
-    assert_eq!(orbitals.len(), 1, "the lazy orbital loads on its own, not here");
+    assert_eq!(
+        orbitals.len(),
+        1,
+        "the lazy orbital loads on its own, not here"
+    );
     assert_eq!(orbitals[0]["value"]["orbital"], "HubOrbital");
     assert_eq!(orbitals[0]["borrows"], serde_json::json!([]));
 }
@@ -935,6 +1149,5 @@ fn a_registered_trait_missing_from_stale_signatures_is_described_from_its_progra
         .collect();
     assert_eq!(keys, ["size", "title"]);
     assert_eq!(v["events"]["emits"], serde_json::json!(["CARD_OPENED"]));
-    assert_eq!(v["model"], "m1");
     assert!(v["machine"]["stateMachine"]["transitions"].is_array());
 }

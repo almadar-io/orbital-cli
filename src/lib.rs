@@ -847,6 +847,33 @@ enum LanguageCommand {
 }
 
 #[derive(Subcommand)]
+enum VectorsCommand {
+    /// Convert a legacy JSON embedding manifest (`behaviors-embeddings.json`) into the user vector
+    /// store, keeping a vector only when the text the package builds now hashes to the one the
+    /// calibrate text index recorded for it. Run it from the project that installs the package.
+    Import {
+        /// The manifest file, inside an installed behavior package.
+        #[arg(long)]
+        from: std::path::PathBuf,
+        /// The calibrate text index (`<derived cache>/embed-index/<sha256(abs manifest path)>.json`);
+        /// defaults to that path.
+        #[arg(long)]
+        index: Option<std::path::PathBuf>,
+    },
+    /// Write a package's vector snapshot (`dist/vectors.vec`): the vectors of its organism and
+    /// `#capabilities` texts, taken from the user store and embedding misses (needs an embedding
+    /// provider for those). The same inputs give the same bytes.
+    Snapshot {
+        /// The installed behavior package directory.
+        #[arg(long)]
+        package: std::path::PathBuf,
+        /// Where to write; defaults to `<package>/dist/vectors.vec`.
+        #[arg(long)]
+        out: Option<std::path::PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
 enum BehaviorsCommand {
     /// Resolve one `uses` specifier ("which copy compiled?") — prints the
     /// resolved `.orb` path and the owning package.
@@ -870,14 +897,44 @@ enum BehaviorsCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Describe one trait of an installed behavior: knobs (with embedding
-    /// vectors), events, embedding model.
+    /// The texts an installed package embeds, one `{ key, text, hash }` each: the organism
+    /// text, its `<name>#capabilities` text and every knob text, in embed order.
+    Texts {
+        /// Scope paths, as `catalog` takes them (a package prefix, optionally narrowed).
+        #[arg(required = true)]
+        paths: Vec<String>,
+        /// Keep only one kind of text (`organism|capability|knob`).
+        #[arg(long)]
+        kind: Option<String>,
+        /// Print as JSON (the only format; accepted for symmetry with `catalog`).
+        #[arg(long)]
+        json: bool,
+    },
+    /// The capabilities each behavior's traits resolve to (composed traits included), as
+    /// `{ "<prefix>/<name>": [capability] }` JSON: what the registry index stores as
+    /// `traitCapabilities`.
+    TraitCapabilities {
+        /// Scope paths, as `catalog` takes them.
+        #[arg(required = true)]
+        paths: Vec<String>,
+    },
+    /// Describe one trait of an installed behavior: knobs, events, embedding
+    /// model. Knob vectors are attached only with `--knob-vectors`.
     Describe {
         /// `<behavior>.traits.<Trait>`, or `-` to read a trait value (JSON) from stdin.
         spec: String,
         /// Print as JSON (`TraitDescription`).
         #[arg(long)]
         json: bool,
+        /// Attach each knob's embedding vector, embedding the trait's knob texts on a miss
+        /// (needs an embedding provider; stored in `~/.almadar/vectors`).
+        #[arg(long)]
+        knob_vectors: bool,
+    },
+    /// The embedding vector store (`~/.almadar/vectors`).
+    Vectors {
+        #[command(subcommand)]
+        command: VectorsCommand,
     },
     /// Derive every orbital's `expects` from the behavior as written (imports resolved through
     /// the loader): `{ <orbital>: { expectations, diagnostics } }`.
@@ -1370,7 +1427,21 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
                 exposure,
                 json,
             } => commands::run_catalog(paths, exposure, json),
-            BehaviorsCommand::Describe { spec, json } => commands::run_describe(spec, json),
+            BehaviorsCommand::Texts { paths, kind, json: _ } => commands::run_texts(paths, kind),
+            BehaviorsCommand::TraitCapabilities { paths } => commands::run_trait_capabilities(paths),
+            BehaviorsCommand::Describe {
+                spec,
+                json,
+                knob_vectors,
+            } => commands::run_describe(spec, json, knob_vectors),
+            BehaviorsCommand::Vectors { command } => match command {
+                VectorsCommand::Import { from, index } => {
+                    commands::behaviors_vectors_import::run_import(from, index)
+                }
+                VectorsCommand::Snapshot { package, out } => {
+                    commands::behaviors_vectors_snapshot::run_snapshot(package, out)
+                }
+            },
             BehaviorsCommand::Source { spec, json } => commands::run_source(spec, json),
             BehaviorsCommand::Expects { spec, json } => commands::run_expects(spec, json),
         },

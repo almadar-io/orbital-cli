@@ -645,7 +645,9 @@ fn program_findings(
     path: &std::path::Path,
 ) -> Vec<Finding> {
     let mut findings = catalog_findings(schema, path);
-    for e in orbital_compiler::phases::validation::page::validate_sign_in_route(schema).errors {
+    let secrets = orbital_compiler::phases::validation::effect::validate_http_secrets(schema);
+    let sign_in = orbital_compiler::phases::validation::page::validate_sign_in_route(schema);
+    for e in sign_in.errors.into_iter().chain(secrets.errors) {
         let code = e.code.as_str().to_string();
         findings.push(Finding {
             text: format!("[{code}] {}: {}", e.path, e.message),
@@ -1218,7 +1220,8 @@ mod program_findings_tests {
                 "pages": [{ "name": "P", "path": path, "traits": [] }]
             }]
         }))
-        .expect("schema")
+        .expect("schema"),
+    egress: None,
     }
 
     fn codes(s: &orbital_core::schema::OrbitalSchema) -> Vec<String> {

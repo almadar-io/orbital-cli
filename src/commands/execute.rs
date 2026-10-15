@@ -284,7 +284,7 @@ fn outcome_report(
         .map(|g| {
             let mut entry = serde_json::json!({
                 "arm": g.arm,
-                "guard": serde_json::to_value(&g.guard.guard).unwrap_or(serde_json::Value::Null),
+                "guard": serde_json::to_value(&*g.guard.guard).unwrap_or(serde_json::Value::Null),
                 "passed": g.guard.passed,
             });
             if let Some(error) = &g.guard.error {
@@ -476,7 +476,7 @@ fn run_execute(
                 event: event.to_string(),
                 timestamp: 0,
             });
-            for effect in &result.effects {
+            for effect in result.effects() {
                 all_effects.push(to_exec_effect(effect));
             }
             to

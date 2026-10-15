@@ -304,7 +304,12 @@ fn lookup(
 
 /// A catalog for an agent: the embedding vectors are for search by meaning, not for reading.
 fn catalog_without_vectors(scopes: &[String], exposure: &[String]) -> anyhow::Result<Value> {
-    let entries = crate::commands::behaviors_catalog::catalog(scopes, exposure)?;
+    let entries = crate::commands::behaviors_catalog::catalog_with(
+        scopes,
+        exposure,
+        crate::commands::behaviors_catalog::Vectors::Omit,
+        None,
+    )?;
     let mut value = serde_json::to_value(entries)?;
     for entry in value.as_array_mut().into_iter().flatten() {
         if let Some(obj) = entry.as_object_mut() {

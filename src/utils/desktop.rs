@@ -93,6 +93,10 @@ impl ServerBridge for HttpServerBridge {
     ) -> Result<orbital_core::EventResponse, BridgeError> {
         self.inner.send_event_with_options(orbital, event, entity_id, trait_name, payload)
     }
+
+    fn resolve_rows(&self, reference: &orbital_core::runtime::row_query::RowSetRef) -> Result<orbital_core::runtime::row_query::RowPage, BridgeError> {
+        self.inner.resolve_rows(reference)
+    }
 }
 
 /// Layer 2: the client render contract (`orbital_core::client::render_probe`)

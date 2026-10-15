@@ -23,6 +23,8 @@ orbital-compiler = { path = "../orbital-compiler" }
 orbital-lolo = { path = "../orbital-lolo" }
 orbital-server = { path = "../orbital-server" }
 orbital-verify = { path = "../orbital-verify" }
+# Embedding client for `orb behaviors` vectors (embed on miss); no Postgres/Google providers.
+orbital-integrations = { path = "../orbital-integrations", default-features = false, features = ["http"] }
 
 # CLI essentials only
 clap.workspace = true
@@ -35,10 +37,11 @@ sourcemap = "9"
 # Wire-shape fixture pass (`verify_server::run_fixture_pass`).
 ureq = { workspace = true, features = ["tls"] }
 semver = "1"
+# Embedding-text hashes (`behaviors texts`).
+sha2 = "0.10"
 
 [dev-dependencies]
 orbital-test-support = { path = "../orbital-test-support" }
 pretty_assertions.workspace = true
 syn = { version = "2", features = ["full"] }
 tempfile = "3.10"
-sha2 = "0.10"

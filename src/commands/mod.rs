@@ -3,6 +3,11 @@
 
 pub(crate) mod behaviors;
 pub(crate) mod behaviors_catalog;
+pub(crate) mod behaviors_manifest;
+pub(crate) mod behaviors_texts;
+pub(crate) mod behaviors_vectors;
+pub(crate) mod behaviors_vectors_import;
+pub(crate) mod behaviors_vectors_snapshot;
 pub(crate) mod compile;
 pub(crate) mod convert;
 pub(crate) mod dev;
@@ -26,6 +31,7 @@ pub(crate) mod verify_server;
 
 pub(crate) use behaviors::run_which;
 pub(crate) use behaviors_catalog::{run_catalog, run_describe, run_expects, run_source};
+pub(crate) use behaviors_texts::{run_texts, run_trait_capabilities};
 pub(crate) use compile::compile_schema;
 pub(crate) use convert::run_convert;
 pub(crate) use dev::run_dev_mode;
