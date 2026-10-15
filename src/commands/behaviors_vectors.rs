@@ -38,7 +38,8 @@ pub(crate) struct ProviderEmbedder {
 impl ProviderEmbedder {
     /// `None` when the environment configures no embedding provider.
     pub(crate) fn from_env() -> Option<Self> {
-        Self::from_vars(std::env::vars().collect(), Arc::new(UreqTransport::new()))
+        // The embedding endpoint is operator configuration (a local LM Studio included), not program egress.
+        Self::from_vars(std::env::vars().collect(), Arc::new(UreqTransport::unchecked()))
     }
 
     pub(crate) fn from_vars(

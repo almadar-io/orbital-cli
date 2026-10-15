@@ -276,9 +276,10 @@ fn validate_schema_json(
         &service_registry,
         &discovery_probe,
     );
-    let lazy_errors: Vec<ValidationJsonError> = lazy_errors
+    let mut lazy_errors: Vec<ValidationJsonError> = lazy_errors
         .into_iter()
         .chain(program_findings(&schema, path.as_path()))
+        .chain(own_secret_findings(&schema))
         .map(finding_json_error)
         .collect();
     let lazy_warnings: Vec<ValidationJsonWarning> = lazy_warnings
@@ -309,7 +310,9 @@ fn validate_schema_json(
     // disagreed about the same schema.
     // Reuse the already-run discovery (checked for `discovery_error` above)
     // instead of re-walking `node_modules` a second time.
-    let inline_config = discovery_probe.inline;
+    let mut inline_config = discovery_probe.inline;
+    let session = orbital_compiler::phases::inline::InlineSession::default();
+    inline_config.session = Some(session.clone());
     if let Err(e) = inline_schema_with_orbital_diagnostics(
         &mut schema,
         &inline_config,
@@ -406,6 +409,8 @@ fn validate_schema_json(
         };
         return Ok(output);
     }
+
+    lazy_errors.extend(used_secret_findings(&session).into_iter().map(finding_json_error));
 
     // Collect stats
     // Note: Traits are now only defined inline within orbitals, not at schema level.
@@ -645,9 +650,8 @@ fn program_findings(
     path: &std::path::Path,
 ) -> Vec<Finding> {
     let mut findings = catalog_findings(schema, path);
-    let secrets = orbital_compiler::phases::validation::effect::validate_http_secrets(schema);
     let sign_in = orbital_compiler::phases::validation::page::validate_sign_in_route(schema);
-    for e in sign_in.errors.into_iter().chain(secrets.errors) {
+    for e in sign_in.errors {
         let code = e.code.as_str().to_string();
         findings.push(Finding {
             text: format!("[{code}] {}: {}", e.path, e.message),
@@ -657,6 +661,45 @@ fn program_findings(
             suggestion: e.suggestion,
         });
     }
+    findings
+}
+
+fn secret_flow_finding(violation: &orbital_core::secrets::SecretFlowViolation, path: String) -> Finding {
+    let code = violation.code().to_string();
+    let message = violation.message();
+    Finding {
+        text: format!("[{code}] {path}: {message}"),
+        code,
+        path,
+        message,
+        suggestion: Some(violation.suggestion().to_string()),
+    }
+}
+
+/// The secret-flow rules over the parsed program, before inline substitutes
+/// its `@config.<knob>` reads.
+fn own_secret_findings(schema: &orbital_core::schema::OrbitalSchema) -> Vec<Finding> {
+    let Ok(program) = serde_json::to_value(schema) else {
+        return Vec::new();
+    };
+    orbital_core::secrets::secret_flow_violations(&program)
+        .iter()
+        .map(|v| secret_flow_finding(v, v.path().to_string()))
+        .collect()
+}
+
+/// The secret-flow rules over every behavior file `uses` loaded: an atom types
+/// its own knobs, so its program is walked as parsed, not as inlined.
+fn used_secret_findings(session: &orbital_compiler::phases::inline::InlineSession) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    session.each_loaded_schema(&mut |loaded| {
+        let Ok(program) = serde_json::to_value(&loaded.schema) else {
+            return;
+        };
+        for v in orbital_core::secrets::secret_flow_violations(&program) {
+            findings.push(secret_flow_finding(&v, format!("{}: {}", loaded.schema.name, v.path())));
+        }
+    });
     findings
 }
 
@@ -873,6 +916,7 @@ pub(crate) fn validate_schema_core(
         &service_registry,
         default_opts,
     );
+    errors.extend(own_secret_findings(&schema));
     if check_own_catalogs {
         errors.extend(program_findings(&schema, path));
         if let Some(public) = &schema.public_dir {
@@ -899,9 +943,12 @@ pub(crate) fn validate_schema_core(
     // only, so validating the half-inlined schema manufactures spurious
     // ORB_T_UNDEFINED_TRAIT / ORB_X_LISTEN_SOURCE_UNRESOLVED findings that
     // bury the real cause. Report the one true error and stop.
+    let session = orbital_compiler::phases::inline::InlineSession::default();
+    let mut inline_opts = default_opts.inline.clone();
+    inline_opts.session = Some(session.clone());
     if let Err(e) = inline_schema_with_orbital_diagnostics(
         &mut schema,
-        &default_opts.inline,
+        &inline_opts,
         Some(path),
         &mut trait_ref_config_diagnostics,
         &mut orbital_ref_diagnostics,
@@ -930,6 +977,8 @@ pub(crate) fn validate_schema_core(
         };
     }
     enrich_schema(&mut schema, &default_opts.enrichment);
+
+    errors.extend(used_secret_findings(&session));
 
     if let Ok(program) = serde_json::to_value(&schema) {
         for path in orbital_core::messages::render_only_violations(&program) {
@@ -1220,8 +1269,7 @@ mod program_findings_tests {
                 "pages": [{ "name": "P", "path": path, "traits": [] }]
             }]
         }))
-        .expect("schema"),
-    egress: None,
+        .expect("schema")
     }
 
     fn codes(s: &orbital_core::schema::OrbitalSchema) -> Vec<String> {
