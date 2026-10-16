@@ -146,11 +146,27 @@ pub(crate) fn discovery_error_json_code(
 ) -> &'static str {
     use orbital_core::behavior_packages::DiscoverError;
     match e {
+        DiscoverError::DuplicateBehaviorName { .. } => "ORB_BEHAVIOR_NAME_DUPLICATE",
         DiscoverError::PrefixConflict { .. } => "ORB_BEHAVIOR_PREFIX_CONFLICT",
         DiscoverError::MissingDeclaredPath { .. }
         | DiscoverError::InvalidSidecarLock { .. }
         | DiscoverError::InvalidPackageJson { .. }
         | DiscoverError::Io { .. } => "ORB_BEHAVIOR_PACKAGE_INVALID",
+    }
+}
+
+#[cfg(test)]
+mod duplicate_behavior_diagnostic_tests {
+    #[test]
+    fn duplicate_behavior_names_have_a_specific_validation_code() {
+        let error = orbital_core::behavior_packages::DiscoverError::DuplicateBehaviorName {
+            name: "std-calendar".to_string(),
+            path_a: "infra/std-calendar.lolo".into(),
+            path_b: "ui/std-calendar.lolo".into(),
+        };
+        assert_eq!(super::discovery_error_json_code(&error), "ORB_BEHAVIOR_NAME_DUPLICATE");
+        assert!(error.to_string().contains("infra/std-calendar.lolo"));
+        assert!(error.to_string().contains("ui/std-calendar.lolo"));
     }
 }
 

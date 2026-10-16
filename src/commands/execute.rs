@@ -380,6 +380,15 @@ pub(crate) fn run_cascade(path: &Path, steps: &serde_json::Value) -> anyhow::Res
         let outcomes = kernel
             .dispatch(trait_name, None, event, payload)
             .map_err(|e| anyhow::anyhow!("step {i} dispatch failed: {e}"))?;
+        // The moved traits' rows after the step, so a caller can read what a step wrote
+        // (an id it generated, a list it changed) and feed it to the next step.
+        let entities: serde_json::Map<String, serde_json::Value> = outcomes
+            .iter()
+            .map(|(t, _)| {
+                let row = kernel.snapshot_trait(t, None).entity;
+                (t.to_string(), serde_json::to_value(&row).unwrap_or(serde_json::Value::Null))
+            })
+            .collect();
         let outcomes: Vec<serde_json::Value> =
             outcomes.iter().map(|(t, r)| outcome_report(t, r)).collect();
         let states: serde_json::Map<String, serde_json::Value> = kernel
@@ -387,7 +396,7 @@ pub(crate) fn run_cascade(path: &Path, steps: &serde_json::Value) -> anyhow::Res
             .into_iter()
             .map(|(name, (state, _))| (name, serde_json::Value::String(state)))
             .collect();
-        reports.push(serde_json::json!({ "outcomes": outcomes, "states": states }));
+        reports.push(serde_json::json!({ "outcomes": outcomes, "states": states, "entities": entities }));
     }
     let dispatch_modes: serde_json::Map<String, serde_json::Value> = kernel
         .trait_snapshot(Some("singleton"))
@@ -623,6 +632,26 @@ mod cascade_from_tests {
 
     fn run(steps: serde_json::Value) -> serde_json::Value {
         run_cascade(&program(MODES), &steps).unwrap()
+    }
+
+    const COUNTER: &str = r#"{"name":"CounterApp","orbitals":[{"name":"Counting","entity":{"name":"Counter","persistence":"runtime","fields":[{"name":"id","type":"string"},{"name":"count","type":"number","default":0}]},"pages":[],"traits":[{"name":"Count","linkedEntity":"Counter","stateMachine":{"states":[{"name":"ready","isInitial":true}],"transitions":[{"from":"ready","to":"ready","event":"INC","effects":[["set","@entity.count",["+","@entity.count",1]]]}]}}]}]}"#;
+
+    /// `play` shows what a step wrote, so a value it generated can drive the next step.
+    #[test]
+    fn a_step_reports_the_row_each_moved_trait_holds_after_it() {
+        let report = run_cascade(
+            &program(COUNTER),
+            &serde_json::json!([{ "trait": "Count", "event": "INC" }, { "trait": "Count", "event": "INC" }]),
+        )
+        .unwrap();
+        assert_eq!(report["steps"][0]["entities"]["Count"]["count"], serde_json::json!(1.0), "{report}");
+        assert_eq!(report["steps"][1]["entities"]["Count"]["count"], serde_json::json!(2.0), "{report}");
+    }
+
+    #[test]
+    fn control_a_step_that_moves_nothing_reports_no_rows() {
+        let report = run(serde_json::json!([{ "trait": "Modes", "event": "KEY", "payload": { "key": "x" } }]));
+        assert_eq!(report["steps"][0]["entities"], serde_json::json!({}), "{report}");
     }
 
     #[test]

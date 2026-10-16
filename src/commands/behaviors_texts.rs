@@ -5,12 +5,12 @@
 //! `document-text.ts` / `embed-command.ts`).
 
 use serde::Serialize;
-use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::io::Write;
 
 use super::behaviors_catalog::{scoped_behaviors, text_facts};
+use super::behaviors_index::IndexEntry;
 
 pub(crate) const CAPABILITY_KEY_SUFFIX: &str = "#capabilities";
 pub(crate) const ORBITAL_KNOB_SENTINEL: &str = "$orbital";
@@ -62,41 +62,16 @@ pub(crate) struct RegistryEntry {
     pub exposure: Option<String>,
 }
 
-impl RegistryEntry {
-    pub(crate) fn from_value(key: &str, v: &Value) -> anyhow::Result<Self> {
-        let text = |field: &str| -> anyhow::Result<Option<String>> {
-            match v.get(field) {
-                None | Some(Value::Null) => Ok(None),
-                Some(Value::String(s)) => Ok(Some(s.clone())),
-                Some(other) => anyhow::bail!("{key}: registry `{field}` is {other}, not a string"),
-            }
-        };
-        let name =
-            text("name")?.ok_or_else(|| anyhow::anyhow!("{key}: registry entry has no `name`"))?;
-        let connectable_events = match v.get("connectableEvents") {
-            None | Some(Value::Null) => Vec::new(),
-            Some(Value::Array(a)) => a
-                .iter()
-                .map(|e| {
-                    e.as_str().map(str::to_string).ok_or_else(|| {
-                        anyhow::anyhow!("{key}: `connectableEvents` holds a non-string")
-                    })
-                })
-                .collect::<anyhow::Result<_>>()?,
-            Some(other) => anyhow::bail!("{key}: `connectableEvents` is {other}, not an array"),
-        };
-        Ok(Self {
-            name,
-            description: text("description")?,
-            capabilities: text("capabilities")?,
-            default_entity_name: v
-                .get("defaultEntity")
-                .and_then(|e| e.get("name"))
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            connectable_events,
-            exposure: text("exposure")?,
-        })
+impl From<&IndexEntry> for RegistryEntry {
+    fn from(e: &IndexEntry) -> Self {
+        Self {
+            name: e.name.clone(),
+            description: Some(e.description.clone()),
+            capabilities: e.capabilities.clone(),
+            default_entity_name: Some(e.default_entity_name.clone()),
+            connectable_events: e.connectable_events.clone(),
+            exposure: e.exposure.clone(),
+        }
     }
 }
 
@@ -324,31 +299,19 @@ pub(crate) fn texts_of(
     out
 }
 
-/// The organism text and the `#capabilities` text of one registry index entry, from the entry alone:
-/// the capabilities its traits resolve to ride in the index as `traitCapabilities`, so no behavior is described. Equal to `texts_of`'s
-/// organism and capability texts for the same entry.
-pub(crate) fn index_texts(name: &str, entry: &Value) -> anyhow::Result<(String, Option<String>)> {
-    let registry = RegistryEntry::from_value(name, entry)?;
-    let capabilities = match entry.get("traitCapabilities") {
-        None | Some(Value::Null) => Vec::new(),
-        Some(Value::Array(a)) => a
-            .iter()
-            .map(|c| {
-                c.as_str().map(str::to_string).ok_or_else(|| {
-                    anyhow::anyhow!("{name}: `traitCapabilities` holds a non-string")
-                })
-            })
-            .collect::<anyhow::Result<_>>()?,
-        Some(other) => anyhow::bail!("{name}: `traitCapabilities` is {other}, not an array"),
-    };
+/// The organism text and the `#capabilities` text of one index entry, from the entry alone: the
+/// capabilities its traits resolve to ride in the entry as `trait_capabilities`, so no behavior is
+/// described. Equal to `texts_of`'s organism and capability texts for the same entry.
+pub(crate) fn index_texts(entry: &IndexEntry) -> (String, Option<String>) {
+    let registry = RegistryEntry::from(entry);
     let traits = TraitFacts {
-        capabilities,
+        capabilities: entry.trait_capabilities.clone(),
         ..Default::default()
     };
-    Ok((
+    (
         build_entry_text(&registry, &[&traits]),
         build_capability_text(&registry),
-    ))
+    )
 }
 
 const DESCRIBE_WORKERS: usize = 8;
@@ -396,54 +359,16 @@ pub(crate) fn describe_all(
         .collect()
 }
 
-/// The capabilities the traits of one behavior resolve to (composed traits included), sorted and
-/// unique: the set `build_entry_text` joins into the organism text.
-pub(crate) fn trait_capabilities_of(orbitals: &[OrbitalFacts]) -> Vec<String> {
-    orbitals
-        .iter()
-        .flat_map(|o| &o.traits)
-        .flat_map(|t| t.capabilities.iter().cloned())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
-}
-
-/// `orb behaviors trait-capabilities`: `{ "<prefix>/<name>": [capability] }` for every behavior
-/// under the scopes, as the registry index carries them in `traitCapabilities`.
-pub(crate) fn run_trait_capabilities(paths: Vec<String>) -> anyhow::Result<()> {
-    let mut all: std::collections::BTreeMap<String, Vec<String>> = Default::default();
-    for package in scoped_behaviors(&paths)? {
-        let registry = package
-            .behaviors
-            .iter()
-            .map(|(name, v)| Ok((name.clone(), RegistryEntry::from_value(name, v)?)))
-            .collect::<anyhow::Result<Vec<_>>>()?;
-        let facts = describe_all(&package.prefix, &registry, Some(TextKind::Organism))?;
-        for ((name, _), orbitals) in registry.iter().zip(&facts) {
-            all.insert(
-                format!("{}/{name}", package.prefix),
-                trait_capabilities_of(orbitals),
-            );
-        }
-    }
-    let stdout = std::io::stdout();
-    let mut out = std::io::BufWriter::with_capacity(1 << 20, stdout.lock());
-    serde_json::to_writer(&mut out, &all)?;
-    out.write_all(b"\n")?;
-    out.flush()?;
-    Ok(())
-}
-
 /// `orb behaviors texts`: every embedding text under the scopes, as a JSON array.
 pub(crate) fn run_texts(paths: Vec<String>, kind: Option<String>) -> anyhow::Result<()> {
     let kind = kind.as_deref().map(TextKind::parse).transpose()?;
     let mut all: Vec<TextEntry> = Vec::new();
     for package in scoped_behaviors(&paths)? {
-        let registry = package
+        let registry: Vec<(String, RegistryEntry)> = package
             .behaviors
             .iter()
-            .map(|(name, v)| Ok((name.clone(), RegistryEntry::from_value(name, v)?)))
-            .collect::<anyhow::Result<Vec<_>>>()?;
+            .map(|e| (e.name.clone(), RegistryEntry::from(e)))
+            .collect();
         let facts = describe_all(&package.prefix, &registry, kind)?;
         all.extend(texts_of(&registry, &facts, kind));
     }
@@ -727,56 +652,54 @@ mod tests {
         assert_eq!(entry_of("k".into(), "—".into()).hash.len(), 64);
     }
 
-    #[test]
-    fn registry_entry_reads_the_fields_the_texts_use() {
-        let v: Value = serde_json::from_str(
-            r#"{"name":"n","description":"d","capabilities":"c1, c2","defaultEntity":{"name":"E"},"connectableEvents":["X","Y"],"exposure":"internal"}"#,
-        )
-        .unwrap();
-        let e = RegistryEntry::from_value("n", &v).unwrap();
-        assert_eq!(e.default_entity_name.as_deref(), Some("E"));
-        assert_eq!(e.connectable_events, ["X", "Y"]);
-        assert_eq!(e.exposure.as_deref(), Some("internal"));
-        let bad: Value = serde_json::from_str(r#"{"name":"n","capabilities":["a"]}"#).unwrap();
-        assert!(RegistryEntry::from_value("n", &bad).is_err());
+    fn index_entry(name: &str) -> IndexEntry {
+        IndexEntry {
+            name: name.into(),
+            dirs: vec!["app".into(), "atoms".into()],
+            level: "atom".into(),
+            topic: "app".into(),
+            exposure: None,
+            description: String::new(),
+            capabilities: None,
+            pattern: None,
+            default_entity_name: "Item".into(),
+            connectable_events: Vec::new(),
+            traits: Vec::new(),
+            trait_capabilities: Vec::new(),
+        }
     }
 
     #[test]
-    fn trait_capabilities_union_every_orbital_trait_sorted_and_unique() {
-        let tr = |caps: &[&str]| TraitFacts {
-            capabilities: caps.iter().map(|c| c.to_string()).collect(),
-            ..Default::default()
-        };
-        let orbitals = vec![
-            OrbitalFacts {
-                traits: vec![tr(&["b", "a"]), tr(&[])],
-                ..Default::default()
-            },
-            OrbitalFacts {
-                traits: vec![tr(&["c", "a"])],
-                ..Default::default()
-            },
-        ];
-        assert_eq!(trait_capabilities_of(&orbitals), ["a", "b", "c"]);
-        assert!(trait_capabilities_of(&[]).is_empty());
+    fn registry_entry_reads_the_fields_the_texts_use() {
+        let e = RegistryEntry::from(&IndexEntry {
+            description: "d".into(),
+            capabilities: Some("c1, c2".into()),
+            default_entity_name: "E".into(),
+            connectable_events: vec!["X".into(), "Y".into()],
+            exposure: Some("internal".into()),
+            ..index_entry("n")
+        });
+        assert_eq!(e.name, "n");
+        assert_eq!(e.description.as_deref(), Some("d"));
+        assert_eq!(e.capabilities.as_deref(), Some("c1, c2"));
+        assert_eq!(e.default_entity_name.as_deref(), Some("E"));
+        assert_eq!(e.connectable_events, ["X", "Y"]);
+        assert_eq!(e.exposure.as_deref(), Some("internal"));
     }
 
     #[test]
     fn index_texts_equal_the_described_organism_and_capability_texts() {
-        let entry = serde_json::json!({
-            "name": "std-x",
-            "description": "An x.",
-            "capabilities": "do x, do y",
-            "defaultEntity": { "name": "X" },
-            "connectableEvents": ["GO", "STOP"],
-            "traits": ["A", "B", "C"],
-            "traitCapabilities": ["a", "b", "c"]
-        });
-        let (organism, capability) = index_texts("std-x", &entry).unwrap();
-        let registry = vec![(
-            "std-x".to_string(),
-            RegistryEntry::from_value("std-x", &entry).unwrap(),
-        )];
+        let entry = IndexEntry {
+            description: "An x.".into(),
+            capabilities: Some("do x, do y".into()),
+            default_entity_name: "X".into(),
+            connectable_events: vec!["GO".into(), "STOP".into()],
+            traits: vec!["A".into(), "B".into(), "C".into()],
+            trait_capabilities: vec!["a".into(), "b".into(), "c".into()],
+            ..index_entry("std-x")
+        };
+        let (organism, capability) = index_texts(&entry);
+        let registry = vec![("std-x".to_string(), RegistryEntry::from(&entry))];
         let facts = vec![vec![OrbitalFacts {
             traits: vec![
                 TraitFacts {
@@ -800,19 +723,14 @@ mod tests {
         assert_eq!(want[0].text, organism);
         assert_eq!(want[1].key, "std-x#capabilities");
         assert_eq!(Some(want[1].text.clone()), capability);
-        // Control: trait names alone carry no capabilities, and a malformed field is rejected.
-        let names_only = serde_json::json!({ "name": "std-z", "traits": ["A"] });
-        assert_eq!(
-            index_texts("std-z", &names_only).unwrap(),
-            ("std-z".to_string(), None)
-        );
-        let wrong = serde_json::json!({ "name": "std-w", "traitCapabilities": "a" });
-        assert!(index_texts("std-w", &wrong).is_err());
+        // Control: an entry whose traits resolve to no capabilities carries none in its text.
+        let names_only = IndexEntry {
+            traits: vec!["A".into()],
+            default_entity_name: String::new(),
+            ..index_entry("std-z")
+        };
+        assert_eq!(index_texts(&names_only), ("std-z".to_string(), None));
         // Control: an entry with no capabilities has no capability text.
-        let bare = serde_json::json!({ "name": "std-y" });
-        assert_eq!(
-            index_texts("std-y", &bare).unwrap(),
-            ("std-y".to_string(), None)
-        );
+        assert_eq!(index_texts(&index_entry("std-y")).1, None);
     }
 }

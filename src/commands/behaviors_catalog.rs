@@ -1,17 +1,19 @@
 //! `orb behaviors catalog | describe | source` — the installed behavior
 //! packages as data. Resolution is the existing machinery (`discover` for the
 //! package set, `ExternalOrbitalLoader` for specifiers); this module only
-//! reads the sidecars those packages declare (`orb.index`, `orb.vectors`)
-//! and shapes them to the `@almadar/core`
+//! derives each package's index on read (`behaviors_index`), reads the vector
+//! snapshot it declares (`orb.vectors`) and shapes them to the `@almadar/core`
 //! `CatalogEntrySchema` / `TraitDescriptionSchema` contracts.
 
-use orbital_compiler::loader::{index_registry_source, ExternalOrbitalLoader, LoaderConfig};
+use orbital_compiler::loader::{ExternalOrbitalLoader, LoaderConfig};
+use orbital_core::behavior_index::EXPOSURES;
 use orbital_core::behavior_packages::{BehaviorPackage, STD_PACKAGE};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
+use super::behaviors_index::{package_index, IndexEntry};
 use super::behaviors_texts::{
     describe_all, index_texts, texts_of, EntityFacts, KnobFacts, OrbitalFacts, RegistryEntry,
     TextKind, TraitFacts, CAPABILITY_KEY_SUFFIX,
@@ -24,8 +26,6 @@ use super::sidecar_fetch::UreqFetcher;
 
 const TRAITS_SEGMENT: &str = ".traits.";
 const STD_ALIAS: &str = "std";
-const LEVELS: [&str; 3] = ["atom", "molecule", "organism"];
-const EXPOSURES: [&str; 5] = ["app", "experience", "palette", "both", "internal"];
 // ---------------------------------------------------------------------------
 // catalog
 // ---------------------------------------------------------------------------
@@ -50,6 +50,9 @@ pub(crate) struct CatalogEntryOut {
     level: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     exposure: Option<String>,
+    /// The `@almadar/ui` pattern the behavior is the factory of; absent when it is not one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pattern: Option<String>,
     description: String,
     capabilities: Vec<String>,
     traits: Vec<TraitValueOut>,
@@ -91,39 +94,29 @@ fn resolve_scope(packages: &[BehaviorPackage], raw: &str) -> anyhow::Result<Scop
     })
 }
 
-fn relative_dir(registry: &Path, file: &Path) -> Option<Vec<String>> {
-    let rel = file.parent()?.strip_prefix(registry).ok()?;
-    Some(
-        rel.components()
-            .filter_map(|c| match c {
-                Component::Normal(s) => s.to_str().map(str::to_string),
-                _ => None,
-            })
-            .collect(),
-    )
-}
-
-/// The phrases of an index entry's `capabilities`, which the registry declares as the organism's
-/// comma-separated phrase string (the same string the embedding text carries).
-fn capability_phrases(name: &str, v: Option<&Value>) -> anyhow::Result<Vec<String>> {
-    match v {
-        None | Some(Value::Null) => Ok(Vec::new()),
-        Some(Value::String(s)) => Ok(s
-            .split(',')
-            .map(str::trim)
-            .filter(|p| !p.is_empty())
-            .map(str::to_string)
-            .collect()),
-        Some(other) => anyhow::bail!("{name}: `capabilities` is {other}, not a string"),
-    }
+/// The phrases of an entry's `@capabilities`, the organism's comma-separated phrase string (the same
+/// string the embedding text carries).
+fn capability_phrases(declared: Option<&str>) -> Vec<String> {
+    declared
+        .into_iter()
+        .flat_map(|s| s.split(','))
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 pub(crate) fn run_catalog(
     paths: Vec<String>,
     exposure: Vec<String>,
     json: bool,
+    no_vectors: bool,
 ) -> anyhow::Result<()> {
-    let out = catalog(&paths, &exposure)?;
+    let out = if no_vectors {
+        catalog_with(&paths, &exposure, Vectors::Omit, None)?
+    } else {
+        catalog(&paths, &exposure)?
+    };
     if json {
         println!("{}", serde_json::to_string_pretty(&out)?);
     } else {
@@ -188,89 +181,43 @@ pub(crate) fn catalog_with(
     let mut entries: BTreeMap<String, CatalogEntryOut> = BTreeMap::new();
     let mut contributing: BTreeSet<usize> = BTreeSet::new();
     let mut wanted: Vec<Wanted> = Vec::new();
-    let mut per_package: BTreeMap<usize, Vec<(String, Value, PathBuf)>> = BTreeMap::new();
+    let mut per_package: BTreeMap<usize, Vec<IndexEntry>> = BTreeMap::new();
+    let mut indexed: BTreeMap<usize, Vec<IndexEntry>> = BTreeMap::new();
     for scope in &scopes {
-        let pkg = &packages[scope.package];
-        let raw = std::fs::read_to_string(&pkg.index)
-            .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", pkg.index.display()))?;
-        let index: Value = serde_json::from_str(&raw)
-            .map_err(|e| anyhow::anyhow!("invalid index {}: {e}", pkg.index.display()))?;
-        let behaviors = index
-            .get("behaviors")
-            .and_then(Value::as_object)
-            .ok_or_else(|| anyhow::anyhow!("{} has no `behaviors` map", pkg.index.display()))?;
-        let files = index_registry_source(&pkg.registry);
-        for (name, entry) in behaviors {
-            let file = files.get(name).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "{} lists `{name}` but {} holds no {name}.{}",
-                    pkg.index.display(),
-                    pkg.registry.root().display(),
-                    pkg.registry.extension()
-                )
-            })?;
-            let dir = relative_dir(pkg.registry.root(), file).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "{} is outside {}",
-                    file.display(),
-                    pkg.registry.root().display()
-                )
-            })?;
-            if dir.len() < scope.dirs.len() || dir[..scope.dirs.len()] != scope.dirs[..] {
-                continue;
+        if !indexed.contains_key(&scope.package) {
+            indexed.insert(scope.package, package_index(&packages, scope.package)?);
+        }
+        for entry in &indexed[&scope.package] {
+            if in_scope(&entry.dirs, &scope.dirs) {
+                per_package.entry(scope.package).or_default().push(entry.clone());
             }
-            per_package.entry(scope.package).or_default().push((
-                name.clone(),
-                entry.clone(),
-                file.clone(),
-            ));
         }
     }
 
     for (pi, rows) in &per_package {
         let pkg = &packages[*pi];
-        for (name, entry, _) in rows {
-            let exposure_of = entry.get("exposure").and_then(Value::as_str);
-            if let Some(e) = exposure_of {
-                if !EXPOSURES.contains(&e) {
-                    anyhow::bail!("{name}: unknown exposure `{e}` in {}", pkg.index.display());
-                }
-            }
-            if !exposure.is_empty() && !exposure_of.is_some_and(|e| exposure.iter().any(|x| x == e))
+        for entry in rows {
+            let name = &entry.name;
+            if !exposure.is_empty()
+                && !entry
+                    .exposure
+                    .as_deref()
+                    .is_some_and(|e| exposure.iter().any(|x| x == e))
             {
                 continue;
             }
-            let level = entry
-                .get("level")
-                .and_then(Value::as_str)
-                .filter(|l| LEVELS.contains(l))
-                .ok_or_else(|| {
-                    anyhow::anyhow!("{name}: `level` must be one of {}", LEVELS.join(", "))
-                })?;
-            let topic = entry
-                .get("topic")
-                .and_then(Value::as_str)
-                .ok_or_else(|| anyhow::anyhow!("{name}: index entry has no `topic`"))?;
-            let traits = entry
-                .get("traits")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .map(|t| {
-                    t.as_str()
-                        .map(|n| TraitValueOut {
-                            behavior: format!("{}/{name}", pkg.prefix),
-                            trait_name: n.to_string(),
-                        })
-                        .ok_or_else(|| {
-                            anyhow::anyhow!("{name}: a `traits` entry is not a trait name")
-                        })
-                })
-                .collect::<anyhow::Result<Vec<_>>>()?;
             let key = format!("{}/{name}", pkg.prefix);
+            let traits = entry
+                .traits
+                .iter()
+                .map(|n| TraitValueOut {
+                    behavior: key.clone(),
+                    trait_name: n.clone(),
+                })
+                .collect();
             contributing.insert(*pi);
             if matches!(vectors, Vectors::Attach(_)) {
-                let (organism, capability) = index_texts(name, entry)?;
+                let (organism, capability) = index_texts(entry);
                 wanted.push(Wanted {
                     key: key.clone(),
                     text: organism,
@@ -290,15 +237,12 @@ pub(crate) fn catalog_with(
                     },
                     behavior: key,
                     package: pkg.name.clone(),
-                    topic: topic.to_string(),
-                    level: level.to_string(),
-                    exposure: exposure_of.map(str::to_string),
-                    description: entry
-                        .get("description")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string(),
-                    capabilities: capability_phrases(name, entry.get("capabilities"))?,
+                    topic: entry.topic.clone(),
+                    level: entry.level.clone(),
+                    exposure: entry.exposure.clone(),
+                    pattern: entry.pattern.clone(),
+                    description: entry.description.clone(),
+                    capabilities: capability_phrases(entry.capabilities.as_deref()),
                     traits,
                     vectors: BTreeMap::new(),
                     model: String::new(),
@@ -335,13 +279,11 @@ pub(crate) fn catalog_with(
             let mut exact: HashMap<String, String> = HashMap::new();
             for (pi, rows) in &per_package {
                 let prefix = &packages[*pi].prefix;
-                let registry = rows
+                let registry: Vec<(String, RegistryEntry)> = rows
                     .iter()
-                    .filter(|(name, _, _)| unresolved.contains(format!("{prefix}/{name}").as_str()))
-                    .map(|(name, entry, _)| {
-                        Ok((name.clone(), RegistryEntry::from_value(name, entry)?))
-                    })
-                    .collect::<anyhow::Result<Vec<_>>>()?;
+                    .filter(|e| unresolved.contains(format!("{prefix}/{}", e.name).as_str()))
+                    .map(|e| (e.name.clone(), RegistryEntry::from(e)))
+                    .collect();
                 if registry.is_empty() {
                     continue;
                 }
@@ -393,7 +335,7 @@ fn split_trait_spec(spec: &str) -> anyhow::Result<(String, String)> {
     Ok((spec[..at].to_string(), trait_name.to_string()))
 }
 
-struct Resolved {
+pub(crate) struct Resolved {
     path: PathBuf,
     package: Option<BehaviorPackage>,
     schema: orbital_core::schema::OrbitalSchema,
@@ -406,14 +348,25 @@ fn resolve(spec: &str) -> anyhow::Result<Resolved> {
 /// [`resolve`], a relative specifier resolving from the program file `from` (as its `uses` do).
 fn resolve_from(spec: &str, from: Option<&Path>) -> anyhow::Result<Resolved> {
     let cwd = std::env::current_dir()?;
-    let from = from.map(|f| cwd.join(f));
-    let from = from.as_deref();
     let packages = discover_from(&cwd)?;
     let mut loader = ExternalOrbitalLoader::new(LoaderConfig {
         base_path: cwd,
         packages: packages.clone(),
         ..Default::default()
     });
+    resolve_with_loader(&mut loader, &packages, spec, from)
+}
+
+/// [`resolve_from`] on a loader the caller keeps, so a batch reads each program once.
+pub(crate) fn resolve_with_loader(
+    loader: &mut ExternalOrbitalLoader,
+    packages: &[BehaviorPackage],
+    spec: &str,
+    from: Option<&Path>,
+) -> anyhow::Result<Resolved> {
+    let cwd = std::env::current_dir()?;
+    let from = from.map(|f| cwd.join(f));
+    let from = from.as_deref();
     let mut chain = orbital_compiler::loader::ImportChain::new();
     let loaded = loader
         .load(spec, from, &mut chain)
@@ -421,13 +374,35 @@ fn resolve_from(spec: &str, from: Option<&Path>) -> anyhow::Result<Resolved> {
     let path = loaded.source_path.clone();
     let schema = loaded.schema.clone();
     let package = packages
-        .into_iter()
-        .find(|p| path.starts_with(p.registry.root()));
+        .iter()
+        .find(|p| path.starts_with(p.registry.root()))
+        .cloned();
     Ok(Resolved {
         path,
         package,
         schema,
     })
+}
+
+/// The capabilities the traits of the behavior `spec` resolves to (composed traits included), sorted and unique.
+pub(crate) fn resolved_trait_capabilities(
+    resolved: &Resolved,
+    spec: &str,
+) -> anyhow::Result<Vec<String>> {
+    use orbital_core::schema::TraitReference;
+    let program = resolved_program(resolved, spec)?;
+    Ok(program
+        .orbitals
+        .iter()
+        .flat_map(|o| o.traits.iter())
+        .filter_map(|t| match t {
+            TraitReference::Inline(td) => Some(td.capabilities.iter().cloned()),
+            _ => None,
+        })
+        .flatten()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect())
 }
 
 #[derive(Serialize)]
@@ -1434,14 +1409,19 @@ pub(crate) fn text_facts(spec: &str, organism: &str) -> anyhow::Result<Vec<Orbit
         .collect()
 }
 
-/// One package's behaviors under the scopes, in registry (index) order.
+/// One package's behaviors under the scopes, in path order.
 pub(crate) struct ScopedPackage {
     pub prefix: String,
-    pub behaviors: Vec<(String, Value)>,
+    pub behaviors: Vec<IndexEntry>,
+}
+
+/// Whether a behavior in `dirs` lies under the scope's directories.
+fn in_scope(dirs: &[String], scope: &[String]) -> bool {
+    dirs.len() >= scope.len() && dirs[..scope.len()] == *scope
 }
 
 /// The behaviors under `paths` (the scopes `catalog` takes), per package in first-mention
-/// order, each package's behaviors in the order its index lists them.
+/// order, each package's behaviors in path order.
 pub(crate) fn scoped_behaviors(paths: &[String]) -> anyhow::Result<Vec<ScopedPackage>> {
     if paths.is_empty() {
         anyhow::bail!("give at least one scope path, e.g. `almadar-std/ui/core/molecules`");
@@ -1461,44 +1441,18 @@ pub(crate) fn scoped_behaviors(paths: &[String]) -> anyhow::Result<Vec<ScopedPac
     order
         .into_iter()
         .map(|pi| {
-            let pkg = &packages[pi];
-            let raw = std::fs::read_to_string(&pkg.index)
-                .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", pkg.index.display()))?;
-            let index: Value = serde_json::from_str(&raw)
-                .map_err(|e| anyhow::anyhow!("invalid index {}: {e}", pkg.index.display()))?;
-            let behaviors = index
-                .get("behaviors")
-                .and_then(Value::as_object)
-                .ok_or_else(|| anyhow::anyhow!("{} has no `behaviors` map", pkg.index.display()))?;
-            let files = index_registry_source(&pkg.registry);
-            let mut picked = Vec::new();
-            for (name, entry) in behaviors {
-                let file = files.get(name).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "{} lists `{name}` but {} holds no {name}.{}",
-                        pkg.index.display(),
-                        pkg.registry.root().display(),
-                        pkg.registry.extension()
-                    )
-                })?;
-                let dir = relative_dir(pkg.registry.root(), file).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "{} is outside {}",
-                        file.display(),
-                        pkg.registry.root().display()
-                    )
-                })?;
-                let in_scope = scopes
-                    .iter()
-                    .filter(|s| s.package == pi)
-                    .any(|s| dir.len() >= s.dirs.len() && dir[..s.dirs.len()] == s.dirs[..]);
-                if in_scope {
-                    picked.push((name.clone(), entry.clone()));
-                }
-            }
+            let behaviors = package_index(&packages, pi)?
+                .into_iter()
+                .filter(|e| {
+                    scopes
+                        .iter()
+                        .filter(|s| s.package == pi)
+                        .any(|s| in_scope(&e.dirs, &s.dirs))
+                })
+                .collect();
             Ok(ScopedPackage {
-                prefix: pkg.prefix.clone(),
-                behaviors: picked,
+                prefix: packages[pi].prefix.clone(),
+                behaviors,
             })
         })
         .collect()
@@ -1507,15 +1461,13 @@ pub(crate) fn scoped_behaviors(paths: &[String]) -> anyhow::Result<Vec<ScopedPac
 #[cfg(test)]
 mod capability_phrase_tests {
     #[test]
-    fn capability_phrases_split_the_declared_string_and_reject_other_types() {
-        let v = serde_json::json!("program repair,  evaluate a program, ");
+    fn capability_phrases_split_the_declared_string() {
         assert_eq!(
-            super::capability_phrases("n", Some(&v)).unwrap(),
+            super::capability_phrases(Some("program repair,  evaluate a program, ")),
             ["program repair", "evaluate a program"]
         );
-        assert!(super::capability_phrases("n", None).unwrap().is_empty());
-        let arr = serde_json::json!(["a"]);
-        assert!(super::capability_phrases("n", Some(&arr)).is_err());
+        assert!(super::capability_phrases(None).is_empty());
+        assert!(super::capability_phrases(Some(" , ")).is_empty());
     }
 }
 

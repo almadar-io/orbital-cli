@@ -17,6 +17,7 @@ use super::behaviors_texts::{
     index_texts, texts_of, RegistryEntry, TextKind, CAPABILITY_KEY_SUFFIX,
 };
 use super::behaviors_vectors::{user_store_path, user_vectors_dir};
+use super::behaviors_index::{package_index, IndexEntry};
 use super::npm_project::discover_from;
 
 #[derive(Serialize, Debug, Default, PartialEq, Eq)]
@@ -57,21 +58,17 @@ fn sha256_hex(text: &str) -> String {
         .collect()
 }
 
-/// The organism and capability texts of every behavior in `index` (a package `index` JSON), by manifest key.
-fn package_texts(index: &Value) -> anyhow::Result<HashMap<String, String>> {
-    let behaviors = index
-        .get("behaviors")
-        .and_then(Value::as_object)
-        .ok_or_else(|| anyhow::anyhow!("the package index has no `behaviors` map"))?;
+/// The organism and capability texts of every behavior in `entries`, by manifest key.
+fn package_texts(entries: &[IndexEntry]) -> HashMap<String, String> {
     let mut out = HashMap::new();
-    for (name, entry) in behaviors {
-        let (organism, capability) = index_texts(name, entry)?;
-        out.insert(name.clone(), organism);
+    for entry in entries {
+        let (organism, capability) = index_texts(entry);
+        out.insert(entry.name.clone(), organism);
         if let Some(c) = capability {
-            out.insert(format!("{name}{CAPABILITY_KEY_SUFFIX}"), c);
+            out.insert(format!("{}{CAPABILITY_KEY_SUFFIX}", entry.name), c);
         }
     }
-    Ok(out)
+    out
 }
 
 /// Import `manifest` into the store under `store_dir`, joining keys to `texts` and checking `hashes`.
@@ -142,9 +139,10 @@ pub(crate) fn run_import(from: PathBuf, index: Option<PathBuf>) -> anyhow::Resul
     let from = std::fs::canonicalize(&from)
         .map_err(|e| anyhow::anyhow!("cannot read {}: {e}", from.display()))?;
     let packages = discover_from(&std::env::current_dir()?)?;
-    let pkg = packages
+    let (pi, pkg) = packages
         .iter()
-        .find(|p| {
+        .enumerate()
+        .find(|(_, p)| {
             std::fs::canonicalize(&p.root)
                 .map(|root| from.starts_with(root))
                 .unwrap_or(false)
@@ -155,10 +153,8 @@ pub(crate) fn run_import(from: PathBuf, index: Option<PathBuf>) -> anyhow::Resul
                 from.display()
             )
         })?;
-    let raw = std::fs::read_to_string(&pkg.index)?;
-    let package_index: Value = serde_json::from_str(&raw)
-        .map_err(|e| anyhow::anyhow!("invalid index {}: {e}", pkg.index.display()))?;
-    let texts = package_texts(&package_index)?;
+    let entries = package_index(&packages, pi)?;
+    let texts = package_texts(&entries);
     let index_path = match index {
         Some(p) => p,
         None => default_index_path(&from)?,
@@ -175,15 +171,11 @@ pub(crate) fn run_import(from: PathBuf, index: Option<PathBuf>) -> anyhow::Resul
         .iter()
         .filter_map(|(k, v)| v.as_str().map(|h| (k.clone(), h.to_string())))
         .collect();
-    let behaviors = package_index
-        .get("behaviors")
-        .and_then(Value::as_object)
-        .ok_or_else(|| anyhow::anyhow!("the package index has no `behaviors` map"))?;
     let describe_text = |key: &str| -> anyhow::Result<Option<String>> {
-        let Some(entry) = behaviors.get(key) else {
+        let Some(entry) = entries.iter().find(|e| e.name == key) else {
             return Ok(None);
         };
-        let registry = [(key.to_string(), RegistryEntry::from_value(key, entry)?)];
+        let registry = [(key.to_string(), RegistryEntry::from(entry))];
         let facts = text_facts(&format!("{}/{key}", pkg.prefix), key)?;
         Ok(texts_of(&registry, &[facts], Some(TextKind::Organism))
             .into_iter()

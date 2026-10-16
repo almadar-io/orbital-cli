@@ -30,13 +30,13 @@ fn decoded(v: &[f32]) -> Vec<f64> {
 /// The embedding text of a fixture card (`index`) and of its capabilities.
 fn card_texts(prefix: &str) -> (String, String) {
     (
-        format!("{prefix}-card\nA card.\nCapabilities (organism): display"),
+        format!("{prefix}-card\nA card.\nCapabilities (organism): display\nEntity: Card\nEvents: OPEN"),
         "Capabilities (organism): display".to_string(),
     )
 }
 
 fn board_text(prefix: &str) -> String {
-    format!("{prefix}-board\nA board.")
+    format!("{prefix}-board\nA board.\nEntity: Thing")
 }
 
 fn write(path: &Path, content: &str) {
@@ -44,28 +44,25 @@ fn write(path: &Path, content: &str) {
     std::fs::write(path, content).unwrap();
 }
 
-const ORB: &str = r#"{"name":"fake","orbitals":[{"name":"FakeOrbital","entity":{"name":"Thing","fields":[]},"traits":[]}]}"#;
+const ORB: &str = r#"{"name":"fake","description":"A board.","orbitals":[{"name":"FakeOrbital","entity":{"name":"Thing","fields":[]},"traits":[]}]}"#;
 
 /// A card behavior whose `CardView` declares the knobs and events the signature fixture lists.
-const CARD_ORB: &str = r#"{"name":"card","orbitals":[{"name":"CardOrbital","entity":{"name":"Card","persistence":"runtime","fields":[]},"traits":[{"name":"CardView","linkedEntity":"Card","config":{"title":{"type":"string","default":"Hello","label":"Title","tier":"domain"},"size":{"type":"number","default":3}},"emits":[{"event":"CARD_OPENED"}],"listens":[{"event":"OPEN","triggers":"OPEN"}],"stateMachine":{"states":[{"name":"shown","isInitial":true}],"events":[{"key":"OPEN","name":"Open"},{"key":"INIT","name":"Initialize"}],"transitions":[{"from":"shown","to":"shown","event":"OPEN","effects":[["emit","CARD_OPENED"]]},{"from":"shown","to":"shown","event":"INIT"}]}}]}]}"#;
+const CARD_ORB: &str = r#"{"name":"card","description":"A card.","orbitals":[{"name":"CardOrbital","entity":{"name":"Card","persistence":"runtime","fields":[]},"traits":[{"name":"CardView","linkedEntity":"Card","config":{"title":{"type":"string","default":"Hello","label":"Title","tier":"domain"},"size":{"type":"number","default":3}},"emits":[{"event":"CARD_OPENED"}],"listens":[{"event":"OPEN","triggers":"OPEN"}],"stateMachine":{"states":[{"name":"shown","isInitial":true}],"events":[{"key":"OPEN","name":"Open"},{"key":"INIT","name":"Initialize"}],"transitions":[{"from":"shown","to":"shown","event":"OPEN","effects":[["emit","CARD_OPENED"]]},{"from":"shown","to":"shown","event":"INIT"}]}}]}]}"#;
 
 fn package(
     root: &Path,
     dir: &str,
     prefix: &str,
     model: &str,
-    behaviors: &str,
     extra: &[(&str, &str)],
 ) {
     let pkg = root.join("node_modules").join(dir);
     write(
         &pkg.join("package.json"),
         &format!(
-            r#"{{"name":"{dir}","version":"1.0.0","orb":{{"prefix":"{prefix}","registry":"behaviors/registry","index":"behaviors/index.json","vectors":"dist/vectors.vec","loloContracts":"behaviors/contracts.json","signatures":"behaviors/signatures.lolo","compiler":">=0.0.0"}}}}"#
+            r#"{{"name":"{dir}","version":"1.0.0","orb":{{"prefix":"{prefix}","registry":"behaviors/registry","source":"behaviors/lolo","vectors":"dist/vectors.vec","signatures":"behaviors/signatures.lolo","compiler":">=0.0.0"}}}}"#
         ),
     );
-    write(&pkg.join("behaviors/index.json"), behaviors);
-    write(&pkg.join("behaviors/contracts.json"), "{}");
     let (card, capability) = card_texts(prefix);
     VectorStore::insert_many(
         &pkg.join("dist/vectors.vec"),
@@ -83,14 +80,8 @@ fn package(
     }
 }
 
-fn index(prefix: &str) -> String {
-    format!(
-        r#"{{"behaviors":{{
- "{prefix}-card":{{"name":"{prefix}-card","level":"atom","topic":"ui/core","exposure":"palette","description":"A card.","capabilities":"display","traits":["CardView"]}},
- "{prefix}-board":{{"name":"{prefix}-board","level":"organism","topic":"app","description":"A board.","traits":["BoardMain","BoardSide"]}}
-}}}}"#
-    )
-}
+/// The card's `.lolo` header: the tags its exposure and capabilities are read from.
+const CARD_LOLO: &str = "app card [\n  version: \"1.0.0\"\n]\n;; @exposure palette\n;; @capabilities \"display\"\n";
 
 fn project(second_model: &str) -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
@@ -107,8 +98,8 @@ fn project(second_model: &str) -> tempfile::TempDir {
         "alpha",
         "alpha",
         "m1",
-        &index("alpha"),
         &[
+            ("behaviors/lolo/ui/core/atoms/alpha-card.lolo", CARD_LOLO),
             ("behaviors/registry/ui/core/atoms/alpha-card.orb", CARD_ORB),
             ("behaviors/registry/app/organisms/alpha-board.orb", ORB),
         ],
@@ -118,8 +109,8 @@ fn project(second_model: &str) -> tempfile::TempDir {
         "beta",
         "beta",
         second_model,
-        &index("beta"),
         &[
+            ("behaviors/lolo/ui/core/atoms/beta-card.lolo", CARD_LOLO),
             ("behaviors/registry/ui/core/atoms/beta-card.orb", CARD_ORB),
             ("behaviors/registry/app/organisms/beta-board.orb", ORB),
         ],
@@ -205,7 +196,7 @@ fn catalog_filters_by_topic_tier_and_exposure_and_sorts() {
         .map(|e| e["behavior"].as_str().unwrap())
         .collect();
     assert_eq!(names, ["alpha/alpha-board", "alpha/alpha-card"]);
-    // The board has no index exposure: the key is omitted, and an exposure filter drops it.
+    // The board's package declares no exposure defaults and the board no tag: the key is omitted, and an exposure filter drops it.
     assert!(all[0].get("exposure").is_none());
 
     let tier = json(&orb(
@@ -694,10 +685,7 @@ fn smoke_real_std_package() {
     let declares_vectors = std::fs::read_to_string(std_dir.join("package.json"))
         .map(|p| p.contains("\"vectors\""))
         .unwrap_or(false);
-    if !std_dir.join("dist/behaviors-registry.json").is_file()
-        || !std_dir.join("dist/vectors.vec").is_file()
-        || !declares_vectors
-    {
+    if !std_dir.join("dist/vectors.vec").is_file() || !declares_vectors {
         return;
     }
     let store = tempfile::tempdir().unwrap();
@@ -813,6 +801,111 @@ fn snapshot_writes_exactly_the_package_texts_deterministically_and_needs_a_provi
         first,
         "same inputs, same bytes"
     );
+}
+
+#[test]
+fn snapshot_reuses_locked_package_vectors_with_warm_cache_and_no_provider() {
+    use sha2::{Digest, Sha256};
+
+    const MODEL: &str = "m1";
+    let p = project(MODEL);
+    let root = p.path();
+    let pkg = root.join("node_modules/alpha");
+    let out = root.join("locked-alpha.vec");
+    let user = root.join(".user-vectors");
+    let cache = root.join(".snapshot-sidecars");
+    let mut records = Vec::new();
+    for kind in ["organism", "capability"] {
+        let texts = json(&orb(
+            root,
+            &["behaviors", "texts", "--json", "--kind", kind, "alpha"],
+        ));
+        for text in texts.as_array().unwrap() {
+            records.push((
+                text_key(MODEL, text["text"].as_str().unwrap()),
+                quantize(&CARD_VECTOR),
+            ));
+        }
+    }
+    let expected = VectorStore::from_records(MODEL, 4, records.clone()).unwrap();
+    assert!(expected.len() >= 3, "two organisms and one capability text");
+    records.push((
+        text_key(MODEL, "unrelated locked text"),
+        quantize(&CAPABILITY_VECTOR),
+    ));
+    let oracle = root.join("lock-oracle.vec");
+    VectorStore::from_records(MODEL, 4, records)
+        .unwrap()
+        .write(&oracle)
+        .unwrap();
+    let body = std::fs::read(&oracle).unwrap();
+    let sha: String = Sha256::digest(&body)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    std::fs::create_dir_all(&cache).unwrap();
+    let cached = cache.join(&sha);
+    std::fs::write(&cached, &body).unwrap();
+    write(
+        &pkg.join("sidecars.lock.json"),
+        &serde_json::json!({
+            "version": 1,
+            "files": {
+                "dist/vectors.vec": {
+                    "sha256": sha,
+                    "bytes": body.len(),
+                    "url": "https://storage.example.invalid/vectors?token=LOCK_FIXTURE_TOKEN"
+                }
+            }
+        })
+        .to_string(),
+    );
+    std::fs::remove_file(pkg.join("dist/vectors.vec")).unwrap();
+    assert!(!pkg.join("dist/vectors.vec").exists());
+    assert!(!out.exists());
+    assert!(!user.exists());
+    let snapshot = || {
+        Command::new(orb_bin())
+            .args([
+                "behaviors",
+                "vectors",
+                "snapshot",
+                "--package",
+                pkg.to_str().unwrap(),
+                "--out",
+                out.to_str().unwrap(),
+            ])
+            .current_dir(root)
+            .env("ORB_NO_AUTO_SETUP", "1")
+            .env("ALMADAR_VECTORS_DIR", &user)
+            .env("ALMADAR_SIDECAR_CACHE", &cache)
+            .env_remove("EMBEDDING_PROVIDER")
+            .env_remove("EMBEDDING_API_KEY")
+            .env_remove("OPEN_ROUTER_API_KEY")
+            .env_remove("OPENAI_API_KEY")
+            .env_remove("EMBEDDING_MODEL")
+            .output()
+            .expect("spawn orb")
+    };
+    let result = snapshot();
+    assert!(
+        result.status.success(),
+        "the declared locked snapshot must answer without a provider: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let actual = VectorStore::open(&out).unwrap();
+    assert_eq!(actual.model(), MODEL);
+    assert_eq!(actual.dims(), 4);
+    assert_eq!(
+        actual.iter().collect::<Vec<_>>(),
+        expected.iter().collect::<Vec<_>>()
+    );
+    let first = std::fs::read(&out).unwrap();
+    assert!(snapshot().status.success());
+    assert_eq!(std::fs::read(&out).unwrap(), first);
+    assert_eq!(std::fs::read(&cached).unwrap(), body);
+    assert!(!pkg.join("dist/vectors.vec").exists());
+    assert!(!user.exists());
 }
 
 #[test]

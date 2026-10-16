@@ -88,18 +88,14 @@ mod tests {
     /// An installed package whose only vectors snapshot lives in the lock, not the package.
     fn locked_package(root: &Path, body: &[u8], bytes: u64) -> (BehaviorPackage, PathBuf) {
         let pkg_dir = root.join("node_modules/pkg-a");
-        for (rel, content) in [
-            ("behaviors/registry/x.orb", "{}"),
-            ("behaviors/index.json", "{}"),
-            ("behaviors/contracts.json", "{}"),
-        ] {
+        for (rel, content) in [("behaviors/registry/x.orb", "{}")] {
             let path = pkg_dir.join(rel);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(path, content).unwrap();
         }
         fs::write(
             pkg_dir.join("package.json"),
-            r#"{"name":"pkg-a","version":"1.0.0","orb":{"prefix":"pa","registry":"behaviors/registry","index":"behaviors/index.json","loloContracts":"behaviors/contracts.json","signatures":"behaviors/signatures.lolo","vectors":"dist/vectors.vec","compiler":">=0.0.0"}}"#,
+            r#"{"name":"pkg-a","version":"1.0.0","orb":{"prefix":"pa","registry":"behaviors/registry","signatures":"behaviors/signatures.lolo","vectors":"dist/vectors.vec","compiler":">=0.0.0"}}"#,
         )
         .unwrap();
         fs::write(

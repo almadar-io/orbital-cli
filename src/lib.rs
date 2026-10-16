@@ -362,7 +362,8 @@ enum Commands {
         screenshot: Option<PathBuf>,
 
         /// Layer 3 (per-frame): drive each state transition and capture a PNG per
-        /// frame + a frames.json manifest for the vision-review workflow.
+        /// frame + a frames.json manifest for the vision-review workflow. With
+        /// `--compiled`, capture each `poster`-declaring trait's WebP poster into DIR instead.
         #[arg(long, value_name = "DIR")]
         screenshot_frames: Option<PathBuf>,
 
@@ -896,6 +897,9 @@ enum BehaviorsCommand {
         /// Print as JSON (`CatalogEntry[]`).
         #[arg(long)]
         json: bool,
+        /// Leave out the vectors (and the embedding model): no vector store or provider is read.
+        #[arg(long)]
+        no_vectors: bool,
     },
     /// The texts an installed package embeds, one `{ key, text, hash }` each: the organism
     /// text, its `<name>#capabilities` text and every knob text, in embed order.
@@ -909,14 +913,6 @@ enum BehaviorsCommand {
         /// Print as JSON (the only format; accepted for symmetry with `catalog`).
         #[arg(long)]
         json: bool,
-    },
-    /// The capabilities each behavior's traits resolve to (composed traits included), as
-    /// `{ "<prefix>/<name>": [capability] }` JSON: what the registry index stores as
-    /// `traitCapabilities`.
-    TraitCapabilities {
-        /// Scope paths, as `catalog` takes them.
-        #[arg(required = true)]
-        paths: Vec<String>,
     },
     /// Describe one trait of an installed behavior: knobs, events, embedding
     /// model. Knob vectors are attached only with `--knob-vectors`.
@@ -1426,9 +1422,9 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
                 paths,
                 exposure,
                 json,
-            } => commands::run_catalog(paths, exposure, json),
+                no_vectors,
+            } => commands::run_catalog(paths, exposure, json, no_vectors),
             BehaviorsCommand::Texts { paths, kind, json: _ } => commands::run_texts(paths, kind),
-            BehaviorsCommand::TraitCapabilities { paths } => commands::run_trait_capabilities(paths),
             BehaviorsCommand::Describe {
                 spec,
                 json,
@@ -1498,8 +1494,13 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
         Some(Commands::Mcp {
             command: Some(McpCommand::Install { client }),
         }) => {
-            let path = commands::mcp::install_config(&std::env::current_dir()?, client)?;
+            let (path, warning) = commands::mcp::install(&std::env::current_dir()?, client, || {
+                crate::utils::patterns::ensure_language_ready().map_err(|e| format!("{}: {e}", e.code()))
+            })?;
             println!("Registered `orb mcp` in {}", path.display());
+            if let Some(warning) = warning {
+                eprintln!("orb: {warning}");
+            }
             Ok(())
         }
         Some(Commands::Emit {

@@ -179,7 +179,10 @@ fn rows(dir: &Path) -> anyhow::Result<Vec<Row>> {
             .flatten();
         out.push(Row {
             prefix: behavior_package.as_ref().map(|p| p.prefix.clone()),
-            behaviors: behavior_package.as_ref().map(|p| orbital_compiler::loader::index_registry_source(&p.registry).len()),
+            behaviors: behavior_package
+                .as_ref()
+                .map(|p| orbital_compiler::loader::index_registry_source(&p.registry).map(|files| files.len()))
+                .transpose()?,
             package: name,
             kinds,
             version: pkg.version.clone(),
@@ -212,7 +215,7 @@ fn print_rows(rows: &[Row]) {
             (Some(prefix), Some(n)) => format!(" [{prefix}/, {n} behaviors]"),
             _ => String::new(),
         };
-        println!(
+        let line = format!(
             "{:<34} {:<12} {:<26} {}{}{behaviors}",
             row.package,
             row.version,
@@ -220,6 +223,11 @@ fn print_rows(rows: &[Row]) {
             row.problem.as_deref().unwrap_or("ok"),
             if row.link { " (linked)" } else { "" }
         );
+        if super::npm_project::reports_on_stderr() {
+            eprintln!("{line}");
+        } else {
+            println!("{line}");
+        }
     }
 }
 
@@ -387,13 +395,47 @@ pub(crate) fn run_list(json: bool, global: bool) -> anyhow::Result<()> {
         println!("{}", serde_json::to_string_pretty(&rows)?);
     } else {
         print_rows(&rows);
+        if let Some(hint) = empty_store_hint(&rows, &dir) {
+            eprintln!("{hint}");
+        }
     }
     Ok(())
+}
+
+/// An empty listing says why and how to fix it, instead of printing nothing.
+fn empty_store_hint(rows: &[Row], dir: &Path) -> Option<String> {
+    rows.is_empty().then(|| {
+        format!(
+            "orb: nothing is installed in {} (no @almadar/core or @almadar/std); run `orb update --global` to set the language up",
+            dir.display()
+        )
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_empty_listing_names_the_fix() {
+        let hint = empty_store_hint(&[], Path::new("/home/u/.orb")).expect("an empty store explains itself");
+        assert!(hint.contains("/home/u/.orb") && hint.contains("orb update --global"), "{hint}");
+    }
+
+    #[test]
+    fn control_a_listing_with_packages_carries_no_hint() {
+        let row = Row {
+            package: "@almadar/std".to_string(),
+            kinds: vec![Kind::Language, Kind::Behaviors],
+            version: "16.256.0".to_string(),
+            path: "/home/u/.orb/node_modules/@almadar/std".to_string(),
+            link: false,
+            prefix: Some("almadar-std".to_string()),
+            behaviors: Some(468),
+            problem: None,
+        };
+        assert!(empty_store_hint(&[row], Path::new("/home/u/.orb")).is_none());
+    }
 
     #[test]
     fn a_package_declares_its_kinds_in_its_manifest() {

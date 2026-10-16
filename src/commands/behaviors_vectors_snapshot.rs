@@ -77,11 +77,11 @@ pub(crate) fn write_snapshot(
 fn package_wanted(prefix: &str) -> anyhow::Result<Vec<Wanted>> {
     let mut wanted = Vec::new();
     for package in scoped_behaviors(&[prefix.to_string()])? {
-        let registry = package
+        let registry: Vec<(String, RegistryEntry)> = package
             .behaviors
             .iter()
-            .map(|(name, v)| Ok((name.clone(), RegistryEntry::from_value(name, v)?)))
-            .collect::<anyhow::Result<Vec<_>>>()?;
+            .map(|e| (e.name.clone(), RegistryEntry::from(e)))
+            .collect();
         let facts = describe_all(&package.prefix, &registry, Some(TextKind::Organism))?;
         for kind in [TextKind::Organism, TextKind::Capability] {
             wanted.extend(

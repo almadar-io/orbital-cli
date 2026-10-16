@@ -333,7 +333,36 @@ fn installed_topics() -> anyhow::Result<Value> {
         }
         out.push(json!({ "prefix": pkg.prefix, "package": pkg.name, "topics": topics }));
     }
-    Ok(json!({ "packages": out }))
+    Ok(topics_reply(out))
+}
+
+/// The command a user (or agent) runs to install the standard library into the user store.
+const SETUP_COMMAND: &str = "npx -y @almadar/orb update --global";
+
+/// An empty catalog names the fix instead of answering with nothing to compose.
+fn topics_reply(packages: Vec<Value>) -> Value {
+    if packages.is_empty() {
+        json!({
+            "packages": [],
+            "hint": format!("No behavior packages are installed, so there is nothing to compose yet. Run `{SETUP_COMMAND}` to install @almadar/std (the standard library) into ~/.orb, then call `behaviors` again.")
+        })
+    } else {
+        json!({ "packages": packages })
+    }
+}
+
+/// `orb mcp install`: register the server, then set the language up now, so the client's first
+/// tool call does not wait on the download. A failed setup is a warning naming the fix.
+pub(crate) fn install(
+    dir: &Path,
+    client: McpClient,
+    set_up: impl FnOnce() -> Result<(), String>,
+) -> anyhow::Result<(std::path::PathBuf, Option<String>)> {
+    let path = install_config(dir, client)?;
+    let warning = set_up().err().map(|e| {
+        format!("the language is not set up yet ({e}); run `{SETUP_COMMAND}`, or orb retries on the first tool call")
+    });
+    Ok((path, warning))
 }
 
 fn tool_result(outcome: anyhow::Result<Value>) -> Value {
@@ -356,7 +385,37 @@ fn tool_result(outcome: anyhow::Result<Value>) -> Value {
     }
 }
 
+/// Whether the language has been set up for this server process.
+static LANGUAGE_READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Runs `setup` until it succeeds once, then never again: `orb mcp` is often a fresh user's
+/// first command, and a failed setup (offline) is retried on the next call, never cached.
+pub(crate) fn language_gate(
+    ready: &std::sync::atomic::AtomicBool,
+    setup: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    use std::sync::atomic::Ordering;
+    if ready.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+    setup()?;
+    ready.store(true, Ordering::SeqCst);
+    Ok(())
+}
+
 fn call_tool(params: &Value) -> Value {
+    call_tool_with(params, || {
+        language_gate(&LANGUAGE_READY, || {
+            crate::utils::patterns::ensure_language_ready().map_err(|e| format!("{}: {e}", e.code()))
+        })
+    })
+}
+
+/// A tool runs once the language is set up; a setup that failed is the tool's answer.
+pub(crate) fn call_tool_with(params: &Value, ready: impl FnOnce() -> Result<(), String>) -> Value {
+    if let Err(e) = ready() {
+        return tool_result(Err(anyhow::anyhow!("the language is not set up: {e}")));
+    }
     let name = params["name"].as_str().unwrap_or_default();
     let empty = Map::new();
     let args = params["arguments"].as_object().unwrap_or(&empty);
@@ -483,6 +542,7 @@ pub(crate) fn install_config(dir: &Path, client: McpClient) -> anyhow::Result<st
 
 /// `orb mcp`: newline-delimited JSON-RPC on stdin/stdout until stdin closes.
 pub(crate) fn run_mcp() -> anyhow::Result<()> {
+    super::npm_project::mark_stdout_as_protocol();
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
     for line in stdin.lock().lines() {
@@ -521,6 +581,58 @@ mod tests {
             json!({ "name": name, "arguments": arguments }),
         )["result"]
             .clone()
+    }
+
+    /// `orb mcp` is often a fresh user's first command (the orb.almadar.io MCP route): an
+    /// empty user store has to be set up before a tool reads it, and a failed setup says so.
+    #[test]
+    fn a_tool_reports_a_failed_language_setup_instead_of_an_empty_answer() {
+        let r = super::call_tool_with(
+            &json!({ "name": "behaviors", "arguments": {} }),
+            || Err("ORB_LANGUAGE_DATA_NOT_INSTALLED: offline".to_string()),
+        );
+        assert_eq!(r["isError"], true, "{r}");
+        assert!(r["content"][0]["text"].as_str().unwrap().contains("offline"), "{r}");
+        let ok = super::call_tool_with(&json!({ "name": "behaviors", "arguments": {} }), || Ok(()));
+        assert_eq!(ok["isError"], false, "control: a ready language runs the tool: {ok}");
+    }
+
+    #[test]
+    fn behaviors_with_nothing_installed_names_the_fix() {
+        let empty = super::topics_reply(vec![]);
+        assert_eq!(empty["packages"], json!([]));
+        assert!(empty["hint"].as_str().unwrap().contains("npx -y @almadar/orb update --global"), "{empty}");
+        let some = super::topics_reply(vec![json!({ "prefix": "almadar-std" })]);
+        assert!(some.get("hint").is_none(), "control: an installed catalog carries no hint: {some}");
+    }
+
+    #[test]
+    fn mcp_install_sets_the_language_up_and_a_failure_names_the_fix() {
+        let dir = std::env::temp_dir().join(format!("orb-mcp-install-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (path, warning) = super::install(&dir, super::McpClient::Claude, || Err("offline".to_string())).unwrap();
+        assert!(path.exists(), "the config is written even when setup fails");
+        let warning = warning.expect("a failed setup warns");
+        assert!(warning.contains("offline") && warning.contains("npx -y @almadar/orb update --global"), "{warning}");
+        let (_, ok) = super::install(&dir, super::McpClient::Claude, || Ok(())).unwrap();
+        assert!(ok.is_none(), "control: a set-up language warns nothing");
+    }
+
+    #[test]
+    fn language_setup_runs_until_it_succeeds_then_never_again() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        let ready = AtomicBool::new(false);
+        let runs = AtomicUsize::new(0);
+        let attempt = |ok: bool| {
+            super::language_gate(&ready, || {
+                runs.fetch_add(1, Ordering::SeqCst);
+                if ok { Ok(()) } else { Err("offline".to_string()) }
+            })
+        };
+        assert!(attempt(false).is_err());
+        assert!(attempt(true).is_ok());
+        assert!(attempt(false).is_ok(), "once ready it is not run again");
+        assert_eq!(runs.load(Ordering::SeqCst), 2);
     }
 
     #[test]

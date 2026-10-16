@@ -145,10 +145,24 @@ pub(crate) fn run_verify(args: VerifyCliArgs) -> Result<()> {
                 "no .orb targets (pass a FILE, a behavior NAME, or --registry [--topic <t>])"
             );
         }
+        if engine_list == vec![Engine::Compiled] {
+            return run_poster_capture(
+                &targets,
+                &dir,
+                start_dir.as_path(),
+                user_store.as_path(),
+                port,
+                engine_timeout,
+            );
+        }
         let mut ok = true;
         for target in &targets {
             println!("frames: {}", display(target));
-            let item = target.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown").to_string();
+            let item = target
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("unknown")
+                .to_string();
             let captured = orbital_verify::corpus::resolve_file(target)
                 .and_then(|schema| crate::utils::desktop::frames(&item, schema, &dir));
             if let Err(e) = captured {
@@ -263,6 +277,48 @@ fn run_verify_classic(
 /// declared access-policy denials bucketed separately from genuine failures
 /// (task #129). A target with no `[identity]` entity falls back to today's
 /// single env-driven run (`ALMADAR_PERSONA`, or none).
+/// `--compiled --screenshot-frames <dir>`: each target's `poster`-declaring traits captured as
+/// WebP posters by the compiled web engine, one frame per poster.
+fn run_poster_capture(
+    targets: &[PathBuf],
+    dir: &Path,
+    start_dir: &Path,
+    user_store: &Path,
+    port: u16,
+    engine_timeout: Option<std::time::Duration>,
+) -> Result<()> {
+    let mut ok = true;
+    for (idx, target) in targets.iter().enumerate() {
+        let report = engines::run_compiled_engine(
+            target,
+            Tier::Deep,
+            start_dir,
+            user_store,
+            port.saturating_add(10).saturating_add(idx as u16),
+            port.saturating_add(20).saturating_add(idx as u16),
+            engine_timeout,
+            None,
+            None,
+            Some(dir),
+        );
+        let captured = report.error.is_none() && report.failed == 0 && report.passed > 0;
+        ok &= captured;
+        match &report.error {
+            Some(e) => eprintln!("[ERROR] posters {}: {e}", display(target)),
+            None => println!(
+                "posters: {} — {}/{} captured",
+                display(target),
+                report.passed,
+                report.checks
+            ),
+        }
+    }
+    if !ok {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
 fn run_verify_all_personas(targets: &[PathBuf]) -> Result<()> {
     let mut overall_ok = true;
     for target in targets {
@@ -450,6 +506,7 @@ fn run_verify_unified(
                 engine_timeout,
                 shell_lang.and_then(engines::NativeTarget::from_shell_lang),
                 traits,
+                None,
             ));
         }
 
@@ -701,7 +758,8 @@ fn verify_one(
     let mut l2_server: Option<orbital_core::render_report::RenderReport> = None;
     let mut l2_server_ok = true;
     if run_l2 {
-        let report = crate::utils::desktop::probe(&item, schema.clone(), resolved_traits.as_deref(), false)?;
+        let report =
+            crate::utils::desktop::probe(&item, schema.clone(), resolved_traits.as_deref(), false)?;
         emit(json_mode, report.headline());
         for v in &report.verdicts {
             if !v.passed {
@@ -732,7 +790,12 @@ fn verify_one(
         // Layer 2 (server) — the SAME render contract driven over real HTTP against a
         // live `orbital-server`, verifying server routes + serialization + client together.
         if server_effective {
-            let l2s = crate::utils::desktop::probe(&item, schema.clone(), resolved_traits.as_deref(), true)?;
+            let l2s = crate::utils::desktop::probe(
+                &item,
+                schema.clone(),
+                resolved_traits.as_deref(),
+                true,
+            )?;
             emit(json_mode, format!("{} [server]", l2s.headline()));
             for v in &l2s.verdicts {
                 if !v.passed {
@@ -883,7 +946,14 @@ fn emit_shell_to_tmp(path: &Path, lang: orbital_verify::shell::ShellLang) -> Res
         ShellLang::Rust => "rust",
         ShellLang::TypeScript => "typescript",
     };
-    crate::utils::shell_programs::generate(program, compile_path, path, &tmp_dir, &options, std::collections::BTreeMap::new())?;
+    crate::utils::shell_programs::generate(
+        program,
+        compile_path,
+        path,
+        &tmp_dir,
+        &options,
+        std::collections::BTreeMap::new(),
+    )?;
     Ok(tmp_dir)
 }
 
@@ -982,12 +1052,10 @@ mod tests {
         let pkg_dir = node_modules.join(name);
         let registry_dir = pkg_dir.join("behaviors/registry/ui/atoms");
         std::fs::create_dir_all(&registry_dir).unwrap();
-        std::fs::write(pkg_dir.join("behaviors/behaviors-registry.json"), "{}").unwrap();
-        std::fs::write(pkg_dir.join("behaviors/lolo-behavior-contracts.json"), "{}").unwrap();
         std::fs::write(
             pkg_dir.join("package.json"),
             format!(
-                "{{\n  \"name\": \"{name}\",\n  \"version\": \"1.0.0\",\n  \"orb\": {{\n    \"prefix\": \"{prefix}\",\n    \"registry\": \"behaviors/registry\",\n    \"index\": \"behaviors/behaviors-registry.json\",\n    \"loloContracts\": \"behaviors/lolo-behavior-contracts.json\",\n    \"signatures\": \"behaviors/signatures.lolo\",\n    \"compiler\": \"*\"\n  }}\n}}\n"
+                "{{\n  \"name\": \"{name}\",\n  \"version\": \"1.0.0\",\n  \"orb\": {{\n    \"prefix\": \"{prefix}\",\n    \"registry\": \"behaviors/registry\",\n    \"signatures\": \"behaviors/signatures.lolo\",\n    \"compiler\": \"*\"\n  }}\n}}\n"
             ),
         )
         .unwrap();

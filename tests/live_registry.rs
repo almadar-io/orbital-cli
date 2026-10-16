@@ -67,14 +67,10 @@ fn live_std(project: &Path) -> PathBuf {
     manifest["orb"] = serde_json::json!({
         "prefix": "almadar-std",
         "source": "behaviors/lolo",
-        "index": "behaviors/index.json",
         "compiler": ">=0.0.0"
     });
     std::fs::write(&manifest_path, manifest.to_string()).unwrap();
-    for (rel, body) in [
-        ("behaviors/index.json", r#"{"behaviors":{}}"#),
-        ("behaviors/lolo/app/atoms/std-cartx.lolo", CART),
-    ] {
+    for (rel, body) in [("behaviors/lolo/app/atoms/std-cartx.lolo", CART)] {
         let path = std.join(rel);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, body).unwrap();
@@ -175,11 +171,9 @@ fn live_std_corpus_validates_real_organisms() {
         "compiler": ">=0.0.0"
     });
     let mut linked = vec![declared["source"].as_str().unwrap().to_string()];
-    for key in ["index", "signatures"] {
-        if let Some(rel) = declared[key].as_str() {
-            orb[key] = serde_json::Value::from(rel);
-            linked.push(rel.to_string());
-        }
+    if let Some(rel) = declared["signatures"].as_str() {
+        orb["signatures"] = serde_json::Value::from(rel);
+        linked.push(rel.to_string());
     }
     manifest["orb"] = orb;
     std::fs::write(&manifest_path, manifest.to_string()).unwrap();

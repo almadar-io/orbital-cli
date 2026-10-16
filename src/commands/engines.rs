@@ -799,6 +799,14 @@ fn compiled_args(
     args
 }
 
+/// The argv for capturing every `poster`-declaring trait's WebP poster into `dir` (no walk).
+fn poster_args(target: &Path, port: u16, client_port: u16, dir: &Path) -> Vec<String> {
+    let mut args = compiled_args(target, Tier::Deep, port, client_port, None, None);
+    args.push("--posters".to_string());
+    args.push(dir.display().to_string());
+    args
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_compiled_engine(
     target: &Path,
@@ -810,6 +818,7 @@ pub(crate) fn run_compiled_engine(
     engine_timeout: Option<Duration>,
     native: Option<NativeTarget>,
     traits: Option<&[String]>,
+    posters: Option<&Path>,
 ) -> EngineReport {
     let label = compiled_label(native);
     let resolved = match resolve_node_engine(Engine::Compiled, start_dir, user_store) {
@@ -822,7 +831,10 @@ pub(crate) fn run_compiled_engine(
         Err(e) => return EngineReport::not_available_as(label, e.to_string()),
     };
 
-    let args = compiled_args(target, tier, port, client_port, native, traits);
+    let args = match posters {
+        Some(dir) => poster_args(target, port, client_port, dir),
+        None => compiled_args(target, tier, port, client_port, native, traits),
+    };
 
     let mut cmd = match build_command(resolved, &args) {
         Ok(c) => c,
@@ -1123,6 +1135,27 @@ mod tests {
             .map(|(i, _)| &args[i + 1])
             .collect();
         assert_eq!(flags, vec!["NoteBrowseList", "NoteTagBrowse"]);
+    }
+
+    #[test]
+    fn poster_args_ask_the_tool_to_capture_into_the_dir() {
+        let args = poster_args(Path::new("a.orb"), 3040, 3050, Path::new("/site/static"));
+        let at = args
+            .iter()
+            .position(|a| a == "--posters")
+            .expect("--posters present");
+        assert_eq!(args[at + 1], "/site/static");
+        assert_eq!(args[0], "a.orb");
+        assert!(
+            !args.contains(&"--fast".to_string()) && !args.contains(&"--no-browser".to_string()),
+            "a poster capture needs the browser and no walk budget"
+        );
+    }
+
+    #[test]
+    fn control_a_verify_run_carries_no_posters_flag() {
+        let args = compiled_args(Path::new("a.orb"), Tier::Deep, 3040, 3050, None, None);
+        assert!(!args.iter().any(|a| a == "--posters"));
     }
 
     #[test]

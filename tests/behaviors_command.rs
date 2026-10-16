@@ -83,14 +83,10 @@ case "$1" in
   "orb": {
     "prefix": "fake-behaviors",
     "registry": "behaviors/registry",
-    "index": "behaviors/behaviors-registry.json",
-    "loloContracts": "behaviors/lolo-behavior-contracts.json",
     "compiler": "__COMPILER_RANGE__"
   }
 }
 PKGJSON
-    echo '{}' > "node_modules/@fake-io/behaviors/behaviors/behaviors-registry.json"
-    echo '{}' > "node_modules/@fake-io/behaviors/behaviors/lolo-behavior-contracts.json"
     printf '{"name":"fake-atom","orbitals":[]}\n' > "node_modules/@fake-io/behaviors/behaviors/registry/atoms/fake-atom.orb"
     ;;
   remove)
@@ -128,14 +124,10 @@ case "$1" in
   "orb": {
     "prefix": "almadar-std",
     "registry": "behaviors/registry",
-    "index": "behaviors/behaviors-registry.json",
-    "loloContracts": "behaviors/lolo-behavior-contracts.json",
     "compiler": "__COMPILER_RANGE__"
   }
 }
 PKGJSON
-    echo '{}' > "node_modules/@fake/std/behaviors/behaviors-registry.json"
-    echo '{}' > "node_modules/@fake/std/behaviors/lolo-behavior-contracts.json"
     printf '{"name":"fake-std-atom","orbitals":[]}\n' > "node_modules/@fake/std/behaviors/registry/atoms/fake-std-atom.orb"
     ;;
   remove)
@@ -177,14 +169,10 @@ case "$1" in
   "orb": {
     "prefix": "fake-peer-behaviors",
     "registry": "behaviors/registry",
-    "index": "behaviors/behaviors-registry.json",
-    "loloContracts": "behaviors/lolo-behavior-contracts.json",
     "compiler": "*"
   }
 }
 PKGJSON
-    echo '{}' > "node_modules/@fake-io/peer-behaviors/behaviors/behaviors-registry.json"
-    echo '{}' > "node_modules/@fake-io/peer-behaviors/behaviors/lolo-behavior-contracts.json"
     ;;
   remove)
     rm -rf "node_modules/@fake-io/peer-behaviors"
