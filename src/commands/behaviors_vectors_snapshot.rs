@@ -13,6 +13,7 @@ use super::behaviors_vectors::{
     lookup, user_store_path, user_vectors_dir, Embedder, ProviderEmbedder, Sources, Wanted,
 };
 use super::npm_project::discover_from;
+use super::sidecar_fetch::{resolve_vectors, UreqFetcher};
 
 pub(crate) const DEFAULT_OUT: &str = "dist/vectors.vec";
 
@@ -22,24 +23,29 @@ pub(crate) struct SnapshotReport {
     pub records: usize,
 }
 
-/// Write the snapshot of `wanted` to `out`. Vectors come from `out` itself (when it exists) and the
-/// user store under `user_dir`; a text in neither is embedded by `embedder` into the user store.
+/// Write the snapshot of `wanted` to `out`. Vectors come from `out` itself (when it exists), the
+/// package's declared `locked` snapshot and the user store under `user_dir`; a text in none of them
+/// is embedded by `embedder` into the user store.
 /// Records are sorted by key, so the same inputs give the same bytes.
 pub(crate) fn write_snapshot(
     user_dir: &Path,
     wanted: &[Wanted],
     embedder: Option<&dyn Embedder>,
+    locked: Option<&Path>,
     out: &Path,
 ) -> anyhow::Result<SnapshotReport> {
     if wanted.is_empty() {
         anyhow::bail!("the package has no organism or capability text to snapshot");
     }
+    let mut snapshots = Vec::new();
+    if out.is_file() {
+        snapshots.push(out.to_path_buf());
+    }
+    if let Some(locked) = locked.filter(|l| l.is_file() && *l != out) {
+        snapshots.push(locked.to_path_buf());
+    }
     let sources = Sources {
-        snapshots: if out.is_file() {
-            vec![out.to_path_buf()]
-        } else {
-            Vec::new()
-        },
+        snapshots,
         user_dir: user_dir.to_path_buf(),
     };
     let (model, _) = lookup(&sources, wanted, embedder)?;
@@ -111,11 +117,13 @@ pub(crate) fn run_snapshot(package: PathBuf, out: Option<PathBuf>) -> anyhow::Re
     })?;
     let out = out.unwrap_or_else(|| dir.join(DEFAULT_OUT));
     let wanted = package_wanted(&pkg.prefix)?;
+    let locked = resolve_vectors(pkg, &UreqFetcher)?;
     let embedder = ProviderEmbedder::from_env();
     let report = write_snapshot(
         &user_vectors_dir(),
         &wanted,
         embedder.as_ref().map(|e| e as &dyn Embedder),
+        locked.as_deref(),
         &out,
     )?;
     println!(
@@ -180,7 +188,7 @@ mod tests {
             ("b", "beta"),
             ("c", "beta"),
         ]);
-        let report = write_snapshot(&user, &w, Some(&fake), &out).unwrap();
+        let report = write_snapshot(&user, &w, Some(&fake), None, &out).unwrap();
         assert_eq!(report.records, 3, "duplicate texts share one record");
         assert_eq!(report.model, CANONICAL_MODEL);
         let first = std::fs::read(&out).unwrap();
@@ -188,7 +196,7 @@ mod tests {
         assert!(store.get(&text_key(CANONICAL_MODEL, "alpha")).is_some());
         assert!(store.get(&text_key(CANONICAL_MODEL, "unrelated")).is_none());
         // Control: a rerun (now answered from the stores, no provider) writes the same bytes.
-        write_snapshot(&user, &w, None, &out).unwrap();
+        write_snapshot(&user, &w, None, None, &out).unwrap();
         assert_eq!(std::fs::read(&out).unwrap(), first);
     }
 
@@ -202,13 +210,14 @@ mod tests {
             &user,
             &wanted(&[("a", "old"), ("b", "keep")]),
             Some(&fake),
+            None,
             &out,
         )
         .unwrap();
-        let report = write_snapshot(&user, &wanted(&[("b", "keep")]), None, &out).unwrap();
+        let report = write_snapshot(&user, &wanted(&[("b", "keep")]), None, None, &out).unwrap();
         assert_eq!(report.records, 1);
         let before = std::fs::read(&out).unwrap();
-        let err = write_snapshot(&user, &wanted(&[("n", "never embedded")]), None, &out)
+        let err = write_snapshot(&user, &wanted(&[("n", "never embedded")]), None, None, &out)
             .unwrap_err()
             .to_string();
         assert!(err.starts_with("ORB_VECTOR_PROVIDER_MISSING"), "{err}");
@@ -218,7 +227,7 @@ mod tests {
     #[test]
     fn nothing_to_snapshot_is_an_error() {
         let dir = tempfile::tempdir().unwrap();
-        let err = write_snapshot(dir.path(), &[], None, &dir.path().join("v.vec")).unwrap_err();
+        let err = write_snapshot(dir.path(), &[], None, None, &dir.path().join("v.vec")).unwrap_err();
         assert!(err.to_string().contains("no organism or capability text"));
     }
 }

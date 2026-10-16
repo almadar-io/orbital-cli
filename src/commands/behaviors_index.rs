@@ -25,6 +25,8 @@ use std::rc::Rc;
 const INDEX_RULES: &str = "behavior-index-2";
 const WORKERS: usize = 8;
 const MAX_IMPORT_DEPTH: usize = 16;
+/// A worker drops the programs it has loaded after this many behaviors, bounding what a cold derive holds.
+const RELOAD_EVERY: usize = 48;
 
 /// One shipped behavior, as the readers of the index need it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -309,21 +311,27 @@ impl<'a> Programs<'a> {
         }
     }
 
+    /// The program of `name` from the first package that holds it.
     fn orb_of(&mut self, name: &str) -> anyhow::Result<Option<Rc<Value>>> {
-        if let Some(hit) = self.cache.get(name) {
-            return Ok(hit.clone());
-        }
         let Some(&owner) = self.owners.get(name) else {
-            self.cache.insert(name.to_string(), None);
             return Ok(None);
         };
-        let spec = format!("{}/{name}", self.packages[owner].prefix);
+        let prefix = self.packages[owner].prefix.clone();
+        self.orb_in(&prefix, name)
+    }
+
+    /// The program of `name` from the package with `prefix`.
+    fn orb_in(&mut self, prefix: &str, name: &str) -> anyhow::Result<Option<Rc<Value>>> {
+        let spec = format!("{prefix}/{name}");
+        if let Some(hit) = self.cache.get(&spec) {
+            return Ok(hit.clone());
+        }
         let loaded = self
             .loader
             .load(&spec, None, &mut ImportChain::new())
             .map_err(|e| anyhow::anyhow!("cannot load `{spec}`: {e}"))?;
         let value = Rc::new(serde_json::to_value(&loaded.schema)?);
-        self.cache.insert(name.to_string(), Some(value.clone()));
+        self.cache.insert(spec, Some(value.clone()));
         Ok(Some(value))
     }
 }
@@ -360,7 +368,7 @@ fn entry_of(
     let fail = |e: String| anyhow::anyhow!("{}/{}: {e}", pkg.prefix, file.name);
     let orb = programs
         .borrow_mut()
-        .orb_of(&file.name)?
+        .orb_in(&pkg.prefix, &file.name)?
         .ok_or_else(|| fail("the package holds no such program".to_string()))?;
     let failure = std::cell::RefCell::new(None);
     let lookup = |name: &str| match programs.borrow_mut().orb_of(name) {
@@ -446,11 +454,16 @@ fn derive(
         for _ in 0..WORKERS.min(files.len()) {
             scope.spawn(|| {
                 let programs = std::cell::RefCell::new(Programs::new(packages, &owners));
+                let mut done = 0usize;
                 loop {
                     let i = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     let Some(file) = files.get(i) else {
                         break;
                     };
+                    if done > 0 && done % RELOAD_EVERY == 0 {
+                        *programs.borrow_mut() = Programs::new(packages, &owners);
+                    }
+                    done += 1;
                     let entry = entry_of(pkg, file, &hand_authored, &programs);
                     if let Ok(mut slot) = slots[i].lock() {
                         *slot = Some(entry);
@@ -523,8 +536,7 @@ fn fingerprint(packages: &[BehaviorPackage], pi: usize) -> anyhow::Result<String
         }
         feed(&mut hasher, "package", format!("{}@{}:{}", pkg.name, pkg.version, pkg.prefix).as_bytes());
         feed(&mut hasher, "files", pkg.files.join("\n").as_bytes());
-        let mut paths: Vec<PathBuf> = index_registry_source(&pkg.registry)?.into_values().collect();
-        paths.sort();
+        let paths: Vec<PathBuf> = indexed_files(pkg)?.into_iter().map(|f| f.path).collect();
         for path in paths {
             let rel = path.strip_prefix(pkg.registry.root()).unwrap_or(&path);
             feed(&mut hasher, &rel.to_string_lossy(), &std::fs::read(&path)?);
@@ -618,7 +630,15 @@ mod tests {
         let Ok(packages) = super::super::npm_project::discover_from(&cwd) else {
             return;
         };
-        crate::utils::require_language_data().expect("the workspace installs the language");
+        if let Err(e) = crate::utils::require_language_data() {
+            let message = format!("{e:#}");
+            assert!(
+                message.contains("ORB_LANGUAGE_DATA_INCOMPATIBLE"),
+                "the workspace language failed to install: {message}"
+            );
+            eprintln!("skipped: the workspace std is ahead of this orb: {message}");
+            return;
+        }
         orbital_compiler::loader::register_source_lowerer(crate::lower_lolo_file);
         let golden: Value = serde_json::from_str(GOLDEN).unwrap();
         let mut checked = 0;

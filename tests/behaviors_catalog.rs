@@ -124,6 +124,7 @@ fn orb(dir: &Path, args: &[&str]) -> Output {
         .args(args)
         .current_dir(dir)
         .env("ALMADAR_VECTORS_DIR", dir.join(".user-vectors"))
+        .env("ALMADAR_DERIVED_CACHE", dir.join(".derived"))
         .env_remove("EMBEDDING_PROVIDER")
         .env_remove("EMBEDDING_API_KEY")
         .env_remove("OPEN_ROUTER_API_KEY")
@@ -239,6 +240,90 @@ fn catalog_filters_by_topic_tier_and_exposure_and_sorts() {
         ],
     ));
     assert!(none.as_array().unwrap().is_empty());
+}
+
+#[test]
+fn catalog_without_vectors_needs_no_store_and_carries_the_pattern_tag() {
+    let p = project("m2");
+    let beta_card = p.path().join("node_modules/beta/behaviors/lolo/ui/core/atoms/beta-card.lolo");
+    write(
+        &beta_card,
+        &format!("{CARD_LOLO};; @pattern \"card\"\n"),
+    );
+    let v = json(&orb(
+        p.path(),
+        &["behaviors", "catalog", "--json", "--no-vectors", "alpha", "beta"],
+    ));
+    let entries = v.as_array().unwrap();
+    assert_eq!(entries.len(), 4, "two packages of two behaviors, whatever their vector models");
+    for e in entries {
+        assert_eq!(e["vectors"], serde_json::json!({}));
+        assert_eq!(e["model"], "");
+    }
+    let beta = entries.iter().find(|e| e["behavior"] == "beta/beta-card").unwrap();
+    assert_eq!(beta["pattern"], "card");
+    assert_eq!(beta["capabilities"], serde_json::json!(["display"]));
+    // Control: a behavior without the tag carries no pattern key.
+    let alpha = entries.iter().find(|e| e["behavior"] == "alpha/alpha-card").unwrap();
+    assert!(alpha.get("pattern").is_none());
+    // Control: with vectors the same two packages are refused (mixed models), so the flag is what lifted it.
+    assert!(!orb(p.path(), &["behaviors", "catalog", "--json", "alpha", "beta"]).status.success());
+}
+
+#[test]
+fn the_derived_index_is_cached_by_content_and_follows_an_edit() {
+    let p = project("m1");
+    let derived = p.path().join(".derived/behavior-index");
+    let run = || {
+        json(&orb(
+            p.path(),
+            &["behaviors", "catalog", "--json", "--no-vectors", "alpha"],
+        ))
+    };
+    let cached = || -> Vec<String> {
+        std::fs::read_dir(&derived)
+            .map(|d| {
+                d.flatten()
+                    .map(|e| e.file_name().to_string_lossy().to_string())
+                    .filter(|n| n.starts_with("alpha-") && n.ends_with(".json"))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    assert!(cached().is_empty());
+    let first = run();
+    let once = cached();
+    assert_eq!(once.len(), 1, "one derived index per package: {once:?}");
+    assert_eq!(run(), first, "a warm read answers the same");
+    assert_eq!(cached(), once);
+    // An edit to a source changes what is derived, and replaces the cached file.
+    let card = p.path().join("node_modules/alpha/behaviors/lolo/ui/core/atoms/alpha-card.lolo");
+    write(&card, &CARD_LOLO.replace("palette", "both"));
+    let edited = run();
+    let card_of = |v: &serde_json::Value| {
+        v.as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["behavior"] == "alpha/alpha-card")
+            .unwrap()["exposure"]
+            .clone()
+    };
+    assert_eq!(card_of(&first), "palette");
+    assert_eq!(card_of(&edited), "both");
+    let after = cached();
+    assert_eq!(after.len(), 1);
+    assert_ne!(after, once);
+}
+
+#[test]
+fn a_lolo_header_tag_outside_the_vocabulary_is_a_named_error() {
+    let p = project("m1");
+    let card = p.path().join("node_modules/alpha/behaviors/lolo/ui/core/atoms/alpha-card.lolo");
+    write(&card, &CARD_LOLO.replace("palette", "sideways"));
+    let out = orb(p.path(), &["behaviors", "catalog", "--json", "--no-vectors", "alpha"]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("alpha/alpha-card") && err.contains("sideways"), "{err}");
 }
 
 #[test]
@@ -694,6 +779,7 @@ fn smoke_real_std_package() {
             .args(args)
             .current_dir(&root)
             .env("ALMADAR_VECTORS_DIR", store.path())
+            .env("ALMADAR_DERIVED_CACHE", store.path())
             .env_remove("EMBEDDING_PROVIDER")
             .env_remove("OPEN_ROUTER_API_KEY")
             .env_remove("OPENAI_API_KEY")
@@ -878,6 +964,7 @@ fn snapshot_reuses_locked_package_vectors_with_warm_cache_and_no_provider() {
             .current_dir(root)
             .env("ORB_NO_AUTO_SETUP", "1")
             .env("ALMADAR_VECTORS_DIR", &user)
+            .env("ALMADAR_DERIVED_CACHE", root.join(".derived"))
             .env("ALMADAR_SIDECAR_CACHE", &cache)
             .env_remove("EMBEDDING_PROVIDER")
             .env_remove("EMBEDDING_API_KEY")
