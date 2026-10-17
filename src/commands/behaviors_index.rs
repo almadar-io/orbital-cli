@@ -643,6 +643,8 @@ mod tests {
         let golden: Value = serde_json::from_str(GOLDEN).unwrap();
         let mut checked = 0;
         let mut unloadable = 0;
+        // `BEHAVIOR_INDEX_RECORD=<file>` writes what the sample derives to now, to re-record the golden from.
+        let mut recorded = serde_json::Map::new();
         for (prefix, sample) in golden.as_object().unwrap() {
             let Some(pi) = packages.iter().position(|p| &p.prefix == prefix && p.is_link) else {
                 continue;
@@ -660,6 +662,23 @@ mod tests {
             }
             let mut mismatches = Vec::new();
             for entry in derived {
+                let mut now = serde_json::Map::new();
+                now.insert("level".into(), json!(entry.level));
+                now.insert("topic".into(), json!(entry.topic));
+                now.insert("description".into(), json!(entry.description));
+                now.insert("defaultEntityName".into(), json!(entry.default_entity_name));
+                now.insert("connectableEvents".into(), json!(entry.connectable_events));
+                now.insert("traits".into(), json!(entry.traits));
+                now.insert("traitCapabilities".into(), json!(entry.trait_capabilities));
+                if let Some(v) = &entry.exposure { now.insert("exposure".into(), json!(v)); }
+                if let Some(v) = &entry.capabilities { now.insert("capabilities".into(), json!(v)); }
+                if let Some(v) = &entry.pattern { now.insert("pattern".into(), json!(v)); }
+                recorded
+                    .entry(prefix.clone())
+                    .or_insert_with(|| json!({}))
+                    .as_object_mut()
+                    .unwrap()
+                    .insert(entry.name.clone(), Value::Object(now));
                 let want = &sample[entry.name.as_str()];
                 let strings = |key: &str| -> Vec<String> {
                     want[key]
@@ -711,7 +730,12 @@ mod tests {
                 }
                 checked += 1;
             }
-            assert!(mismatches.is_empty(), "differs from the retired registry: {mismatches:#?}");
+            if std::env::var_os("BEHAVIOR_INDEX_RECORD").is_none() {
+                assert!(mismatches.is_empty(), "differs from the retired registry: {mismatches:#?}");
+            }
+        }
+        if let Some(path) = std::env::var_os("BEHAVIOR_INDEX_RECORD") {
+            std::fs::write(path, serde_json::to_string(&Value::Object(recorded)).unwrap()).unwrap();
         }
         eprintln!("compared {checked} behaviors, {unloadable} skipped");
         assert!(checked > 0 && unloadable * 4 <= checked, "most of the sample must be comparable");

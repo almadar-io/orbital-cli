@@ -23,6 +23,8 @@ orbital-compiler = { path = "../orbital-compiler" }
 orbital-lolo = { path = "../orbital-lolo" }
 orbital-server = { path = "../orbital-server" }
 orbital-verify = { path = "../orbital-verify" }
+# The sandbox manifest `orb emit manifest` builds and signs.
+io-gate = { path = "../io-gate" }
 # Embedding client for `orb behaviors` vectors (embed on miss); no Postgres/Google providers.
 orbital-integrations = { path = "../orbital-integrations", default-features = false, features = ["http"] }
 

@@ -1,7 +1,8 @@
 //! `orb emit <target> <file>` — dump per-schema generated code for inspection.
 //!
-//! Three targets:
+//! Targets:
 //!
+//! - `manifest` — the per-unit sandbox manifest (`docs/Almadar_Sandbox.md` Contracts §2), signed when given a key.
 //! - `orb` — lower a `.lolo` file to canonical `.orb` JSON.
 //! - `ts`  — run the TypeScript backend and stream the resulting code.
 //! - `py`  — run the Python backend and stream the resulting code.
@@ -37,6 +38,8 @@ pub enum EmitTarget {
     Py,
     /// `.lolo` source printed from the lowered IR (accepts `.orb` or `.lolo` input).
     Lolo,
+    /// The io-gate manifest of each deployment unit (accepts `.lolo` or `.orb` input).
+    Manifest,
 }
 
 /// How to render the filtered files to the sink.
@@ -78,6 +81,14 @@ pub struct EmitOptions {
     /// with an inline base64-encoded map). Ignored for `target = orb` and
     /// for `format = json | raw`.
     pub map: bool,
+    /// `target = manifest`: the one deployment unit to emit; absent = every unit of the program.
+    pub unit: Option<String>,
+    /// `target = manifest`: the directory receiving `<unit>.manifest.json`; absent = stdout (one unit only).
+    pub out: Option<PathBuf>,
+    /// `target = manifest`: the file holding the 64-hex-character ed25519 signing seed.
+    pub sign_key: Option<PathBuf>,
+    /// `target = manifest`: the id the deploy key set knows the signing key by.
+    pub key_id: Option<String>,
 }
 
 /// Run the emit pipeline end-to-end.
@@ -92,6 +103,7 @@ pub fn run(opts: EmitOptions) -> Result<()> {
     match opts.target {
         EmitTarget::Orb => emit_orb(&source, opts.output.as_deref(), &source_path),
         EmitTarget::Lolo => emit_lolo(&source, opts.output.as_deref(), &source_path),
+        EmitTarget::Manifest => emit_manifest(&opts, &source, &source_path),
         EmitTarget::Ts | EmitTarget::Py => emit_code(opts, &source, &source_path),
     }
 }
@@ -143,11 +155,7 @@ fn emit_orb(source: &str, output: Option<&Path>, source_path: &str) -> Result<()
             orbital_core::schema::parse_schema(&crate::utils::translate_schema_content(&s)).ok()
         });
     let schema = parse_any_syntax_with_prior(source, prior.as_ref(), source_path)?;
-    let value =
-        serde_json::to_value(&schema).map_err(|e| anyhow!("Failed to serialize schema: {}", e))?;
-    let cleaned = crate::strip_json_nulls(value);
-    let json = serde_json::to_string_pretty(&orbital_core::util::canonical_json(&cleaned))
-        .map_err(|e| anyhow!("Failed to serialize schema: {}", e))?;
+    let json = canonical_orb_json(&schema)?;
     write_output(&json, output)?;
     // A program with locales ships its merged catalogs beside the emitted `.orb`
     // (`<stem>.<locale>.json`, the same files `orb resolve --output` writes).
@@ -188,6 +196,86 @@ fn emit_orb(source: &str, output: Option<&Path>, source_path: &str) -> Result<()
         }
         _ => Ok(()),
     }
+}
+
+/// The canonical `.orb` JSON text of `schema`: the bytes `orb emit orb --output <file>` writes.
+fn canonical_orb_json(schema: &orbital_core::schema::OrbitalSchema) -> Result<String> {
+    let value =
+        serde_json::to_value(schema).map_err(|e| anyhow!("Failed to serialize schema: {}", e))?;
+    let cleaned = crate::strip_json_nulls(value);
+    serde_json::to_string_pretty(&orbital_core::util::canonical_json(&cleaned))
+        .map_err(|e| anyhow!("Failed to serialize schema: {}", e))
+}
+
+// --- Target: manifest ------------------------------------------------------
+
+/// One manifest per deployment unit. `program` is the sha256 of the canonical `.orb` JSON of the parsed program
+/// (see [`canonical_orb_json`]); grants, egress, ticks and credentials are read from the resolved program, so the
+/// atoms it `uses` are counted. Without `--sign-key` the manifest is written unsigned and the gate refuses it.
+fn emit_manifest(opts: &EmitOptions, source: &str, source_path: &str) -> Result<()> {
+    if opts.output.is_some() {
+        return Err(anyhow!(
+            "`orb emit manifest` writes one file per unit: use --out <dir>, not --output"
+        ));
+    }
+    let signer = match (&opts.sign_key, &opts.key_id) {
+        (Some(path), Some(key_id)) => {
+            let text = std::fs::read_to_string(path)
+                .map_err(|e| anyhow!("Failed to read {}: {}", path.display(), e))?;
+            let seed = io_gate::manifest::parse_seed(&text).ok_or_else(|| {
+                anyhow!("{}: the seed must be 64 hex characters", path.display())
+            })?;
+            Some((seed, key_id.as_str()))
+        }
+        (None, None) => None,
+        _ => return Err(anyhow!("--sign-key and --key-id go together")),
+    };
+    crate::utils::require_language_data()?;
+    let schema = parse_any_syntax(source, source_path)?;
+    let digest = io_gate::manifest::sha256_hex(canonical_orb_json(&schema)?.as_bytes());
+    let resolved =
+        orbital_verify::resolve_schema_with_source(schema, Some(Path::new(source_path)))?;
+    let units = match &opts.unit {
+        Some(unit) => vec![unit.clone()],
+        None => io_gate::unit_names(&resolved),
+    };
+    if units.is_empty() {
+        return Err(anyhow!("{source_path}: `deployment` declares no units"));
+    }
+    if opts.out.is_none() && units.len() > 1 {
+        return Err(anyhow!(
+            "{source_path} has {} units ({}): pass --out <dir> or --unit <name>",
+            units.len(),
+            units.join(", ")
+        ));
+    }
+    for unit in &units {
+        let manifest = io_gate::Manifest::build(&resolved, unit, &digest)
+            .map_err(|e| anyhow!("{source_path}: {e}"))?;
+        let rendered = match signer {
+            Some((seed, key_id)) => {
+                io_gate::manifest::sign_manifest(&manifest.to_unsigned_json(), key_id, &seed)
+                    .map_err(|e| anyhow!("{e}"))?
+            }
+            None => serde_json::to_string_pretty(&manifest.to_unsigned_json())
+                .map_err(|e| anyhow!("Failed to serialize the manifest: {}", e))?,
+        };
+        match &opts.out {
+            Some(dir) => {
+                std::fs::create_dir_all(dir)
+                    .map_err(|e| anyhow!("Failed to create {}: {}", dir.display(), e))?;
+                let file = dir.join(format!("{unit}.manifest.json"));
+                write_output(&rendered, Some(file.as_path()))?;
+            }
+            None => write_output(&rendered, None)?,
+        }
+        if signer.is_none() {
+            eprintln!(
+                "orb: manifest for unit `{unit}` is UNSIGNED (no --sign-key); the io-gate refuses it until `io-gate sign` signs it"
+            );
+        }
+    }
+    Ok(())
 }
 
 // --- Target: lolo ----------------------------------------------------------
@@ -257,7 +345,7 @@ fn emit_code(opts: EmitOptions, source: &str, source_path: &str) -> Result<()> {
             crate::utils::shell_programs::emit("typescript", &module, Some(resolved), program_path, &generate_options, shell_options)?
         }
         EmitTarget::Py => crate::utils::shell_programs::emit("python", &module, None, program_path, &generate_options, Default::default())?,
-        EmitTarget::Orb | EmitTarget::Lolo => {
+        EmitTarget::Orb | EmitTarget::Lolo | EmitTarget::Manifest => {
             unreachable!("orb and lolo targets are routed before code generation")
         }
     };
@@ -622,7 +710,7 @@ mod filter {
 
             (Section::AllEntities, EmitTarget::Ts) => path.starts_with("packages/shared/"),
             (Section::AllEntities, EmitTarget::Py) => path.starts_with("entities/"),
-            (Section::AllEntities, EmitTarget::Orb | EmitTarget::Lolo) => unreachable!(),
+            (Section::AllEntities, EmitTarget::Orb | EmitTarget::Lolo | EmitTarget::Manifest) => unreachable!(),
 
             (Section::Entity(name), EmitTarget::Ts) => {
                 path.starts_with("packages/shared/")
@@ -634,7 +722,7 @@ mod filter {
                 path.starts_with("entities/")
                     && (path.contains(name) || content.contains(&format!("class {}", name)))
             }
-            (Section::Entity(_), EmitTarget::Orb | EmitTarget::Lolo) => unreachable!(),
+            (Section::Entity(_), EmitTarget::Orb | EmitTarget::Lolo | EmitTarget::Manifest) => unreachable!(),
 
             (Section::AllTraits, EmitTarget::Ts) => {
                 path.contains("/traits/") || path.starts_with("packages/server/src/routes/")
@@ -642,7 +730,7 @@ mod filter {
             (Section::AllTraits, EmitTarget::Py) => {
                 path.starts_with("traits/") || path.starts_with("routes/")
             }
-            (Section::AllTraits, EmitTarget::Orb | EmitTarget::Lolo) => unreachable!(),
+            (Section::AllTraits, EmitTarget::Orb | EmitTarget::Lolo | EmitTarget::Manifest) => unreachable!(),
 
             (Section::Trait(name), EmitTarget::Ts) => {
                 let hooks_dir = format!("/traits/use{}", name);
@@ -656,7 +744,7 @@ mod filter {
                 let snake = to_snake(name);
                 path == format!("traits/{}.py", snake) || path == format!("routes/{}.py", snake)
             }
-            (Section::Trait(_), EmitTarget::Orb | EmitTarget::Lolo) => unreachable!(),
+            (Section::Trait(_), EmitTarget::Orb | EmitTarget::Lolo | EmitTarget::Manifest) => unreachable!(),
 
             (Section::AllPages, EmitTarget::Ts) => {
                 path.starts_with("packages/client/src/features/")
@@ -665,19 +753,19 @@ mod filter {
                 // Python backend doesn't currently emit per-page files.
                 false
             }
-            (Section::AllPages, EmitTarget::Orb | EmitTarget::Lolo) => unreachable!(),
+            (Section::AllPages, EmitTarget::Orb | EmitTarget::Lolo | EmitTarget::Manifest) => unreachable!(),
 
             (Section::Page(name), EmitTarget::Ts) => {
                 path.starts_with(&format!("packages/client/src/features/{}", name))
             }
             (Section::Page(_), EmitTarget::Py) => false,
-            (Section::Page(_), EmitTarget::Orb | EmitTarget::Lolo) => unreachable!(),
+            (Section::Page(_), EmitTarget::Orb | EmitTarget::Lolo | EmitTarget::Manifest) => unreachable!(),
 
             (Section::AllServices, EmitTarget::Ts) => path.contains("/services/"),
             (Section::AllServices, EmitTarget::Py) => {
                 path.starts_with("services/") || path.contains("service")
             }
-            (Section::AllServices, EmitTarget::Orb | EmitTarget::Lolo) => unreachable!(),
+            (Section::AllServices, EmitTarget::Orb | EmitTarget::Lolo | EmitTarget::Manifest) => unreachable!(),
 
             (Section::Service(name), EmitTarget::Ts) => {
                 path.contains("/services/") && path.contains(name)
@@ -685,7 +773,7 @@ mod filter {
             (Section::Service(name), EmitTarget::Py) => {
                 path.contains("service") && (path.contains(name) || content.contains(name))
             }
-            (Section::Service(_), EmitTarget::Orb | EmitTarget::Lolo) => unreachable!(),
+            (Section::Service(_), EmitTarget::Orb | EmitTarget::Lolo | EmitTarget::Manifest) => unreachable!(),
         }
     }
 
@@ -713,7 +801,7 @@ mod filter {
                 p.contains("__tests__") || p.ends_with(".test.tsx") || p.ends_with(".test.ts")
             }
             (OnlyKind::Tests, EmitTarget::Py) => p.starts_with("tests/") || p.starts_with("test_"),
-            (_, EmitTarget::Orb | EmitTarget::Lolo) => unreachable!(),
+            (_, EmitTarget::Orb | EmitTarget::Lolo | EmitTarget::Manifest) => unreachable!(),
         }
     }
 
@@ -783,7 +871,7 @@ mod render {
         let lang = match target {
             EmitTarget::Ts => "typescript",
             EmitTarget::Py => "python",
-            EmitTarget::Orb | EmitTarget::Lolo => "json",
+            EmitTarget::Orb | EmitTarget::Lolo | EmitTarget::Manifest => "json",
         };
         let mut out = String::new();
         for f in files {

@@ -384,6 +384,7 @@ pub(crate) fn run_cascade(path: &Path, steps: &serde_json::Value) -> anyhow::Res
         // (an id it generated, a list it changed) and feed it to the next step.
         let entities: serde_json::Map<String, serde_json::Value> = outcomes
             .iter()
+            .filter(|(_, r)| r.executed)
             .map(|(t, _)| {
                 let row = kernel.snapshot_trait(t, None).entity;
                 (t.to_string(), serde_json::to_value(&row).unwrap_or(serde_json::Value::Null))

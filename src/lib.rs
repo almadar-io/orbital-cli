@@ -691,7 +691,7 @@ enum Commands {
     /// (e.g. a single entity or trait). See
     /// `docs/Almadar_Compiler_Emit_Code.md` for the selector grammar.
     Emit {
-        /// Output target: `orb`, `ts`, `py`, or `lolo`.
+        /// Output target: `orb`, `ts`, `py`, `lolo`, or `manifest` (the io-gate manifest of each deployment unit).
         #[arg(value_name = "TARGET")]
         target: emit::EmitTarget,
 
@@ -731,6 +731,23 @@ enum Commands {
         /// Has no effect on `target = orb` or `--format json|raw`.
         #[arg(long)]
         map: bool,
+
+        /// `manifest` only: the deployment unit to emit (default: every unit of the program).
+        #[arg(long, value_name = "NAME")]
+        unit: Option<String>,
+
+        /// `manifest` only: write `<unit>.manifest.json` into this directory (default: stdout, one unit).
+        #[arg(long, value_name = "DIR")]
+        out: Option<PathBuf>,
+
+        /// `manifest` only: the file holding the 64-hex-character ed25519 signing seed. Without it the
+        /// manifest is written unsigned.
+        #[arg(long, value_name = "PATH", requires = "key_id")]
+        sign_key: Option<PathBuf>,
+
+        /// `manifest` only: the id the deploy key set knows the signing key by.
+        #[arg(long, value_name = "ID", requires = "sign_key")]
+        key_id: Option<String>,
     },
 
     /// Reverse-lookup a position in an emitted file to its `.orb` origin.
@@ -1512,6 +1529,10 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
             only,
             server,
             map,
+            unit,
+            out,
+            sign_key,
+            key_id,
         }) => emit::run(emit::EmitOptions {
             target,
             path,
@@ -1521,6 +1542,10 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
             only,
             server,
             map,
+            unit,
+            out,
+            sign_key,
+            key_id,
         }),
         Some(Commands::EmitTrace { position }) => emit::trace::run(&position),
         // No subcommand: a truly bare `orb` (no trailing words) spawns the

@@ -353,3 +353,94 @@ fn emit_lolo_rejects_unreadable_input() {
     let (_, _, ok) = run_orb(&["emit", "lolo", "/nonexistent/file.orb"]);
     assert!(!ok);
 }
+
+// --- target = manifest ------------------------------------------------------
+
+fn two_unit_program() -> serde_json::Value {
+    let orbital = |name: &str, os_grants: serde_json::Value, effects: serde_json::Value| {
+        serde_json::json!({
+            "name": name,
+            "osGrants": os_grants,
+            "entity": { "name": format!("{name}Item"), "fields": [{ "name": "id", "type": "string" }] },
+            "traits": [{
+                "name": format!("{name}Flow"),
+                "stateMachine": {
+                    "states": [{ "name": "idle", "isInitial": true }],
+                    "transitions": [{ "from": "idle", "to": "idle", "event": "GO", "effects": effects }]
+                }
+            }]
+        })
+    };
+    serde_json::json!({
+        "name": "placed",
+        "egress": ["https://api.example.org"],
+        "deployment": { "api": ["Orders"], "web": ["Storefront"] },
+        "orbitals": [
+            orbital(
+                "Orders",
+                serde_json::json!({ "exec": ["git"] }),
+                serde_json::json!([["http", "GET", "https://api.example.org", "/v1",
+                    { "auth": { "scheme": "bearer", "credential": "stripe" } }, { "emit": { "success": "OK" } }]]),
+            ),
+            orbital("Storefront", serde_json::json!({}), serde_json::json!([])),
+        ]
+    })
+}
+
+#[test]
+fn emit_manifest_writes_a_manifest_per_unit_signs_on_request_and_refuses_unknown_units() {
+    use sha2::{Digest, Sha256};
+    let dir = tempfile::tempdir().expect("tempdir");
+    let program = dir.path().join("placed.orb");
+    std::fs::write(&program, two_unit_program().to_string()).expect("write program");
+    let program = program.to_str().unwrap();
+    let out = dir.path().join("manifests");
+    let out_arg = out.to_str().unwrap();
+
+    let (canonical, _, ok) = run_orb(&["emit", "orb", program]);
+    assert!(ok);
+    let digest: String = Sha256::digest(canonical.trim_end_matches('\n').as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+
+    let (_, stderr, ok) = run_orb(&["emit", "manifest", program, "--out", out_arg]);
+    assert!(ok, "emit manifest failed. stderr:\n{stderr}");
+    assert!(stderr.contains("UNSIGNED"), "{stderr}");
+    let read = |unit: &str| -> serde_json::Value {
+        let text = std::fs::read_to_string(out.join(format!("{unit}.manifest.json"))).expect(unit);
+        serde_json::from_str(&text).expect("manifest json")
+    };
+    let (api, web) = (read("api"), read("web"));
+    assert_eq!(api["unit"], "api");
+    assert_eq!(api["program"], format!("sha256:{digest}"));
+    assert_eq!(api["grants"]["exec"], serde_json::json!(["git"]));
+    assert_eq!(api["credentials"], serde_json::json!({ "Orders": ["stripe"] }));
+    assert_eq!(api["egress"], serde_json::json!(["https://api.example.org"]));
+    assert!(api["orbitals"].get("Storefront").is_none());
+    assert_eq!(web["unit"], "web");
+    assert_eq!(web["credentials"], serde_json::json!({}));
+    assert_eq!(web["grants"]["exec"], serde_json::json!([]));
+    assert!(api.get("signature").is_none());
+
+    let (_, stderr, ok) = run_orb(&["emit", "manifest", program]);
+    assert!(!ok && stderr.contains("2 units"), "{stderr}");
+    let (_, stderr, ok) = run_orb(&["emit", "manifest", program, "--unit", "nope"]);
+    assert!(!ok && stderr.contains("MANIFEST_BUILD_UNKNOWN_UNIT"), "{stderr}");
+
+    let seed = dir.path().join("seed");
+    std::fs::write(&seed, "07".repeat(32)).expect("seed");
+    let (stdout, stderr, ok) = run_orb(&[
+        "emit", "manifest", program, "--unit", "api",
+        "--sign-key", seed.to_str().unwrap(), "--key-id", "deploy-1",
+    ]);
+    assert!(ok, "signed emit failed. stderr:\n{stderr}");
+    assert!(!stderr.contains("UNSIGNED"), "{stderr}");
+    let manifest = io_gate::Manifest::parse(&stdout).expect("signed manifest parses");
+    let keys = io_gate::manifest::KeySet::from_keys([(
+        "deploy-1".to_string(),
+        io_gate::manifest::public_key_of(&[7; 32]).expect("public key"),
+    )]);
+    assert_eq!(manifest.verify(&keys, &digest), Ok(()));
+    assert!(manifest.credential_allowed("Orders", "stripe"));
+}
