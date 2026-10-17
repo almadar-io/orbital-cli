@@ -469,6 +469,20 @@ fn run_execute(
             first_initial_state = current_state.clone();
         }
 
+        let declared = td
+            .state_machine
+            .events
+            .iter()
+            .flatten()
+            .find(|declared| declared.key == event)
+            .and_then(|declared| declared.payload_schema.as_deref());
+        if let Some(schema) = declared {
+            let failures = orbital_core::runtime::payload_validation::validate_event_payload(event, &payload_value, schema);
+            if !failures.is_empty() {
+                anyhow::bail!("{}", orbital_core::runtime::payload_validation::format_payload_failures(&failures));
+            }
+        }
+
         let event_payload = EventPayload::new(event, payload_value.clone());
         let mut ctx = BindingContext::new();
         ctx.set_entity(entity_value.clone());

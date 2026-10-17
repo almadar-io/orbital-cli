@@ -1,0 +1,93 @@
+{
+  "name": "ExecuteRequiredPayloadFixture",
+  "version": "1.0.0",
+  "orbitals": [
+    {
+      "name": "Gate",
+      "entity": {
+        "name": "Gate",
+        "collection": "gates",
+        "persistence": "persistent",
+        "fields": [
+          {
+            "name": "id",
+            "required": true,
+            "type": "string"
+          },
+          {
+            "name": "ready",
+            "type": "boolean"
+          },
+          {
+            "name": "count",
+            "type": "number"
+          }
+        ]
+      },
+      "traits": [
+        {
+          "name": "SpanStart",
+          "category": "interaction",
+          "linkedEntity": "Gate",
+          "scope": "collection",
+          "emits": [
+            {
+              "event": "START_SPAN",
+              "scope": "external",
+              "tier": "domain"
+            }
+          ],
+          "stateMachine": {
+            "events": [
+              {
+                "key": "START_SPAN",
+                "name": "Start span",
+                "payloadSchema": [
+                  {
+                    "name": "name",
+                    "type": "string",
+                    "required": true
+                  }
+                ]
+              }
+            ],
+            "states": [
+              {
+                "name": "idle",
+                "isInitial": true
+              },
+              {
+                "name": "active"
+              }
+            ],
+            "transitions": [
+              {
+                "event": "START_SPAN",
+                "from": "idle",
+                "to": "active",
+                "effects": [
+                  [
+                    "set",
+                    "@entity.count",
+                    1
+                  ]
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "pages": [
+        {
+          "name": "GatePage",
+          "path": "/gate",
+          "traits": [
+            {
+              "ref": "SpanStart"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

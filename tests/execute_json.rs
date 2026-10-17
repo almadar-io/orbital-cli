@@ -107,3 +107,30 @@ fn unresolvable_schema_reports_success_false() {
     assert_eq!(result["success"], false);
     assert!(result["error"].as_str().is_some(), "expected an error message, got: {result}");
 }
+
+fn execute_required_payload(payload: &str) -> serde_json::Value {
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/execute_required_payload.orb");
+    let output = Command::new(orb_bin())
+        .args(["execute", fixture.to_str().unwrap(), "--event", "START_SPAN", "--payload", payload, "--json"])
+        .output()
+        .expect("failed to spawn orb binary");
+    serde_json::from_slice(&output.stdout).expect("execute --json output is not valid JSON")
+}
+
+#[test]
+fn a_missing_required_payload_field_is_refused_before_any_transition() {
+    let result = execute_required_payload("{}");
+    assert_eq!(result["success"], false, "{result}");
+    assert_eq!(
+        result["error"],
+        "Payload validation failed for event 'START_SPAN': name (missing, expected string)"
+    );
+    assert_eq!(result["transitions"].as_array().map(Vec::len), Some(0));
+}
+
+#[test]
+fn control_a_present_required_payload_field_fires_the_transition() {
+    let result = execute_required_payload(r#"{"name": "root"}"#);
+    assert_eq!(result["success"], true, "{result}");
+    assert_eq!(result["finalState"], "active");
+}
