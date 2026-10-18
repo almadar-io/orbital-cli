@@ -23,7 +23,8 @@ use orbital_core::runtime::{EntitySource, InMemoryEntityCache, KernelConfig, Run
 use orbital_core::sidecar_store::SidecarFetcher;
 use orbital_core::vector_store::{quantize, text_key, Key, Layered, Quantized, VectorStore};
 use orbital_core::{OrbitalSchema, RuntimeEnvironment};
-use orbital_integrations::transport::{Transport, UreqTransport};
+use orbital_core::runtime::http_service::Transport;
+use orbital_core::runtime::native_transport::UreqTransport;
 
 use super::npm_project::discover_from;
 

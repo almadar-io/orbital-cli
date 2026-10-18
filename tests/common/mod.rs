@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 use std::sync::Once;
 
-const SHELLS: &[&str] = &["typescript", "python", "rust", "mobile", "android", "ios", "chrome"];
+const SHELLS: &[&str] = &["typescript", "python", "rust", "android", "ios", "chrome"];
 
 static BUILD: Once = Once::new();
 

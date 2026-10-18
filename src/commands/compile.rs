@@ -226,7 +226,6 @@ fn compile_mixed(
         }
     }
     match backend {
-        Some(ShellType::Mobile) => anyhow::bail!("Mobile shell cannot be used as a backend"),
         Some(ShellType::Android) => anyhow::bail!("Android shell cannot be used as a backend"),
         Some(ShellType::Ios) => anyhow::bail!("iOS shell cannot be used as a backend"),
         _ => {}
@@ -309,7 +308,6 @@ fn compile_mixed(
             Some(ShellType::Python) => "http://localhost:8000",
             Some(ShellType::Typescript) => "http://localhost:3030",
             Some(ShellType::Rust) => "http://localhost:3030",
-            Some(ShellType::Mobile) => "http://localhost:8000",
             Some(ShellType::Android) => "http://localhost:8000",
             Some(ShellType::Ios) => "http://localhost:8000",
             Some(ShellType::ChromeExtension) => "http://localhost:8000",
@@ -323,12 +321,6 @@ fn compile_mixed(
             ),
             Some(ShellType::Python) => {
                 format!("# API URL for backend server\nAPI_URL={}\n", backend_url)
-            }
-            Some(ShellType::Mobile) => {
-                format!(
-                    "# API URL for backend server\nEXPO_PUBLIC_API_URL={}\n",
-                    backend_url
-                )
             }
             Some(ShellType::Rust) => {
                 format!("# API URL for backend server\nAPI_URL={}\n", backend_url)
@@ -395,9 +387,6 @@ fn generate_docker_compose(frontend: Option<ShellType>, backend: Option<ShellTyp
                 compose.push_str("      - CORS_ORIGINS=http://localhost:3000\n");
                 compose.push_str("\n");
             }
-            ShellType::Mobile => {
-                // Mobile apps don't have a backend component
-            }
             ShellType::Android => {
                 // Android apps don't have a backend component
             }
@@ -416,7 +405,6 @@ fn generate_docker_compose(frontend: Option<ShellType>, backend: Option<ShellTyp
             Some(ShellType::Python) => "http://localhost:8000",
             Some(ShellType::Typescript) => "http://localhost:3030",
             Some(ShellType::Rust) => "http://localhost:3030",
-            Some(ShellType::Mobile) => "http://localhost:8000",
             Some(ShellType::Android) => "http://localhost:8000",
             Some(ShellType::Ios) => "http://localhost:8000",
             Some(ShellType::ChromeExtension) => "http://localhost:8000",
@@ -444,14 +432,6 @@ fn generate_docker_compose(frontend: Option<ShellType>, backend: Option<ShellTyp
                 compose.push_str(&format!("      - API_URL={}\n", backend_url));
                 compose.push_str("    depends_on:\n");
                 compose.push_str("      - backend\n");
-            }
-            ShellType::Mobile => {
-                // Mobile apps don't run in Docker - they run on device/simulator
-                // Just document the backend dependency
-                compose.push_str("  # Mobile app - run locally with:\n");
-                compose.push_str("  #   cd frontend && npm install && npx expo start\n");
-                compose.push_str("  # Backend URL for mobile app:\n");
-                compose.push_str(&format!("  #   EXPO_PUBLIC_API_URL={}\n", backend_url));
             }
             ShellType::Android => {
                 // Android apps don't run in Docker - they run on device/emulator

@@ -68,8 +68,6 @@ pub enum ShellType {
     Typescript,
     /// Python with FastAPI and PyTorch
     Python,
-    /// React Native mobile application
-    Mobile,
     /// Rust native application with an Axum server and a Dioxus (or TUI) client
     Rust,
     /// Native Android application with Jetpack Compose
@@ -86,7 +84,6 @@ impl ShellType {
         match self {
             ShellType::Typescript => "typescript",
             ShellType::Python => "python",
-            ShellType::Mobile => "mobile",
             ShellType::Rust => "rust",
             ShellType::Android => "android",
             ShellType::Ios => "ios",
