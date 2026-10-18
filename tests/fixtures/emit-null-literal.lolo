@@ -1,0 +1,32 @@
+app emit-null-literal [
+  version: "1.0.0",
+  description: "A trait that emits a payload carrying an authored null literal."
+]
+orbital NullOrbital {
+  entity NullCall [runtime] {
+    id : string!
+  }
+
+  trait NullEmitter -> NullCall [integration, instance] {
+    initial: idle
+
+    state idle {
+      INIT -> idle
+
+      NULL_GO -> idle
+        (emit NULL_FAILED { code: null, message: "nothing to do" })
+    }
+
+    emits {
+      NULL_FAILED -> external {
+        code : string
+        message : string!
+      }
+        @description "The run failed: an optional code, absent here, and a message."
+        @synonyms "failed, error"
+        @tier "primary"
+    }
+  }
+
+  page "/null" as NullPage -> NullEmitter
+}

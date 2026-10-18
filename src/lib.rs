@@ -402,7 +402,7 @@ enum Commands {
         runtime: bool,
 
         /// Engine: emitted TS app, 4-phase pipeline — shells out to
-        /// orbital-verify-unified. With `--shell ios|android` it walks the
+        /// runtime-verify --compiled. With `--shell ios|android` it walks the
         /// native app on the Simulator/emulator instead of the web client.
         #[arg(long)]
         compiled: bool,
@@ -609,6 +609,25 @@ enum Commands {
         /// Force headless mode even when a display is available
         #[arg(long)]
         headless: bool,
+    },
+
+    /// Serve a program with its compiled client and no Node process (sign-in and store from the environment)
+    Host {
+        /// Path to the .orb or .lolo program
+        #[arg(value_name = "FILE")]
+        path: PathBuf,
+
+        /// Port for the server
+        #[arg(short, long, default_value = "3000")]
+        port: u16,
+
+        /// Address to listen on
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+
+        /// The built client (`orb compile --mode client`, then its build): served as static files beside the API
+        #[arg(long, value_name = "DIR")]
+        client_dir: Option<PathBuf>,
     },
 
     /// Convert an existing project or website to an .orb program
@@ -983,7 +1002,7 @@ enum EnginesCommand {
         /// Install only the runtime engine (`@almadar-io/runtime-verify-tool`).
         #[arg(long)]
         runtime: bool,
-        /// Install only the compiled engine (`@almadar-io/verify-tool`).
+        /// Install only the compiled engine (the `orbital-verify` bin of `@almadar-io/runtime-verify-tool`).
         #[arg(long)]
         compiled: bool,
         /// Skip the Chromium browser install step.
@@ -1395,6 +1414,7 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
             port,
             headless,
         }) => run_dev_mode(&path, port, headless),
+        Some(Commands::Host { path, port, host, client_dir }) => commands::dev::run_host_mode(&path, &host, port, client_dir),
         Some(Commands::Convert {
             path,
             output,

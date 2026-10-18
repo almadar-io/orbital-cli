@@ -2,7 +2,7 @@
 //! frontend/backend compilation and docker-compose emission.
 
 use crate::utils::{
-    detect_language, detect_syntax, load_project_patterns, shell_programs, strip_json_nulls,
+    detect_language, detect_syntax, load_project_patterns, shell_programs,
     translate_schema_content, InputSyntax,
 };
 use crate::{HostArg, ServerFrameworkArg, ShellMode, ShellType};
@@ -128,13 +128,11 @@ pub(crate) fn compile_schema(
                 }
             );
         }
-        // Round-trip through serde_json::Value and strip nulls so the
-        // emitted .orb matches the sparse hand-authored shape used in
-        // existing fixtures (no `"foo": null` clutter).
+        // A schema field left unset is skipped by its type's serializer; a `null` the program authored inside an
+        // expression or payload literal is a value and stays (`orb lower` and `orb resolve` keep it too).
         let value = serde_json::to_value(&schema)
             .map_err(|e| anyhow::anyhow!("Failed to serialize lowered schema: {}", e))?;
-        let cleaned = strip_json_nulls(value);
-        let json = serde_json::to_string_pretty(&orbital_core::util::canonical_json(&cleaned))
+        let json = serde_json::to_string_pretty(&orbital_core::util::canonical_json(&value))
             .map_err(|e| anyhow::anyhow!("Failed to serialize lowered schema: {}", e))?;
         let target = if let Some(emit) = emit_orb {
             emit.to_path_buf()
@@ -252,8 +250,7 @@ fn compile_mixed(
                 })?;
         let value = serde_json::to_value(&schema)
             .map_err(|e| anyhow::anyhow!("Failed to serialize lowered schema: {}", e))?;
-        let cleaned = strip_json_nulls(value);
-        let json = serde_json::to_string_pretty(&orbital_core::util::canonical_json(&cleaned))
+        let json = serde_json::to_string_pretty(&orbital_core::util::canonical_json(&value))
             .map_err(|e| anyhow::anyhow!("Failed to serialize lowered schema: {}", e))?;
         let temp_dir = std::env::temp_dir();
         let temp_path = temp_dir.join("_orbital_lolo_lowered_mixed.orb");

@@ -712,7 +712,7 @@ fn verify_one(
     // Native-shell compile gate — emit the resolved schema to a temp dir with
     // the requested shell, then run the (toolchain-agnostic) gate from
     // `orbital_verify::shell`. This is the home of the Python `py_compile`
-    // gate that used to live in `orbital-verify-unified`, plus android/ios.
+    // gate that used to live in `runtime-verify --compiled`, plus android/ios.
     let mut shell_ok = true;
     let mut shell_verdict: Option<orbital_verify::observers::Verdict> = None;
     if let Some(lang) = shell_lang_effective {

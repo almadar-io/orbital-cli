@@ -2,19 +2,17 @@
 //! (`CARGO_BIN_EXE_orb`) against a temp project with a stub `bun`
 //! (`ORB_BUN_PATH`, no network) that materializes a fake engine npm package
 //! (`bin` entry printing a canned JSON report) on `add` and deletes it on
-//! `remove`, mirroring `behaviors_command.rs`'s pattern. The two engine
-//! package names are the real, stable identifiers from
-//! `baked_engine_pins.rs` (`@almadar-io/runtime-verify-tool` /
-//! `@almadar-io/verify-tool`); the PINNED VERSION is read from the `bun add`
-//! spec the stub receives, never hardcoded, so this stays correct across
-//! pin bumps.
+//! `remove`, mirroring `behaviors_command.rs`'s pattern. The engines are the
+//! two bins (`runtime-verify`, `orbital-verify`) of the one package named in
+//! `baked_engine_pins.rs` (`@almadar-io/runtime-verify-tool`); the PINNED
+//! VERSION is read from the `bun add` spec the stub receives, never
+//! hardcoded, so this stays correct across pin bumps.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 const RUNTIME_PKG: &str = "@almadar-io/runtime-verify-tool";
-const COMPILED_PKG: &str = "@almadar-io/verify-tool";
 
 fn orb_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_orb"))
@@ -51,10 +49,11 @@ impl Project {
 }
 
 /// `bun add -d <pkg>@<ver>` materializes `node_modules/<pkg>` with a
-/// `package.json` (`bin` entry unless `ORB_ENGINE_STUB_NO_BIN` is set) and a
-/// `dist/index.js` that prints a canned report matching whichever engine's
-/// fold (`fold_runtime_json`/`fold_compiled_json`) expects; `remove` deletes
-/// it; `bun x playwright install chromium` drops a marker file.
+/// `package.json` (both `bin` entries unless `ORB_ENGINE_STUB_NO_BIN` is set),
+/// a `dist/index.js` printing the canned report the runtime fold
+/// (`fold_runtime_json`) expects and a `dist/orbital-verify.js` printing the
+/// one the compiled fold (`fold_compiled_json`) expects; `remove` deletes it;
+/// `bun x playwright install chromium` drops a marker file.
 const BUN_ENGINE_STUB: &str = r#"#!/bin/sh
 set -e
 case "$1" in
@@ -62,16 +61,8 @@ case "$1" in
     spec="$3"
     pkg="${spec%@*}"
     ver="${spec##*@}"
-    case "$pkg" in
-      *runtime-verify-tool*)
-        bin_key="runtime-verify"
-        body='{"summary":{"total":1,"pass":1,"error":0,"warning":0},"results":[],"coverage":{"covered":1,"total":1,"ratio":1}}'
-        ;;
-      *)
-        bin_key="orbital-verify"
-        body='{"totalChecks":1,"totalPassed":1,"totalFailed":0,"projects":[]}'
-        ;;
-    esac
+    runtime_body='{"summary":{"total":1,"pass":1,"error":0,"warning":0},"results":[],"coverage":{"covered":1,"total":1,"ratio":1}}'
+    compiled_body='{"totalChecks":1,"totalPassed":1,"totalFailed":0,"projects":[]}'
     mkdir -p "node_modules/$pkg/dist"
     if [ -n "$ORB_ENGINE_STUB_NO_BIN" ]; then
       cat > "node_modules/$pkg/package.json" <<EOF
@@ -85,12 +76,15 @@ EOF
 {
   "name": "$pkg",
   "version": "$ver",
-  "bin": { "$bin_key": "./dist/index.js" }
+  "bin": { "runtime-verify": "./dist/index.js", "orbital-verify": "./dist/orbital-verify.js" }
 }
 EOF
     fi
     cat > "node_modules/$pkg/dist/index.js" <<EOF
-console.log('$body');
+console.log('$runtime_body');
+EOF
+    cat > "node_modules/$pkg/dist/orbital-verify.js" <<EOF
+console.log('$compiled_body');
 EOF
     ;;
   remove)
@@ -171,14 +165,15 @@ fn install_with_no_flags_installs_both_engines() {
         project.pkg_dir(RUNTIME_PKG).is_dir(),
         "runtime engine not installed"
     );
+    let manifest = std::fs::read_to_string(project.pkg_dir(RUNTIME_PKG).join("package.json")).unwrap();
     assert!(
-        project.pkg_dir(COMPILED_PKG).is_dir(),
-        "compiled engine not installed"
+        manifest.contains("\"orbital-verify\""),
+        "compiled engine entry not installed: {manifest}"
     );
 }
 
 #[test]
-fn install_runtime_only_skips_compiled() {
+fn install_runtime_only_installs_the_one_package_that_carries_both_engines() {
     let project = Project::new();
     let bun_stub = write_engine_bun_stub(&project);
     let output = orb(
@@ -194,7 +189,15 @@ fn install_runtime_only_skips_compiled() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains(RUNTIME_PKG), "stdout: {stdout}");
     assert!(project.pkg_dir(RUNTIME_PKG).is_dir());
-    assert!(!project.pkg_dir(COMPILED_PKG).exists());
+    let listed = orb(&project, &bun_stub, &["engines", "list", "--json"]);
+    let rows: serde_json::Value = serde_json::from_slice(&listed.stdout).expect("valid json array");
+    let compiled = rows
+        .as_array()
+        .expect("array")
+        .iter()
+        .find(|r| r["entry"] == "orbital-verify")
+        .expect("compiled row present");
+    assert_eq!(compiled["installed"], true);
 }
 
 #[test]
@@ -307,10 +310,7 @@ fn list_text_shows_installed_and_not_installed_rows() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains(RUNTIME_PKG), "stdout: {stdout}");
-    assert!(
-        stdout.contains(COMPILED_PKG) && stdout.contains("not installed"),
-        "stdout: {stdout}"
-    );
+    assert!(stdout.contains("orbital-verify"), "stdout: {stdout}");
 }
 
 #[test]
@@ -336,16 +336,17 @@ fn list_json_reports_installed_and_not_installed_flags() {
 
     let runtime_row = rows
         .iter()
-        .find(|r| r["package"] == RUNTIME_PKG)
+        .find(|r| r["entry"] == "runtime-verify")
         .expect("runtime row present");
     assert_eq!(runtime_row["installed"], true);
     assert_eq!(runtime_row["entry"], "runtime-verify");
 
     let compiled_row = rows
         .iter()
-        .find(|r| r["package"] == COMPILED_PKG)
+        .find(|r| r["entry"] == "orbital-verify")
         .expect("compiled row present");
-    assert_eq!(compiled_row["installed"], false);
+    assert_eq!(compiled_row["package"], RUNTIME_PKG);
+    assert_eq!(compiled_row["installed"], true);
 }
 
 // ---------------------------------------------------------------------------

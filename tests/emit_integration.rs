@@ -444,3 +444,125 @@ fn emit_manifest_writes_a_manifest_per_unit_signs_on_request_and_refuses_unknown
     assert_eq!(manifest.verify(&keys, &digest), Ok(()));
     assert!(manifest.credential_allowed("Orders", "stripe"));
 }
+
+// --- `orb compile` keeps what the program authored --------------------------
+
+fn null_keys(value: &serde_json::Value, found: &mut Vec<String>) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, child) in map {
+                if child.is_null() {
+                    found.push(key.clone());
+                }
+                null_keys(child, found);
+            }
+        }
+        serde_json::Value::Array(items) => items.iter().for_each(|item| null_keys(item, found)),
+        _ => {}
+    }
+}
+
+fn find_emit<'a>(value: &'a serde_json::Value, event: &str) -> Option<&'a serde_json::Value> {
+    match value {
+        serde_json::Value::Array(items) => {
+            if items.first().and_then(|v| v.as_str()) == Some("emit") && items.get(1).and_then(|v| v.as_str()) == Some(event) {
+                return items.get(2);
+            }
+            items.iter().find_map(|item| find_emit(item, event))
+        }
+        serde_json::Value::Object(map) => map.values().find_map(|child| find_emit(child, event)),
+        _ => None,
+    }
+}
+
+/// An authored `null` inside a payload literal is a value the program runs with (`orb lower`, `orb resolve` and the
+/// embedded kernel all keep it), so `orb compile` must not strip it from `schema.orb`, `resolved.orb` or `program.json`;
+/// a schema field left unset stays out of the JSON, which the control checks: the only null anywhere is the authored one.
+#[test]
+fn compile_keeps_an_authored_null_payload_literal_and_leaves_unset_schema_fields_out() {
+    let lolo = fixtures_dir().join("emit-null-literal.lolo");
+    let out = tempfile::tempdir().expect("tempdir");
+    let (_stdout, stderr, ok) = run_orb(&["compile", lolo.to_str().unwrap(), "--shell", "typescript", "--host", "kernel", "-o", out.path().to_str().unwrap()]);
+    assert!(ok, "compile exited non-zero. stderr:\n{stderr}");
+
+    for file in ["schema.orb", "resolved.orb", "packages/shared/src/program.json"] {
+        let text = std::fs::read_to_string(out.path().join(file)).unwrap_or_else(|e| panic!("{file}: {e}"));
+        let json: serde_json::Value = serde_json::from_str(&text).unwrap_or_else(|e| panic!("{file} is not JSON: {e}"));
+        let payload = find_emit(&json, "NULL_FAILED").unwrap_or_else(|| panic!("{file}: the emit effect is missing"));
+        assert_eq!(payload.get("code"), Some(&serde_json::Value::Null), "{file}: the authored `code: null` was dropped: {payload}");
+        assert_eq!(payload["message"], "nothing to do", "{file}");
+        let mut nulls = Vec::new();
+        null_keys(&json, &mut nulls);
+        assert_eq!(nulls, vec!["code".to_string()], "{file}: a null other than the authored one is in the output");
+    }
+}
+
+// --- `emit orb`, the manifest program hash and `stamp` keep authored nulls ----
+
+/// A deployable program whose one transition emits a payload carrying an authored `null`.
+fn null_payload_program() -> serde_json::Value {
+    serde_json::json!({
+        "name": "nulls",
+        "deployment": { "api": ["Orders"] },
+        "orbitals": [{
+            "name": "Orders",
+            "entity": { "name": "OrdersItem", "fields": [{ "name": "id", "type": "string" }] },
+            "traits": [{
+                "name": "OrdersFlow",
+                "stateMachine": {
+                    "states": [{ "name": "idle", "isInitial": true }],
+                    "transitions": [{
+                        "from": "idle", "to": "idle", "event": "GO",
+                        "effects": [["emit", "NULL_FAILED", { "code": null, "message": "nope" }]]
+                    }]
+                }
+            }]
+        }]
+    })
+}
+
+fn assert_only_the_authored_null(json: &serde_json::Value, what: &str) {
+    let payload = find_emit(json, "NULL_FAILED").unwrap_or_else(|| panic!("{what}: the emit effect is missing"));
+    assert_eq!(payload.get("code"), Some(&serde_json::Value::Null), "{what}: the authored `code: null` was dropped: {payload}");
+    let mut nulls = Vec::new();
+    null_keys(json, &mut nulls);
+    assert_eq!(nulls, vec!["code".to_string()], "{what}: a null other than the authored one is in the output");
+}
+
+#[test]
+fn emit_orb_the_manifest_hash_and_stamp_keep_an_authored_null_and_the_hash_is_stable() {
+    use sha2::{Digest, Sha256};
+    let dir = tempfile::tempdir().expect("tempdir");
+    let program = dir.path().join("nulls.orb");
+    std::fs::write(&program, null_payload_program().to_string()).expect("write program");
+    let program = program.to_str().unwrap();
+
+    let (canonical, stderr, ok) = run_orb(&["emit", "orb", program]);
+    assert!(ok, "emit orb failed. stderr:\n{stderr}");
+    assert_only_the_authored_null(&serde_json::from_str(&canonical).expect("emit orb is JSON"), "emit orb");
+
+    let digest: String = Sha256::digest(canonical.trim_end_matches('\n').as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let mut hashes = Vec::new();
+    for run in ["first", "second"] {
+        let out = dir.path().join(run);
+        let (_, stderr, ok) = run_orb(&["emit", "manifest", program, "--out", out.to_str().unwrap()]);
+        assert!(ok, "emit manifest ({run}) failed. stderr:\n{stderr}");
+        let manifest: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(out.join("api.manifest.json")).expect("api manifest")).expect("manifest json");
+        hashes.push(manifest["program"].as_str().expect("program hash").to_string());
+    }
+    assert_eq!(hashes[0], hashes[1], "the manifest program hash differs between two runs");
+    assert_eq!(hashes[0], format!("sha256:{digest}"), "the hash is not the hash of the program `emit orb` writes, authored null included");
+
+    let (stamped, stderr, ok) = run_orb(&["stamp", program]);
+    assert!(ok, "stamp failed. stderr:\n{stderr}");
+    let stamped: serde_json::Value = serde_json::from_str(&stamped).expect("stamp is JSON");
+    let payload = find_emit(&stamped, "NULL_FAILED").expect("stamp: the emit effect is missing");
+    assert_eq!(payload.get("code"), Some(&serde_json::Value::Null), "stamp: the authored `code: null` was dropped: {payload}");
+    let mut nulls = Vec::new();
+    null_keys(&stamped, &mut nulls);
+    assert_eq!(nulls, vec!["code".to_string()], "stamp: a null other than the authored one is in the output");
+}

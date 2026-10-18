@@ -47,8 +47,13 @@ pub(crate) fn validate_schema(
     final_program: bool,
 ) -> anyhow::Result<()> {
     if json_output {
-        let output =
-            validation_report(path, patterns_path, services_path, deny_warnings, final_program)?;
+        let output = validation_report(
+            path,
+            patterns_path,
+            services_path,
+            deny_warnings,
+            final_program,
+        )?;
         println!("{}", serde_json::to_string_pretty(&output)?);
         return Ok(());
     }
@@ -113,7 +118,7 @@ pub(crate) fn language_data_json_error(
             "Run `{}`, then retry — the schema was NOT evaluated.",
             orbital_core::language_data::install_command(package)
         ),
-        _ => "Validator environment error — the schema was NOT evaluated; retry, do not edit the schema"
+        _ => "Validator environment error — run `orb update --global`, then retry; the schema was NOT evaluated, do not edit the schema"
             .to_string(),
     };
     ValidationJsonError {
@@ -164,7 +169,10 @@ mod duplicate_behavior_diagnostic_tests {
             path_a: "infra/std-calendar.lolo".into(),
             path_b: "ui/std-calendar.lolo".into(),
         };
-        assert_eq!(super::discovery_error_json_code(&error), "ORB_BEHAVIOR_NAME_DUPLICATE");
+        assert_eq!(
+            super::discovery_error_json_code(&error),
+            "ORB_BEHAVIOR_NAME_DUPLICATE"
+        );
         assert!(error.to_string().contains("infra/std-calendar.lolo"));
         assert!(error.to_string().contains("ui/std-calendar.lolo"));
     }
@@ -426,7 +434,11 @@ fn validate_schema_json(
         return Ok(output);
     }
 
-    lazy_errors.extend(used_secret_findings(&session).into_iter().map(finding_json_error));
+    lazy_errors.extend(
+        used_secret_findings(&session)
+            .into_iter()
+            .map(finding_json_error),
+    );
 
     // Collect stats
     // Note: Traits are now only defined inline within orbitals, not at schema level.
@@ -680,7 +692,10 @@ fn program_findings(
     findings
 }
 
-fn secret_flow_finding(violation: &orbital_core::secrets::SecretFlowViolation, path: String) -> Finding {
+fn secret_flow_finding(
+    violation: &orbital_core::secrets::SecretFlowViolation,
+    path: String,
+) -> Finding {
     let code = violation.code().to_string();
     let message = violation.message();
     Finding {
@@ -713,7 +728,10 @@ fn used_secret_findings(session: &orbital_compiler::phases::inline::InlineSessio
             return;
         };
         for v in orbital_core::secrets::secret_flow_violations(&program) {
-            findings.push(secret_flow_finding(&v, format!("{}: {}", loaded.schema.name, v.path())));
+            findings.push(secret_flow_finding(
+                &v,
+                format!("{}: {}", loaded.schema.name, v.path()),
+            ));
         }
     });
     findings

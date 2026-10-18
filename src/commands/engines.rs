@@ -1,7 +1,7 @@
 //! `orb verify` unified engine orchestration.
 //!
 //! The runtime and compiled engines are separate node CLIs (`tools/runtime-verify`,
-//! `tools/orbital-verify-unified`) that play the SAME circuit the in-process rust
+//! `tools/runtime-verify --compiled`) that play the SAME circuit the in-process rust
 //! engine plays, just in a different place (`docs/Almadar_Verification.md`). This
 //! module resolves + spawns them under a tier-scaled watchdog, parses their JSON
 //! reports, and folds every engine's findings into one `UnifiedVerifyReport`
@@ -34,7 +34,7 @@ impl Engine {
 }
 
 /// A native device the compiled engine can walk instead of the web client
-/// (`tools/orbital-verify-unified --target`).
+/// (`tools/runtime-verify --compiled --target`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NativeTarget {
     Ios,
@@ -42,7 +42,7 @@ pub(crate) enum NativeTarget {
 }
 
 impl NativeTarget {
-    /// The `--target` value `tools/orbital-verify-unified` takes.
+    /// The `--target` value `tools/runtime-verify --compiled` takes.
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             NativeTarget::Ios => "ios",
@@ -761,10 +761,10 @@ fn fold_runtime_json(doc: &serde_json::Value) -> EngineReport {
 }
 
 // ---------------------------------------------------------------------------
-// Compiled engine (tools/orbital-verify-unified)
+// Compiled engine (tools/runtime-verify --compiled)
 // ---------------------------------------------------------------------------
 
-/// The argv `tools/orbital-verify-unified` is spawned with for one compiled-engine run.
+/// The argv `tools/runtime-verify --compiled` is spawned with for one compiled-engine run.
 fn compiled_args(
     target: &Path,
     tier: Tier,

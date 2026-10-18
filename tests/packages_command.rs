@@ -1,5 +1,5 @@
-//! `orb update` · `orb add` · `orb remove` · `orb list` (and the first-run
-//! setup). bun is stubbed (`ORB_BUN_PATH`): `add` links each named package to a
+//! `orb update` · `orb add` · `orb remove` · `orb list` (and that a read-only
+//! command never sets the store up). bun is stubbed (`ORB_BUN_PATH`): `add` links each named package to a
 //! real installed copy or a fixture, `remove` deletes it — so every check runs
 //! against real data. The default programs (the TypeScript shell, orb-desktop)
 //! are fixture packages whose binaries answer the real protocol.
@@ -217,33 +217,50 @@ fn write_app(dir: &Path) {
     write(&dir.join("app.orb"), r#"{"name":"a","version":"1.0.0","orbitals":[]}"#);
 }
 
+fn bun_calls(f: &Fixture) -> bool {
+    f.dir.path().join("node_modules").exists()
+}
+
 #[test]
-fn the_first_command_sets_the_user_store_up() {
+fn a_read_only_command_never_sets_the_user_store_up() {
     let f = fixture(None, (IR_VERSION, IR_VERSION));
     write_app(f.dir.path());
     let out = orb(&f, &["validate", "app.orb"]);
     let t = text(&out);
-    assert!(t.contains("running `orb update --global`"), "{t}");
-    assert!(f.dir.path().join(".orb/node_modules/@almadar/core").exists(), "{t}");
-    let again = orb(&f, &["validate", "app.orb"]);
-    assert!(!text(&again).contains("orb update --global`"), "control: a set-up store is not set up again — {}", text(&again));
+    assert!(!out.status.success(), "{t}");
+    assert!(t.contains("ORB_LANGUAGE_DATA_NOT_INSTALLED"), "{t}");
+    assert!(t.contains("orb update --global"), "{t}");
+    assert!(!t.contains("running `orb update"), "{t}");
+    assert!(!f.dir.path().join(".orb").exists(), "the store is untouched: {t}");
+    assert!(!bun_calls(&f), "bun was never run: {t}");
 }
 
 #[test]
-fn first_run_setup_can_be_turned_off() {
+fn an_invalid_user_store_fails_with_the_typed_error_and_its_fix() {
     let f = fixture(None, (IR_VERSION, IR_VERSION));
     write_app(f.dir.path());
-    let out = Command::new(orb_bin())
-        .args(["validate", "app.orb"])
-        .current_dir(f.dir.path())
-        .env("ORB_BUN_PATH", &f.bun)
-        .env("HOME", f.dir.path())
-        .env("ORB_NO_AUTO_SETUP", "1")
-        .output()
-        .expect("spawn orb");
+    let core = f.dir.path().join(".orb/node_modules/@almadar/core/package.json");
+    write(&core, r#"{"name":"@almadar/core","version":"1.0.0","orbLanguage":{}}"#);
+    let before = std::fs::read(&core).unwrap();
+    let out = orb(&f, &["validate", "app.orb"]);
     let t = text(&out);
-    assert!(t.contains("ORB_LANGUAGE_DATA_NOT_INSTALLED"), "{t}");
-    assert!(!f.dir.path().join(".orb/node_modules").exists(), "{t}");
+    assert!(!out.status.success(), "{t}");
+    assert!(t.contains("ORB_LANGUAGE_DATA_"), "{t}");
+    assert!(t.contains("orb update --global"), "{t}");
+    assert!(!t.contains("running `orb update"), "{t}");
+    assert_eq!(std::fs::read(&core).unwrap(), before, "{t}");
+    assert!(!bun_calls(&f), "no install ran: {t}");
+}
+
+#[test]
+fn control_an_explicit_global_update_makes_the_same_command_work() {
+    let f = fixture(None, (IR_VERSION, IR_VERSION));
+    write_app(f.dir.path());
+    let up = orb(&f, &["update", "--global"]);
+    assert!(up.status.success(), "{}", text(&up));
+    assert!(f.dir.path().join(".orb/node_modules/@almadar/core").exists());
+    let out = orb(&f, &["validate", "app.orb"]);
+    assert!(!text(&out).contains("ORB_LANGUAGE_DATA_"), "{}", text(&out));
 }
 
 #[test]
@@ -256,5 +273,6 @@ fn edge_a_projects_own_core_is_never_set_up_over() {
     write_app(f.dir.path());
     let t = text(&orb(&f, &["validate", "app.orb"]));
     assert!(t.contains("ORB_LANGUAGE_DATA_INVALID"), "{t}");
-    assert!(!t.contains("orb update --global"), "{t}");
+    assert!(!t.contains("running `orb update"), "{t}");
+    assert!(!f.dir.path().join(".orb").exists(), "{t}");
 }

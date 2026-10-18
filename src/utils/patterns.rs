@@ -100,62 +100,17 @@ pub(crate) fn require_language_data() -> anyhow::Result<()> {
     ensure_language_ready().map_err(|e| anyhow::anyhow!("{}: {e}", e.code()))
 }
 
-/// Turns first-run setup off (CI, or a caller that wants the raw error).
-pub(crate) const NO_AUTO_SETUP_ENV: &str = "ORB_NO_AUTO_SETUP";
-
-/// The language preflight, setting the user store up on first run: when the
-/// core and std this directory resolves are the user store's own (or nothing),
-/// and the store has not been set up for this orb (no core, or not the core it
-/// pins), run `orb update --global` once and check again. A project's own
-/// `node_modules` is never touched — its failure is returned as is.
+/// The language preflight. Read-only: it never installs or updates anything —
+/// setting the user store up belongs to the explicit `orb update` / `orb add`.
+/// A failure carries its typed code and the fix.
 pub(crate) fn ensure_language_ready() -> Result<(), orbital_core::language_data::LanguageDataError>
 {
-    let first = match orbital_core::language_data::preflight() {
-        Ok(()) => return Ok(()),
-        Err(e) => e,
-    };
-    if std::env::var_os(NO_AUTO_SETUP_ENV).is_some() || !user_store_needs_setup() {
-        return Err(first);
-    }
-    eprintln!(
-        "orb: the language is not set up for this orb ({}: {first}) — running `orb update --global` (set {NO_AUTO_SETUP_ENV}=1 to skip)",
-        first.code()
-    );
-    language_after_setup(
-        crate::commands::packages::run_update(true),
-        orbital_core::language_data::preflight,
-    )
-}
-
-/// After a first-run setup, the language is ready when the preflight now passes, even if the
-/// update failed on another package (that failure is reported, never hidden).
-fn language_after_setup<E>(
-    update: anyhow::Result<()>,
-    recheck: impl FnOnce() -> Result<(), E>,
-) -> Result<(), E> {
-    if let Err(e) = update {
-        eprintln!("orb: update did not complete: {e}");
-    }
-    recheck()
-}
-
-/// True when core and std resolve from the user store (or not at all) and the
-/// store's core is missing or not the one this orb pins.
-fn user_store_needs_setup() -> bool {
-    use orbital_core::behavior_packages::{find_npm_package, user_store_dir, STD_PACKAGE};
-    use orbital_core::language_data::CORE_PACKAGE;
-    let (Ok(cwd), Some(store)) = (std::env::current_dir(), user_store_dir()) else {
-        return false;
-    };
-    let store = std::fs::canonicalize(&store).unwrap_or(store);
-    let owned_by_store = |name: &str| {
-        find_npm_package(name, &cwd, &store).is_none_or(|pkg| pkg.root.starts_with(&store))
-    };
-    if !owned_by_store(CORE_PACKAGE) || !owned_by_store(STD_PACKAGE) {
-        return false;
-    }
-    let (_, pinned) = crate::baked_engine_pins::BAKED_CORE;
-    find_npm_package(CORE_PACKAGE, &cwd, &store).is_none_or(|core| core.version != pinned)
+    orbital_core::language_data::preflight().inspect_err(|e| {
+        eprintln!(
+            "orb: {} — fix: run `orb update --global` (or `orb update` in a project)",
+            e.code()
+        );
+    })
 }
 
 /// Load the services registry. Returns both validation projections (action
@@ -220,28 +175,4 @@ pub(crate) fn load_project_patterns(
         patterns_path.display()
     );
     Some(json)
-}
-
-#[cfg(test)]
-mod setup_tests {
-    use super::language_after_setup;
-
-    #[test]
-    fn a_setup_that_failed_on_another_package_still_counts_when_the_language_loads() {
-        let outcome: Result<(), &str> =
-            language_after_setup(Err(anyhow::anyhow!("orb-desktop does not load")), || Ok(()));
-        assert_eq!(outcome, Ok(()));
-    }
-
-    #[test]
-    fn control_the_language_still_missing_after_setup_is_the_recheck_error() {
-        let outcome = language_after_setup(Err(anyhow::anyhow!("network")), || Err("core missing"));
-        assert_eq!(outcome, Err("core missing"));
-        let outcome = language_after_setup(Ok(()), || Err("std missing"));
-        assert_eq!(
-            outcome,
-            Err("std missing"),
-            "a clean update with the language still missing is not ready"
-        );
-    }
 }
