@@ -75,9 +75,9 @@ fn emit_ts_contains_expected_exports() {
     let (stdout, stderr, ok) = run_orb(&["emit", "ts", orb.to_str().unwrap()]);
     assert!(ok, "emit ts failed. stderr:\n{}", stderr);
     for needle in [
-        "export type ModalRecordModalState =",
-        "export type ModalRecordModalEvent =",
         "export interface ModalRecord",
+        "export type ModalRecordModalEventPayloadMap =",
+        "// ───── packages/shared/src/program.json ─────",
     ] {
         assert!(
             stdout.contains(needle),
@@ -111,13 +111,14 @@ fn emit_py_contains_expected_classes() {
 
 // --- Phase 2: section filter ----------------------------------------------
 
+// The kernel host interprets trait logic from `program.json`; no per-trait state, hook or component file exists to select.
 #[test]
-fn emit_ts_section_traits_restricts_output() {
+fn emit_ts_section_traits_matches_no_file_under_the_kernel_host() {
     let orb = std_modal_orb();
     if !orb.exists() {
         return;
     }
-    let (stdout, _, ok) = run_orb(&[
+    let (stdout, stderr, ok) = run_orb(&[
         "emit",
         "ts",
         orb.to_str().unwrap(),
@@ -125,25 +126,13 @@ fn emit_ts_section_traits_restricts_output() {
         "traits.ModalRecordModal",
     ]);
     assert!(ok);
-    // Every banner line must fall under a trait-related path.
-    let banners: Vec<&str> = stdout
-        .lines()
-        .filter(|l| l.starts_with("// ───── ") && l.ends_with("─────"))
-        .collect();
-    assert!(!banners.is_empty(), "expected at least one file banner");
-    for banner in &banners {
-        assert!(
-            banner.contains("ModalRecordModal")
-                || banner.contains("modal-record-modal")
-                || banner.contains("modal_record_modal"),
-            "section filter leaked a non-trait file: {}",
-            banner
-        );
-    }
-    // No entities/shared code should be present.
     assert!(
-        !stdout.contains("packages/shared/src/types/entities.ts"),
-        "traits section should not pull in the shared entities file"
+        stderr.contains("matched zero generated files"),
+        "expected the zero-match warning. stderr:\n{stderr}"
+    );
+    assert!(
+        !stdout.lines().any(|l| l.starts_with("// ───── ")),
+        "a trait section must not select any file:\n{stdout}"
     );
 }
 

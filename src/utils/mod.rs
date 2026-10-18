@@ -12,7 +12,7 @@ pub(crate) mod shell_programs;
 
 pub(crate) use agents::{find_bun, spawn_agent, spawn_agent_with_args};
 pub(crate) use detect::{
-    detect_syntax, parse_schema_auto, parse_schema_auto_with_map, strip_json_nulls,
+    detect_syntax, parse_schema_auto, parse_schema_auto_with_map,
     typed_parse_error_to_json, InputSyntax,
 };
 pub use detect::{parse_schema_auto_typed, parse_schema_auto_typed_with_map, TypedParseError};

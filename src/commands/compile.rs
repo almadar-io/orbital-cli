@@ -196,7 +196,6 @@ pub(crate) fn compile_schema(
         shell_options.insert(
             "host".to_string(),
             Value::from(match host {
-                HostArg::Generated => "generated",
                 HostArg::Kernel => "kernel",
             }),
         );

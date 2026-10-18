@@ -45,7 +45,7 @@ pub(crate) fn run_serve(
             false, // verbose
             false, // dev_logs
             ServerFrameworkArg::Hono,
-            HostArg::Generated,
+            HostArg::Kernel,
             None, // emit_orb
         )?;
     }

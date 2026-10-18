@@ -4,37 +4,6 @@
 use crate::utils::i18n::translate_schema_content;
 use crate::{SourcePosition, ValidationJsonError};
 
-/// Canonicalize serde_json for `.orb` emission: recursively strip `null`
-/// values AND emit object keys in deterministic (sorted) order. Used by the
-/// `.lolo` lowering / `emit orb` / `compile` paths before writing to disk.
-///
-/// The sort is what makes `.orb` output byte-stable: `serde_json` is built with
-/// `preserve_order` (insertion-order `IndexMap`), and several schema/IR types
-/// are backed by `HashMap<String, _>` (theme tokens, config provenance, dynamic
-/// render-ui props), whose iteration order is randomized per process. Without
-/// sorting here, re-emitting an unchanged `.orb` reshuffles keys every run and
-/// churns the whole std registry. Inserting in sorted order yields a stable,
-/// canonical form (JSON object key order is semantically irrelevant downstream).
-pub(crate) fn strip_json_nulls(value: serde_json::Value) -> serde_json::Value {
-    use serde_json::Value;
-    match value {
-        Value::Object(map) => {
-            let mut entries: Vec<(String, Value)> = map.into_iter().collect();
-            entries.sort_by(|a, b| a.0.cmp(&b.0));
-            let mut out = serde_json::Map::new();
-            for (k, v) in entries {
-                let stripped = strip_json_nulls(v);
-                if !stripped.is_null() {
-                    out.insert(k, stripped);
-                }
-            }
-            Value::Object(out)
-        }
-        Value::Array(items) => Value::Array(items.into_iter().map(strip_json_nulls).collect()),
-        v => v,
-    }
-}
-
 /// Syntax variant detected from file content.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InputSyntax {

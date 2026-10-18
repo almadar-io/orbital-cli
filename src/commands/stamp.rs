@@ -66,8 +66,7 @@ pub(crate) fn stamp_schema_cli(
     // byte-stability of a re-stamped registry file.
     let value = serde_json::to_value(&schema)
         .map_err(|e| anyhow::anyhow!("Failed to serialize stamped schema: {}", e))?;
-    let cleaned = crate::strip_json_nulls(value);
-    let json = serde_json::to_string_pretty(&orbital_core::util::canonical_json(&cleaned))
+    let json = serde_json::to_string_pretty(&orbital_core::util::canonical_json(&value))
         .map_err(|e| anyhow::anyhow!("Failed to serialize stamped schema: {}", e))?;
     match output {
         Some(out) => std::fs::write(out, &json)

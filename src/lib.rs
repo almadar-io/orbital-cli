@@ -22,10 +22,6 @@ use commands::{
 };
 use utils::{evaluate_sexpr, spawn_agent, spawn_agent_with_args};
 
-// Re-export parsing helpers + the `strip_json_nulls` util at the crate root so
-// the `emit` module's `crate::strip_json_nulls` / parse references keep
-// resolving after the module split. Public surface is unchanged.
-pub(crate) use utils::strip_json_nulls;
 pub use utils::{parse_schema_auto_typed, TypedParseError};
 
 #[derive(Parser)]
@@ -112,10 +108,8 @@ pub enum ServerFrameworkArg {
 /// Who runs a generated TypeScript app's execution steps
 #[derive(Debug, Clone, Copy, ValueEnum, Default)]
 pub enum HostArg {
-    /// The generated per-event handlers and hooks (default)
+    /// The embedded `@almadar/kernel` (Express or Hono server)
     #[default]
-    Generated,
-    /// The embedded `@almadar/kernel` (Express server only)
     Kernel,
 }
 
@@ -500,8 +494,8 @@ enum Commands {
         #[arg(long, default_value = "express")]
         server: ServerFrameworkArg,
 
-        /// Who runs the generated TypeScript app: the generated handlers and hooks, or the embedded kernel
-        #[arg(long, default_value = "generated")]
+        /// Who runs the generated TypeScript app: the embedded kernel (the only host)
+        #[arg(long, default_value = "kernel")]
         host: HostArg,
 
         /// Write the lowered .orb JSON to this path (for .lolo inputs).

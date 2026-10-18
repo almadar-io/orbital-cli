@@ -202,8 +202,7 @@ fn emit_orb(source: &str, output: Option<&Path>, source_path: &str) -> Result<()
 fn canonical_orb_json(schema: &orbital_core::schema::OrbitalSchema) -> Result<String> {
     let value =
         serde_json::to_value(schema).map_err(|e| anyhow!("Failed to serialize schema: {}", e))?;
-    let cleaned = crate::strip_json_nulls(value);
-    serde_json::to_string_pretty(&orbital_core::util::canonical_json(&cleaned))
+    serde_json::to_string_pretty(&orbital_core::util::canonical_json(&value))
         .map_err(|e| anyhow!("Failed to serialize schema: {}", e))
 }
 
