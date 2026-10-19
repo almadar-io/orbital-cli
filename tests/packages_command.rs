@@ -63,6 +63,7 @@ fn shell_reply(min: u32, max: u32) -> String {
         ir_versions: orbital_core::shell_protocol::IrVersions { min, max },
         options: vec![],
         needs_resolved: true,
+        web_client: None,
     };
     serde_json::to_string(&d).unwrap()
 }

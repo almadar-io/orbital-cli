@@ -437,7 +437,7 @@ pub(crate) fn check_hook_names(names: &[String]) -> anyhow::Result<()> {
 }
 
 impl ProgramTools {
-    /// Resolve the program and boot it on the native runtime, as `orb host` does (no sample data).
+    /// Resolve the program and boot it on the native runtime, as `orb serve --no-mock` does (no sample data).
     pub(crate) fn boot(path: &Path) -> anyhow::Result<Self> {
         let resolved = super::dev::resolve_to_temp(path)?;
         let schema: orbital_core::OrbitalSchema =

@@ -95,17 +95,15 @@ impl ShellType {
 /// Server framework choice for backend code generation
 #[derive(Debug, Clone, Copy, ValueEnum, Default)]
 pub enum ServerFrameworkArg {
-    /// Express.js (default, backward-compatible)
+    /// Express.js (the only server; the Hono one is retired)
     #[default]
     Express,
-    /// Hono (lightweight, edge-ready)
-    Hono,
 }
 
 /// Who runs a generated TypeScript app's execution steps
 #[derive(Debug, Clone, Copy, ValueEnum, Default)]
 pub enum HostArg {
-    /// The embedded `@almadar/kernel` (Express or Hono server)
+    /// The embedded `@almadar/kernel` (Express server)
     #[default]
     Kernel,
 }
@@ -491,7 +489,7 @@ enum Commands {
         #[arg(long)]
         dev_logs: bool,
 
-        /// Server framework for backend code generation (express or hono)
+        /// Server framework for backend code generation (express)
         #[arg(long, default_value = "express")]
         server: ServerFrameworkArg,
 
@@ -543,13 +541,13 @@ enum Commands {
         write: bool,
     },
 
-    /// Compile and serve a full-stack app from a .orb file (zero-install)
+    /// Serve a program: the native server, the program's runtime files and the TypeScript shell's prebuilt web client,
+    /// on one port. Nothing is built and no Node process runs the app.
     ///
-    /// Compiles the schema with Hono backend, builds the client with Vite,
-    /// and serves everything on a single port using the bundled Bun runtime.
-    /// No Node.js, pnpm, or any other dependencies required.
+    /// In memory with sample rows by default; with `--no-mock` the environment picks the store (`DATA_BACKEND`, ...)
+    /// and sign-in (`AUTH_PROVIDER`, `FIREBASE_PROJECT_ID`, ...). The dev Firebase emulators give the dev personas.
     Serve {
-        /// Path to the .orb schema file
+        /// Path to the .orb or .lolo program
         #[arg(value_name = "FILE")]
         path: PathBuf,
 
@@ -557,21 +555,25 @@ enum Commands {
         #[arg(short, long, default_value = "3030")]
         port: u16,
 
-        /// Open browser after start
+        /// Address to listen on
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+
+        /// Open the browser once the server listens
         #[arg(long)]
         open: bool,
 
-        /// Skip client build (serve existing build)
+        /// Serve the store the environment selects instead of sample rows in memory
         #[arg(long)]
-        no_build: bool,
-
-        /// Path to extra patterns.json (auto-discovered if not specified)
-        #[arg(long)]
-        patterns: Option<PathBuf>,
+        no_mock: bool,
 
         /// Serve without the Firebase emulators: no dev personas, every request anonymous
         #[arg(long)]
         no_emulators: bool,
+
+        /// A built web client to serve instead of the installed typescript shell's
+        #[arg(long, value_name = "DIR")]
+        client_dir: Option<PathBuf>,
     },
 
     /// Start the Orbital desktop GUI application (not yet stable)
@@ -604,25 +606,6 @@ enum Commands {
         /// Force headless mode even when a display is available
         #[arg(long)]
         headless: bool,
-    },
-
-    /// Serve a program with its compiled client and no Node process (sign-in and store from the environment)
-    Host {
-        /// Path to the .orb or .lolo program
-        #[arg(value_name = "FILE")]
-        path: PathBuf,
-
-        /// Port for the server
-        #[arg(short, long, default_value = "3000")]
-        port: u16,
-
-        /// Address to listen on
-        #[arg(long, default_value = "127.0.0.1")]
-        host: String,
-
-        /// The built client (`orb compile --mode client`, then its build): served as static files beside the API
-        #[arg(long, value_name = "DIR")]
-        client_dir: Option<PathBuf>,
     },
 
     /// Convert an existing project or website to an .orb program
@@ -734,8 +717,8 @@ enum Commands {
         #[arg(long, value_name = "KINDS")]
         only: Option<String>,
 
-        /// Server framework for the TypeScript backend (default: hono).
-        #[arg(long, value_enum, default_value_t = emit::EmitServer::Hono)]
+        /// Server framework for the TypeScript backend (express).
+        #[arg(long, value_enum, default_value_t = emit::EmitServer::Express)]
         server: emit::EmitServer,
 
         /// Emit a Source Map v3 sidecar (`<output>.map`) that maps the
@@ -1388,20 +1371,9 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
             execute,
             verbose,
         }) => run_tests(&path, orbital, trait_name, &report, execute, verbose),
-        Some(Commands::Serve {
-            path,
-            port,
-            open,
-            no_build,
-            patterns,
-            no_emulators,
-        }) => run_serve(
+        Some(Commands::Serve { path, port, host, open, no_mock, no_emulators, client_dir }) => run_serve(
             &path,
-            port,
-            open,
-            no_build,
-            patterns.as_deref(),
-            !no_emulators,
+            &commands::serve::ServeOptions { host, port, open, mock: !no_mock, emulators: !no_emulators, client_dir },
         ),
         Some(Commands::Gui { path, server, renderer }) => utils::desktop::window(&renderer, &path, Some(&server)),
         Some(Commands::Dev {
@@ -1409,7 +1381,6 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
             port,
             headless,
         }) => run_dev_mode(&path, port, headless),
-        Some(Commands::Host { path, port, host, client_dir }) => commands::dev::run_host_mode(&path, &host, port, client_dir),
         Some(Commands::Convert {
             path,
             output,

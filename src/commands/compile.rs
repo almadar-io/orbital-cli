@@ -185,7 +185,6 @@ pub(crate) fn compile_schema(
     if let ShellType::Typescript = shell {
         let framework = match server_framework {
             ServerFrameworkArg::Express => "express",
-            ServerFrameworkArg::Hono => "hono",
         };
         shell_options.insert("framework".to_string(), Value::from(framework));
         shell_options.insert(

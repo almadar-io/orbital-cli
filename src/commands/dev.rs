@@ -65,19 +65,6 @@ pub(crate) fn run_dev_mode(path: &PathBuf, port: u16, force_headless: bool) -> a
     Ok(())
 }
 
-/// `orb host`: the program resolved, then served with its compiled client by the native server (`orbital_server::run_standalone`).
-/// No Node process and no sample data; sign-in comes from the environment (`AUTH_PROVIDER`, `FIREBASE_PROJECT_ID`, ...).
-pub(crate) fn run_host_mode(path: &PathBuf, host: &str, port: u16, client_dir: Option<PathBuf>) -> anyhow::Result<()> {
-    if let Some(dir) = &client_dir {
-        if !dir.join("index.html").is_file() {
-            anyhow::bail!("{} holds no index.html: build the client first (orb compile --mode client, then its build)", dir.display());
-        }
-    }
-    let serve_path = resolve_to_temp(path)?;
-    println!("Serving {} on http://{host}:{port}", path.display());
-    orbital_server::run_standalone(&serve_path, &orbital_server::StandaloneConfig { host: host.to_string(), port, client_dir })
-}
-
 /// Resolve a schema (Inline + Compose + Enrich) and write the resolved `.orb` to a temp
 /// file, returning its path. The runtime entry points (`orbital_server::run`,
 /// `orb-desktop window`) parse a path; resolution lives here in the CLI, which owns the compiler.

@@ -59,9 +59,8 @@ pub enum EmitFormat {
 /// Server framework choice — used only when `target = Ts`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default)]
 pub enum EmitServer {
-    /// Hono (default — matches `orb compile`).
+    /// Express (the only server; the Hono one is retired).
     #[default]
-    Hono,
     Express,
 }
 
@@ -337,7 +336,6 @@ fn emit_code(opts: EmitOptions, source: &str, source_path: &str) -> Result<()> {
             let resolved = orbital_verify::resolve_schema_with_source(unresolved, Some(program_path))
                 .map_err(|e| anyhow!("Failed to resolve schema for the browser store: {}", e))?;
             let framework = match opts.server {
-                EmitServer::Hono => "hono",
                 EmitServer::Express => "express",
             };
             let shell_options = std::collections::BTreeMap::from([("framework".to_string(), serde_json::Value::from(framework))]);
