@@ -411,6 +411,126 @@ fn call_tool(params: &Value) -> Value {
     })
 }
 
+/// `orb mcp --program <file>`: the program's declared inbound hooks served as tools beside the language's.
+/// A call is delivered as the hook's request (EXEC-INBOUND-1) and answered with what the handler answered.
+pub(crate) struct ProgramTools {
+    runtime: std::sync::Arc<orbital_server::OrbitalServerRuntime>,
+    hooks: Vec<HookTool>,
+}
+
+struct HookTool {
+    name: String,
+    description: String,
+}
+
+/// A hook may not take a language tool's name: one name, one tool.
+pub(crate) fn check_hook_names(names: &[String]) -> anyhow::Result<()> {
+    match names
+        .iter()
+        .find(|n| TOOLS.iter().any(|t| t.name == n.as_str()))
+    {
+        Some(clash) => anyhow::bail!(
+            "the program's inbound hook `{clash}` has the name of an orb tool; rename the hook"
+        ),
+        None => Ok(()),
+    }
+}
+
+impl ProgramTools {
+    /// Resolve the program and boot it on the native runtime, as `orb host` does (no sample data).
+    pub(crate) fn boot(path: &Path) -> anyhow::Result<Self> {
+        let resolved = super::dev::resolve_to_temp(path)?;
+        let schema: orbital_core::OrbitalSchema =
+            serde_json::from_str(&std::fs::read_to_string(&resolved)?)?;
+        let runtime =
+            orbital_server::boot_runtime(&resolved, false, &std::env::vars().collect(), false)?;
+        let declared: Vec<&String> = schema.inbound.iter().flatten().collect();
+        let mut hooks = Vec::new();
+        for route in orbital_core::runtime::inbound::inbound_routes_of(&schema) {
+            if !declared.contains(&&route.name)
+                || hooks.iter().any(|h: &HookTool| h.name == route.name)
+            {
+                continue;
+            }
+            let description = schema
+                .orbitals
+                .iter()
+                .flat_map(|o| o.traits.iter())
+                .filter_map(|t| match t {
+                    orbital_core::schema::TraitReference::Inline(td)
+                        if td.name == route.trait_name =>
+                    {
+                        Some(td)
+                    }
+                    _ => None,
+                })
+                .flat_map(|td| td.state_machine.events.iter().flatten())
+                .find(|ev| ev.key == route.event)
+                .and_then(|ev| ev.description.clone())
+                .unwrap_or_else(|| {
+                    format!("Deliver a request to the program's `{}` hook.", route.name)
+                });
+            hooks.push(HookTool {
+                name: route.name,
+                description,
+            });
+        }
+        check_hook_names(&hooks.iter().map(|h| h.name.clone()).collect::<Vec<_>>())?;
+        Ok(Self { runtime, hooks })
+    }
+
+    fn listed(&self) -> Vec<Value> {
+        self.hooks
+            .iter()
+            .map(|h| {
+                json!({
+                    "name": h.name,
+                    "description": h.description,
+                    "inputSchema": object(
+                        json!({
+                            "body": { "description": "The request body: JSON is sent as its text, a string as it is" },
+                            "headers": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Request headers (lower-case names)" }
+                        }),
+                        &["body"],
+                    )
+                })
+            })
+            .collect()
+    }
+
+    fn call(&self, name: &str, args: &Map<String, Value>) -> Option<anyhow::Result<Value>> {
+        self.hooks.iter().find(|h| h.name == name)?;
+        Some((|| {
+            let body = args
+                .get("body")
+                .ok_or_else(|| anyhow::anyhow!("missing required argument `body`"))?;
+            let raw = match body {
+                Value::String(text) => text.clone(),
+                other => other.to_string(),
+            };
+            let mut headers: Vec<(String, String)> =
+                vec![("content-type".to_string(), "application/json".to_string())];
+            if let Some(given) = args.get("headers").and_then(Value::as_object) {
+                for (key, value) in given {
+                    let value = value
+                        .as_str()
+                        .ok_or_else(|| anyhow::anyhow!("header `{key}` must be a string"))?;
+                    headers.retain(|(k, _)| !k.eq_ignore_ascii_case(key));
+                    headers.push((key.to_ascii_lowercase(), value.to_string()));
+                }
+            }
+            let answer = self.runtime.deliver_inbound(
+                name,
+                headers.iter().map(|(k, v)| (k.as_str(), v.as_str())),
+                &raw,
+            );
+            let body =
+                serde_json::from_str::<Value>(&answer.body).unwrap_or(Value::String(answer.body));
+            Ok(json!({ "status": answer.status, "body": body }))
+        })())
+    }
+}
+
 /// A tool runs once the language is set up; a setup that failed is the tool's answer.
 pub(crate) fn call_tool_with(params: &Value, ready: impl FnOnce() -> Result<(), String>) -> Value {
     if let Err(e) = ready() {
@@ -443,6 +563,11 @@ fn build_prompt(params: &Value) -> Result<Value, (i64, String)> {
 
 /// One JSON-RPC message in, at most one out (a notification gets none).
 pub(crate) fn handle(message: &Value) -> Option<Value> {
+    handle_with(message, None)
+}
+
+/// [`handle`] for a server that also serves a program's inbound hooks as tools.
+pub(crate) fn handle_with(message: &Value, program: Option<&ProgramTools>) -> Option<Value> {
     let id = message.get("id")?.clone();
     let params = message.get("params").cloned().unwrap_or(Value::Null);
     let outcome: Result<Value, (i64, String)> = match message["method"].as_str().unwrap_or_default()
@@ -466,9 +591,17 @@ pub(crate) fn handle(message: &Value) -> Option<Value> {
                 "name": t.name,
                 "description": t.description,
                 "inputSchema": (t.schema)()
-            })).collect::<Vec<_>>()
+            })).chain(program.map(ProgramTools::listed).unwrap_or_default()).collect::<Vec<_>>()
         })),
-        "tools/call" => Ok(call_tool(&params)),
+        "tools/call" => {
+            let empty = Map::new();
+            let name = params["name"].as_str().unwrap_or_default();
+            let args = params["arguments"].as_object().unwrap_or(&empty);
+            match program.and_then(|p| p.call(name, args)) {
+                Some(outcome) => Ok(tool_result(outcome)),
+                None => Ok(call_tool(&params)),
+            }
+        }
         "prompts/list" => Ok(json!({
             "prompts": [{
                 "name": "build",
@@ -540,9 +673,10 @@ pub(crate) fn install_config(dir: &Path, client: McpClient) -> anyhow::Result<st
     Ok(path)
 }
 
-/// `orb mcp`: newline-delimited JSON-RPC on stdin/stdout until stdin closes.
-pub(crate) fn run_mcp() -> anyhow::Result<()> {
+/// `orb mcp [--program <file>]`: newline-delimited JSON-RPC on stdin/stdout until stdin closes.
+pub(crate) fn run_mcp(program: Option<&Path>) -> anyhow::Result<()> {
     super::npm_project::mark_stdout_as_protocol();
+    let program = program.map(ProgramTools::boot).transpose()?;
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
     for line in stdin.lock().lines() {
@@ -551,7 +685,7 @@ pub(crate) fn run_mcp() -> anyhow::Result<()> {
             continue;
         }
         let response = match serde_json::from_str::<Value>(&line) {
-            Ok(message) => handle(&message),
+            Ok(message) => handle_with(&message, program.as_ref()),
             Err(e) => Some(json!({
                 "jsonrpc": "2.0", "id": null,
                 "error": { "code": -32700, "message": format!("parse error: {e}") }
@@ -896,5 +1030,96 @@ mod tests {
     fn prompts_get_an_unknown_prompt_is_invalid_params() {
         let r = request("prompts/get", json!({ "name": "nope" }));
         assert_eq!(r["error"]["code"], -32602);
+    }
+
+    fn echo_program() -> super::ProgramTools {
+        orbital_compiler::loader::register_source_lowerer(crate::lower_lolo_file);
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/mcp-echo-hook.lolo");
+        super::ProgramTools::boot(&fixture).expect("the echo fixture boots")
+    }
+
+    fn program_request(
+        program: Option<&super::ProgramTools>,
+        method: &str,
+        params: Value,
+    ) -> Value {
+        super::handle_with(
+            &json!({ "jsonrpc": "2.0", "id": 9, "method": method, "params": params }),
+            program,
+        )
+        .expect("a request gets a response")
+    }
+
+    #[test]
+    fn a_program_s_inbound_hook_is_listed_as_a_tool_beside_the_language_tools() {
+        let program = echo_program();
+        let listed = program_request(Some(&program), "tools/list", json!({}));
+        let tools = listed["result"]["tools"].as_array().expect("a tool list");
+        let echo = tools
+            .iter()
+            .find(|t| t["name"] == "echo")
+            .expect("the echo hook is a tool");
+        assert_eq!(echo["description"], "Echo the request body back.", "{echo}");
+        assert_eq!(echo["inputSchema"]["required"], json!(["body"]), "{echo}");
+        assert!(
+            tools.iter().any(|t| t["name"] == "validate"),
+            "the language tools stay"
+        );
+    }
+
+    #[test]
+    fn calling_a_hook_tool_delivers_the_body_and_answers_with_the_handler_s_answer() {
+        let program = echo_program();
+        let answered = program_request(
+            Some(&program),
+            "tools/call",
+            json!({ "name": "echo", "arguments": { "body": { "hello": "world" } } }),
+        );
+        assert_eq!(answered["result"]["isError"], false, "{answered}");
+        assert_eq!(
+            answered["result"]["structuredContent"],
+            json!({ "status": 200, "body": { "hello": "world" } }),
+            "{answered}"
+        );
+        let text = program_request(
+            Some(&program),
+            "tools/call",
+            json!({ "name": "echo", "arguments": { "body": "plain words" } }),
+        );
+        assert_eq!(
+            text["result"]["structuredContent"],
+            json!({ "status": 200, "body": "plain words" }),
+            "a body that is not JSON is answered as text: {text}"
+        );
+    }
+
+    #[test]
+    fn control_without_a_program_no_hook_is_a_tool() {
+        let listed = program_request(None, "tools/list", json!({}));
+        assert!(
+            !listed["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|t| t["name"] == "echo"),
+            "{listed}"
+        );
+        let called = super::call_tool_with(
+            &json!({ "name": "echo", "arguments": { "body": {} } }),
+            || Ok(()),
+        );
+        assert_eq!(called["isError"], true, "{called}");
+    }
+
+    #[test]
+    fn edge_a_hook_named_like_a_language_tool_is_refused() {
+        let refused =
+            super::check_hook_names(&["validate".to_string()]).expect_err("a clash is refused");
+        assert!(refused.to_string().contains("validate"), "{refused}");
+        assert!(
+            super::check_hook_names(&["echo".to_string()]).is_ok(),
+            "control: a free name is accepted"
+        );
     }
 }

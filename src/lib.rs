@@ -166,6 +166,10 @@ enum Commands {
     /// Serve the language to an agent: an MCP server on stdin/stdout whose tools are
     /// orb's own commands (validate, complete, behaviors, describe, play, test, evaluate, …).
     Mcp {
+        /// Also serve this program's declared inbound hooks as tools: a call is delivered as the
+        /// hook's request and answered with the handler's answer
+        #[arg(long, value_name = "FILE")]
+        program: Option<PathBuf>,
         #[command(subcommand)]
         command: Option<McpCommand>,
     },
@@ -1517,10 +1521,14 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
             spawn_agent_with_args(&args)
         }
         Some(Commands::Login) => spawn_agent_with_args(&["login"]),
-        Some(Commands::Mcp { command: None }) => commands::mcp::run_mcp(),
+        Some(Commands::Mcp {
+            program,
+            command: None,
+        }) => commands::mcp::run_mcp(program.as_deref()),
         Some(Commands::Reference { topic }) => commands::reference::run_reference(topic.as_deref()),
         Some(Commands::Mcp {
             command: Some(McpCommand::Install { client }),
+            ..
         }) => {
             let (path, warning) = commands::mcp::install(&std::env::current_dir()?, client, || {
                 crate::utils::patterns::ensure_language_ready().map_err(|e| format!("{}: {e}", e.code()))

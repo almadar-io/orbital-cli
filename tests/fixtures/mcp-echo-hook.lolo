@@ -1,0 +1,40 @@
+app mcp-echo-hook [
+  version: "1.0.0",
+  inbound: ["echo"],
+  description: "mcp-echo-hook — one inbound hook, echo, that answers 200 with the request body it was sent."
+]
+
+orbital EchoOrbital {
+  entity EchoState [runtime] {
+    id : string!
+  }
+
+  trait EchoHook -> EchoState [integration, instance] {
+    initial: ready
+
+    state ready {
+      INIT -> ready
+      ECHO_RECEIVED -> ready
+        (emit ECHO_ANSWERED { status: 200, body: @payload.rawBody })
+    }
+
+    emits {
+      ECHO_ANSWERED -> internal {
+        status : number!
+        body : string!
+      }
+        @description "Internal: the HTTP answer the hook writes back."
+        @tier "internal"
+    }
+
+    listens {
+      ECHO_RECEIVED -> inbound "echo" answers ECHO_ANSWERED {
+        headers : Map string string
+        rawBody : string
+      }
+        @description "Echo the request body back."
+    }
+  }
+
+  page "/echo" -> EchoHook
+}
