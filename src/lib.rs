@@ -356,7 +356,8 @@ enum Commands {
 
         /// Layer 3 (per-frame): drive each state transition and capture a PNG per
         /// frame + a frames.json manifest for the vision-review workflow. With
-        /// `--compiled`, capture each `poster`-declaring trait's WebP poster into DIR instead.
+        /// `--compiled`, capture each `poster`-declaring trait's WebP poster into DIR instead; with `--web`, the page
+        /// after each walked step.
         #[arg(long, value_name = "DIR")]
         screenshot_frames: Option<PathBuf>,
 
@@ -399,6 +400,12 @@ enum Commands {
         /// native app on the Simulator/emulator instead of the web client.
         #[arg(long)]
         compiled: bool,
+
+        /// Walk the program's web client natively: serve it in-process on the native server with the prebuilt web
+        /// client, drive Chrome over the DevTools protocol (`ORB_CHROME` names the binary), and judge every planned step
+        /// with the kernel's verdicts. No Node process, no Playwright.
+        #[arg(long)]
+        web: bool,
 
         /// Engine: run all three (rust + runtime + compiled).
         #[arg(long)]
@@ -1304,6 +1311,7 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
             rust,
             runtime,
             compiled,
+            web,
             all,
             json,
             port,
@@ -1325,6 +1333,7 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
             rust,
             runtime,
             compiled,
+            web,
             all,
             json,
             port,

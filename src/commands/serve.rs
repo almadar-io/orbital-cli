@@ -23,9 +23,18 @@ pub(crate) struct ServeOptions {
     pub client_dir: Option<PathBuf>,
 }
 
-pub(crate) fn run_serve(path: &Path, options: &ServeOptions) -> anyhow::Result<()> {
-    let client_dir = match &options.client_dir {
-        Some(dir) => dir.clone(),
+/// What a web client of `path` needs: the prebuilt client, the program's runtime files beside it, and the resolved program.
+pub(crate) struct PreparedWeb {
+    pub client_dir: PathBuf,
+    pub assets: PathBuf,
+    pub program: PathBuf,
+}
+
+/// Compile `path` client-mode into a scratch directory and lay out its runtime files beside the prebuilt web client
+/// (`client_dir`, else the installed typescript shell's).
+pub(crate) fn prepare_web(path: &Path, client_dir: Option<&Path>) -> anyhow::Result<PreparedWeb> {
+    let client_dir = match client_dir {
+        Some(dir) => dir.to_path_buf(),
         None => crate::utils::shell_programs::locate("typescript")?.description.web_client.ok_or_else(|| {
             anyhow::anyhow!(
                 "the installed typescript shell ships no prebuilt web client: run `orb update` (in a shell checkout, build it with `node scripts/build-web-client.mjs`)"
@@ -38,8 +47,9 @@ pub(crate) fn run_serve(path: &Path, options: &ServeOptions) -> anyhow::Result<(
             client_dir.display()
         );
     }
-
-    let scratch = std::env::temp_dir().join(format!("orb-serve-{}", std::process::id()));
+    static PREPARED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = PREPARED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let scratch = std::env::temp_dir().join(format!("orb-serve-{}-{n}", std::process::id()));
     let app = scratch.join("app");
     let assets = scratch.join("assets");
     std::fs::create_dir_all(&scratch)?;
@@ -60,6 +70,12 @@ pub(crate) fn run_serve(path: &Path, options: &ServeOptions) -> anyhow::Result<(
         None,
     )?;
     copy_runtime_files(&app, &assets)?;
+    let program = crate::commands::dev::resolve_to_temp(path)?;
+    Ok(PreparedWeb { client_dir, assets, program })
+}
+
+pub(crate) fn run_serve(path: &Path, options: &ServeOptions) -> anyhow::Result<()> {
+    let PreparedWeb { client_dir, assets, program } = prepare_web(path, options.client_dir.as_deref())?;
 
     let mut env = vec![("NODE_ENV".to_string(), "development".to_string())];
     if options.emulators {
@@ -72,7 +88,6 @@ pub(crate) fn run_serve(path: &Path, options: &ServeOptions) -> anyhow::Result<(
         );
     }
 
-    let program = crate::commands::dev::resolve_to_temp(path)?;
     let url = format!("http://{}:{}", options.host, options.port);
     println!("\nServing {} on {url}\n", path.display());
     if options.open {

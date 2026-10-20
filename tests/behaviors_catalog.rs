@@ -30,7 +30,9 @@ fn decoded(v: &[f32]) -> Vec<f64> {
 /// The embedding text of a fixture card (`index`) and of its capabilities.
 fn card_texts(prefix: &str) -> (String, String) {
     (
-        format!("{prefix}-card\nA card.\nCapabilities (organism): display\nEntity: Card\nEvents: OPEN"),
+        format!(
+            "{prefix}-card\nA card.\nCapabilities (organism): display\nEntity: Card\nEvents: OPEN"
+        ),
         "Capabilities (organism): display".to_string(),
     )
 }
@@ -49,13 +51,7 @@ const ORB: &str = r#"{"name":"fake","description":"A board.","orbitals":[{"name"
 /// A card behavior whose `CardView` declares the knobs and events the signature fixture lists.
 const CARD_ORB: &str = r#"{"name":"card","description":"A card.","orbitals":[{"name":"CardOrbital","entity":{"name":"Card","persistence":"runtime","fields":[]},"traits":[{"name":"CardView","linkedEntity":"Card","config":{"title":{"type":"string","default":"Hello","label":"Title","tier":"domain"},"size":{"type":"number","default":3}},"emits":[{"event":"CARD_OPENED"}],"listens":[{"event":"OPEN","triggers":"OPEN"}],"stateMachine":{"states":[{"name":"shown","isInitial":true}],"events":[{"key":"OPEN","name":"Open"},{"key":"INIT","name":"Initialize"}],"transitions":[{"from":"shown","to":"shown","event":"OPEN","effects":[["emit","CARD_OPENED"]]},{"from":"shown","to":"shown","event":"INIT"}]}}]}]}"#;
 
-fn package(
-    root: &Path,
-    dir: &str,
-    prefix: &str,
-    model: &str,
-    extra: &[(&str, &str)],
-) {
+fn package(root: &Path, dir: &str, prefix: &str, model: &str, extra: &[(&str, &str)]) {
     let pkg = root.join("node_modules").join(dir);
     write(
         &pkg.join("package.json"),
@@ -81,7 +77,8 @@ fn package(
 }
 
 /// The card's `.lolo` header: the tags its exposure and capabilities are read from.
-const CARD_LOLO: &str = "app card [\n  version: \"1.0.0\"\n]\n;; @exposure palette\n;; @capabilities \"display\"\n";
+const CARD_LOLO: &str =
+    "app card [\n  version: \"1.0.0\"\n]\n;; @exposure palette\n;; @capabilities \"display\"\n";
 
 fn project(second_model: &str) -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
@@ -245,29 +242,50 @@ fn catalog_filters_by_topic_tier_and_exposure_and_sorts() {
 #[test]
 fn catalog_without_vectors_needs_no_store_and_carries_the_pattern_tag() {
     let p = project("m2");
-    let beta_card = p.path().join("node_modules/beta/behaviors/lolo/ui/core/atoms/beta-card.lolo");
-    write(
-        &beta_card,
-        &format!("{CARD_LOLO};; @pattern \"card\"\n"),
-    );
+    let beta_card = p
+        .path()
+        .join("node_modules/beta/behaviors/lolo/ui/core/atoms/beta-card.lolo");
+    write(&beta_card, &format!("{CARD_LOLO};; @pattern \"card\"\n"));
     let v = json(&orb(
         p.path(),
-        &["behaviors", "catalog", "--json", "--no-vectors", "alpha", "beta"],
+        &[
+            "behaviors",
+            "catalog",
+            "--json",
+            "--no-vectors",
+            "alpha",
+            "beta",
+        ],
     ));
     let entries = v.as_array().unwrap();
-    assert_eq!(entries.len(), 4, "two packages of two behaviors, whatever their vector models");
+    assert_eq!(
+        entries.len(),
+        4,
+        "two packages of two behaviors, whatever their vector models"
+    );
     for e in entries {
         assert_eq!(e["vectors"], serde_json::json!({}));
         assert_eq!(e["model"], "");
     }
-    let beta = entries.iter().find(|e| e["behavior"] == "beta/beta-card").unwrap();
+    let beta = entries
+        .iter()
+        .find(|e| e["behavior"] == "beta/beta-card")
+        .unwrap();
     assert_eq!(beta["pattern"], "card");
     assert_eq!(beta["capabilities"], serde_json::json!(["display"]));
     // Control: a behavior without the tag carries no pattern key.
-    let alpha = entries.iter().find(|e| e["behavior"] == "alpha/alpha-card").unwrap();
+    let alpha = entries
+        .iter()
+        .find(|e| e["behavior"] == "alpha/alpha-card")
+        .unwrap();
     assert!(alpha.get("pattern").is_none());
     // Control: with vectors the same two packages are refused (mixed models), so the flag is what lifted it.
-    assert!(!orb(p.path(), &["behaviors", "catalog", "--json", "alpha", "beta"]).status.success());
+    assert!(!orb(
+        p.path(),
+        &["behaviors", "catalog", "--json", "alpha", "beta"]
+    )
+    .status
+    .success());
 }
 
 #[test]
@@ -297,7 +315,9 @@ fn the_derived_index_is_cached_by_content_and_follows_an_edit() {
     assert_eq!(run(), first, "a warm read answers the same");
     assert_eq!(cached(), once);
     // An edit to a source changes what is derived, and replaces the cached file.
-    let card = p.path().join("node_modules/alpha/behaviors/lolo/ui/core/atoms/alpha-card.lolo");
+    let card = p
+        .path()
+        .join("node_modules/alpha/behaviors/lolo/ui/core/atoms/alpha-card.lolo");
     write(&card, &CARD_LOLO.replace("palette", "both"));
     let edited = run();
     let card_of = |v: &serde_json::Value| {
@@ -318,12 +338,20 @@ fn the_derived_index_is_cached_by_content_and_follows_an_edit() {
 #[test]
 fn a_lolo_header_tag_outside_the_vocabulary_is_a_named_error() {
     let p = project("m1");
-    let card = p.path().join("node_modules/alpha/behaviors/lolo/ui/core/atoms/alpha-card.lolo");
+    let card = p
+        .path()
+        .join("node_modules/alpha/behaviors/lolo/ui/core/atoms/alpha-card.lolo");
     write(&card, &CARD_LOLO.replace("palette", "sideways"));
-    let out = orb(p.path(), &["behaviors", "catalog", "--json", "--no-vectors", "alpha"]);
+    let out = orb(
+        p.path(),
+        &["behaviors", "catalog", "--json", "--no-vectors", "alpha"],
+    );
     assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("alpha/alpha-card") && err.contains("sideways"), "{err}");
+    assert!(
+        err.contains("alpha/alpha-card") && err.contains("sideways"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -833,7 +861,12 @@ fn snapshot_writes_exactly_the_package_texts_deterministically_and_needs_a_provi
     };
     // Control: no stored vector and no provider fails and writes nothing.
     let failed = snapshot();
-    assert!(!failed.status.success());
+    assert!(
+        !failed.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&failed.stdout),
+        String::from_utf8_lossy(&failed.stderr)
+    );
     assert!(
         String::from_utf8_lossy(&failed.stderr).contains("ORB_VECTOR_PROVIDER_MISSING"),
         "{}",

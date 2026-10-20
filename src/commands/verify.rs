@@ -33,6 +33,8 @@ pub(crate) struct VerifyCliArgs {
     pub rust: bool,
     pub runtime: bool,
     pub compiled: bool,
+    /// `--web`: the native browser walk ([`run_verify_web`]).
+    pub web: bool,
     pub all: bool,
     pub json: bool,
     pub port: u16,
@@ -89,6 +91,7 @@ pub(crate) fn run_verify(args: VerifyCliArgs) -> Result<()> {
         rust,
         runtime,
         compiled,
+        web,
         all,
         json,
         port,
@@ -97,6 +100,10 @@ pub(crate) fn run_verify(args: VerifyCliArgs) -> Result<()> {
         all_personas,
         traits,
     } = args;
+    if web {
+        let path = path.ok_or_else(|| anyhow::anyhow!("--web walks one program: pass its path"))?;
+        return run_verify_web(&path, &traits, json, frames_dir.as_deref());
+    }
     let engine_timeout = engine_timeout.map(std::time::Duration::from_secs);
     let traits: Option<&[String]> = if traits.is_empty() {
         None
@@ -880,6 +887,142 @@ fn verify_one(
         l2_server,
         shell: shell_verdict,
     })
+}
+
+/// `orb verify --web`: the native browser walk of `path`'s web client ([`orbital_verify::web_walk`]). Exits non-zero when a
+/// step fails or cannot be driven.
+fn run_verify_web(
+    path: &Path,
+    traits: &[String],
+    json: bool,
+    frames_dir: Option<&Path>,
+) -> Result<()> {
+    let chrome = orbital_verify::cdp::chrome_executable().ok_or_else(|| {
+        anyhow::anyhow!("no Chrome found: install Google Chrome or set ORB_CHROME")
+    })?;
+    let web = crate::commands::serve::prepare_web(path, None)?;
+    let (server, runtime) = orbital_server::serve_standalone_background(
+        &web.program,
+        &orbital_server::StandaloneConfig {
+            host: "127.0.0.1".to_string(),
+            port: 0,
+            client_dir: Some(web.client_dir.clone()),
+            assets_dir: Some(web.assets.clone()),
+            mock: true,
+            env: vec![
+                ("NODE_ENV".to_string(), "development".to_string()),
+                ("ORB_DISABLE_RATE_LIMIT".to_string(), "1".to_string()),
+            ],
+        },
+    )?;
+    let schema = orbital_core::schema::parse_schema_file(&web.program)?;
+    let options = orbital_core::verify::plan_wire::PlanOptions {
+        traits: (!traits.is_empty()).then(|| traits.to_vec()),
+        ..Default::default()
+    };
+    let mut browser = orbital_verify::cdp::Chrome::launch(&chrome)?;
+    let rows = |entity: &str| runtime.persistence().count(entity).ok();
+    let entities: Vec<String> = schema
+        .orbitals
+        .iter()
+        .flat_map(|o| std::iter::once(&o.entity).chain(o.auxiliary_entities.iter().flatten()))
+        .filter_map(|e| match e {
+            orbital_core::EntityRef::Inline(def) => Some(def.name.clone()),
+            _ => None,
+        })
+        .collect();
+    let reset = || {
+        for entity in &entities {
+            let _ = runtime.persistence().delete_all(entity);
+        }
+        runtime.seed_sample(&schema, 3);
+    };
+    let hooks = orbital_verify::web_walk::ServerHooks {
+        rows: &rows,
+        reset: &reset,
+    };
+    let item = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("program")
+        .to_string();
+    let capture = frames_dir.map(|dir| orbital_verify::web_walk::FrameCapture { dir, item: &item });
+    let report = orbital_verify::web_walk::walk(
+        &mut browser,
+        &server.base_url(),
+        &schema,
+        &options,
+        &Default::default(),
+        &hooks,
+        capture.as_ref(),
+    )?;
+    let (passed, failed, other) = report.counts();
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        for step in &report.steps {
+            let status = match (&step.error, &step.verdict) {
+                (Some(error), _) => format!("error: {error}"),
+                (None, Some(verdict)) => format!("{:?} ({:?})", verdict.status, verdict.reason),
+                (None, None) => "not driven".to_string(),
+            };
+            let failure: String = step
+                .findings
+                .iter()
+                .map(|f| {
+                    if f.passed {
+                        format!("  [{} Pass]", f.name)
+                    } else {
+                        format!("  [{} Fail: {}]", f.name, f.detail)
+                    }
+                })
+                .collect();
+            println!(
+                "  {}: {} --{}--> {}  {status}{failure}",
+                step.trait_name, step.from, step.event, step.to
+            );
+        }
+        for mutation in &report.mutations {
+            let status = match (&mutation.error, &mutation.verdict) {
+                (Some(error), _) => format!("error: {error}"),
+                (None, Some(verdict)) => format!("{:?} ({:?})", verdict.status, verdict.reason),
+                (None, None) => "not driven".to_string(),
+            };
+            println!(
+                "  data-mutation {}.{} on {}  {status}",
+                mutation.trait_name, mutation.event, mutation.entity
+            );
+        }
+        for click in &report.clicks {
+            let status = match (&click.error, &click.verdict) {
+                (Some(error), _) => format!("error: {error}"),
+                (None, Some(verdict)) => format!("{:?} ({:?})", verdict.status, verdict.reason),
+                (None, None) => "not driven".to_string(),
+            };
+            println!(
+                "  click {}: {} [{}]  {status}",
+                click.trait_name, click.from, click.event
+            );
+        }
+        for verdict in &report.observers {
+            let status = if verdict.passed {
+                "Pass".to_string()
+            } else {
+                format!("Fail ({})", verdict.detail)
+            };
+            println!("  observer {}  {status}", verdict.name);
+        }
+        println!(
+            "web walk: {passed} passed, {failed} failed, {other} other of {} steps, {} data mutations and {} clicks",
+            report.steps.len(),
+            report.mutations.len(),
+            report.clicks.len()
+        );
+    }
+    if failed > 0 {
+        anyhow::bail!("{failed} step(s) failed in the browser");
+    }
+    Ok(())
 }
 
 /// Map the `--shell` arg value to a native compile-gate language. Errors on an
