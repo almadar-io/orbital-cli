@@ -5,7 +5,7 @@ use orbital_core::client::bridge::ServerBridge;
 use orbital_core::client::http::SyncServerBridge;
 use orbital_core::runtime::row_query::RowSetRef;
 use orbital_core::{OrbitalSchema, Value};
-use orbital_server::{serve_background, InMemoryAdapter, OrbitalServerRuntime};
+use orbital_server::{serve_background, DriverAdapter, OrbitalServerRuntime};
 use serde_json::json;
 use std::sync::Arc;
 
@@ -39,7 +39,7 @@ fn reference(ids: &[&str]) -> RowSetRef {
 }
 
 fn serve(viewer: serde_json::Value) -> orbital_server::BackgroundServer {
-    let runtime = Arc::new(OrbitalServerRuntime::new(Arc::new(InMemoryAdapter::new())));
+    let runtime = Arc::new(OrbitalServerRuntime::new(Arc::new(DriverAdapter::memory())));
     runtime.register_schema(schema()).unwrap();
     for (id, owner) in [("a1", "alice"), ("a2", "alice"), ("b1", "bob")] {
         let row: Value = serde_json::from_value(json!({ "id": id, "ownerId": owner })).unwrap();

@@ -831,6 +831,13 @@ enum Commands {
         global: bool,
     },
 
+    /// Run a long-lived program: boot it on the substrate host, mount INIT, and keep it
+    /// running while it has an open stream or listener; SIGINT/SIGTERM cancels them and exits.
+    Run {
+        /// The `.lolo`/`.orb` program.
+        program: PathBuf,
+    },
+
     /// Language i18n vocabulary — inspect the baked `.lolo`/`.orb` vocabulary
     /// tables and check translation coverage.
     I18n {
@@ -1142,6 +1149,17 @@ pub fn run() -> anyhow::Result<()> {
     orbital_core::logging::init();
     orbital_compiler::loader::register_source_lowerer(lower_lolo_file);
     orbital_compiler::phases::reflect::register_trait_describer(describe_trait_value);
+
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let cwd = std::env::current_dir()?;
+    let store = orbital_core::behavior_packages::user_store_dir().unwrap_or_else(|| cwd.clone());
+    if let Some(command) = commands::program_command::resolve_program_command(&args, &cwd, &store)? {
+        let (code, out) = commands::program_command::run_command_program(&command.program, &command.command, &command.argv, &cwd)?;
+        if !out.is_empty() {
+            println!("{out}");
+        }
+        std::process::exit(code);
+    }
 
     let cli = Cli::parse();
 
@@ -1475,6 +1493,7 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
         Some(Commands::Language { command }) => match command {
             LanguageCommand::Which => run_language_which(),
         },
+        Some(Commands::Run { program }) => commands::program_command::run_program(&program),
         Some(Commands::Update { global }) => commands::packages::run_update(global),
         Some(Commands::Add { packages, global }) => commands::packages::run_add(packages, global),
         Some(Commands::Remove { packages, global }) => commands::packages::run_remove(packages, global),
@@ -1553,17 +1572,6 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
         // `cli.prompt`) still must never silently become an agent prompt —
         // that case stays gated behind ORB_AGENT_FALLBACK=1.
         None => {
-            if let Some(command) = cli.prompt.first().filter(|_| !cli.list) {
-                let cwd = std::env::current_dir()?;
-                let store = orbital_core::behavior_packages::user_store_dir().unwrap_or_else(|| cwd.clone());
-                if let Some(program) = commands::program_command::find_command_program(command, &cwd, &store)? {
-                    let (code, out) = commands::program_command::run_command_program(&program, command, &cli.prompt[1..], &cwd)?;
-                    if !out.is_empty() {
-                        println!("{out}");
-                    }
-                    std::process::exit(code);
-                }
-            }
             if cli.list {
                 spawn_agent_with_args(&["status"])
             } else if cli.prompt.is_empty()

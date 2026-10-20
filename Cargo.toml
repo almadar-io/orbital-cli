@@ -31,6 +31,8 @@ clap.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# `orb run` stops on SIGINT/SIGTERM.
+tokio.workspace = true
 
 # Source Map v3 emission for `orb emit --map` and `orb trace`
 sourcemap = "9"

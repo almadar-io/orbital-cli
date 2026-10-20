@@ -620,6 +620,22 @@ impl ProgramHost {
     }
 }
 
+impl ProgramHost {
+    /// `program/machine`: the program resolved and read as transition rows (`orbital_core::program_machine`).
+    fn machine(&self, program: serde_json::Value) -> Result<Value, SubstrateFailure> {
+        use orbital_compiler::{phases::lazy::resolve_program_with_path, CompilerOptions};
+        let op = "program/machine";
+        let scratch = Scratch::new("almadar-machine")?;
+        let path = scratch.write("program.orb", &program.to_string())?;
+        let schema = crate::utils::parse_schema_auto(&program.to_string(), &path.display().to_string())
+            .map_err(|e| failure(format!("{op}: {e}")))?;
+        let (resolved, _lazy) = resolve_program_with_path(schema, &CompilerOptions::from_env(), Some(&path))
+            .map_err(|e| failure(format!("{op}: {e}")))?;
+        let rows = orbital_core::program_machine::machine_rows(&resolved);
+        from_json(serde_json::to_value(&rows).map_err(|e| failure(e.to_string()))?)
+    }
+}
+
 const LAYOUT_STRATEGIES: [&str; 5] = ["sidebar", "tabs", "dashboard", "wizard-flow", "single"];
 
 impl ProgramHost {
@@ -707,6 +723,7 @@ impl SubstrateHandler for ProgramHost {
             "program/compose" => self.compose(args),
             "program/eval" => self.eval(program_arg(op, args.first())?, args.get(1)),
             "program/step" => self.step(program_arg(op, args.first())?, args.get(1)),
+            "program/machine" => self.machine(program_arg(op, args.first())?),
             "behavior/dependencies" => self.dependencies(program_arg(op, args.first())?),
             other => Err(failure(format!(
                 "{other}: not an op the native program host answers"
@@ -935,6 +952,22 @@ orbital NoteOrbital {
         );
         assert_eq!(graph["orbitals"]["R"], serde_json::json!(["std-retry"]));
         assert_eq!(graph["behaviors"]["std-retry"]["layer"], "std");
+    }
+
+    #[test]
+    fn machine_reads_the_programs_transitions_as_rows() {
+        orbital_compiler::loader::register_source_lowerer(crate::lower_lolo_file);
+        let host = ProgramHost;
+        let program = host.run("program/read", &[Value::String(NOTE.to_string())]).unwrap();
+        let rows = json(&host.run("program/machine", &[program]).expect("rows"));
+        assert_eq!(
+            rows,
+            serde_json::json!([{ "orbital": "NoteOrbital", "trait": "NoteView", "from": "idle", "event": "INIT", "to": "idle", "guarded": false, "payload": [] }])
+        );
+        assert!(
+            host.run("program/machine", &[Value::Null]).unwrap_err().message.contains("not a program"),
+            "control: a value that is not a program is refused"
+        );
     }
 
     #[test]
