@@ -3,14 +3,13 @@
 //!
 //! 1. The program's runtime files (`client.json`, `program.client.json`, `themes.css`, `language.json`, `locales/`)
 //!    come from a client-mode compile into a scratch directory, the same files `orb compile` ships.
-//! 2. Unless `--no-emulators`, the shared dev Firebase emulators start (`@almadar/db/emulator`, run with Bun): the dev
-//!    personas are the app's `[identity]` rows signed in as Auth-emulator users, and the page reads the emulator from
+//! 2. Unless `--no-emulators`, the shared dev Firebase emulators start through the installed `orb emulators` program
+//!    (std `cli/` `std-orb-emulators`, run in process): the dev personas are the app's `[identity]` rows signed in as Auth-emulator users, and the page reads the emulator from
 //!    the served `/__/firebase/init.json`.
 //! 3. `orbital_server::run_standalone` serves the API, the runtime files and the prebuilt client on one port, the store
 //!    in memory with sample rows unless `--no-mock` (then the environment picks it: `DATA_BACKEND`, ...).
 
 use crate::commands::compile::compile_schema;
-use crate::utils::find_bun;
 use crate::{HostArg, ServerFrameworkArg, ShellMode, ShellType};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -64,7 +63,7 @@ pub(crate) fn run_serve(path: &Path, options: &ServeOptions) -> anyhow::Result<(
 
     let mut env = vec![("NODE_ENV".to_string(), "development".to_string())];
     if options.emulators {
-        let emulator_env = start_dev_emulators(&scratch)?;
+        let emulator_env = start_dev_emulators()?;
         write_hosted_config(&assets, &emulator_env)?;
         env.extend(emulator_env);
     } else {
@@ -145,58 +144,35 @@ fn write_hosted_config(assets: &Path, emulator_env: &[(String, String)]) -> anyh
     Ok(())
 }
 
-/// The installed `@almadar/db`'s `./emulator` entry, from its `exports` (resolved from the working directory, then the
-/// user store).
-fn emulator_module() -> anyhow::Result<PathBuf> {
+/// Start (or reuse) the shared dev emulators through the installed `orb emulators` program and read back its
+/// `KEY=value` answer (`FIREBASE_PROJECT_ID`, `*_EMULATOR_HOST`, ...).
+fn start_dev_emulators() -> anyhow::Result<Vec<(String, String)>> {
+    println!("Starting the Firebase emulators (Firestore + Auth)...");
     let cwd = std::env::current_dir()?;
-    let user_store =
-        orbital_core::behavior_packages::user_store_dir().unwrap_or_else(|| cwd.clone());
-    let package = orbital_core::behavior_packages::find_npm_package("@almadar/db", &cwd, &user_store).ok_or_else(|| {
-        anyhow::anyhow!(
-            "the dev emulators come from @almadar/db, which is not installed here or in the user store: add it to the project (`bun add -d @almadar/db`), or pass --no-emulators"
-        )
+    let store = orbital_core::behavior_packages::user_store_dir().unwrap_or_else(|| cwd.clone());
+    let program = crate::commands::program_command::find_command_program("emulators", &cwd, &store)?.ok_or_else(|| {
+        anyhow::anyhow!("no installed program provides `orb emulators` (std `cli/` std-orb-emulators): run `orb update`, or pass --no-emulators")
     })?;
-    let manifest: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(package.root.join("package.json"))?)?;
-    let entry = manifest
-        .pointer("/exports/.~1emulator/import")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "@almadar/db {} exports no ./emulator entry",
-                package.version
-            )
-        })?;
-    Ok(package.root.join(entry))
+    let (code, out) =
+        crate::commands::program_command::run_command_program(&program, "emulators", &[], &cwd)?;
+    if code != 0 {
+        anyhow::bail!("the Firebase emulators did not start: {out}\nPass --no-emulators to serve without dev personas.");
+    }
+    env_lines(&out)
 }
 
-/// Start (or reuse) the shared dev emulators and read back their env (`FIREBASE_PROJECT_ID`, `*_EMULATOR_HOST`, ...).
-fn start_dev_emulators(scratch: &Path) -> anyhow::Result<Vec<(String, String)>> {
-    println!("Starting the Firebase emulators (Firestore + Auth)...");
-    let module = emulator_module()?;
-    let script = scratch.join("emulators.mjs");
-    let answer = scratch.join("emulators.json");
-    std::fs::write(
-        &script,
-        format!(
-            "import {{ writeFileSync }} from 'node:fs';\nimport {{ homedir }} from 'node:os';\nimport {{ join }} from 'node:path';\n\
-             import {{ startDevEmulators }} from {};\n\
-             const dataDir = process.env.ALMADAR_EMULATOR_DATA_DIR ?? join(homedir(), '.almadar', 'emulator-data');\n\
-             const {{ env }} = await startDevEmulators(dataDir, {{ ...process.env, NODE_ENV: 'development' }});\n\
-             writeFileSync({}, JSON.stringify(env));\nprocess.exit(0);\n",
-            serde_json::to_string(&format!("file://{}", module.display()))?,
-            serde_json::to_string(&answer.display().to_string())?
-        ),
-    )?;
-    let status = Command::new(find_bun()?).arg(&script).status()?;
-    if !status.success() {
-        anyhow::bail!(
-            "the Firebase emulators did not start (they need firebase-tools and Java 21; see the output above). Pass --no-emulators to serve without dev personas."
-        );
-    }
-    let env: std::collections::BTreeMap<String, String> =
-        serde_json::from_str(&std::fs::read_to_string(&answer)?)?;
-    Ok(env.into_iter().collect())
+/// `KEY=value` lines, one per variable; a line without `=` is an error that names it.
+fn env_lines(text: &str) -> anyhow::Result<Vec<(String, String)>> {
+    text.lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            line.split_once('=')
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .ok_or_else(|| {
+                    anyhow::anyhow!("`orb emulators` answered a line that is not KEY=value: {line}")
+                })
+        })
+        .collect()
 }
 
 fn open_when_listening(url: String, port: u16) {
@@ -244,6 +220,27 @@ mod tests {
                 serde_json::json!({ "apiKey": "emulator", "projectId": "demo-almadar", "authEmulatorHost": "127.0.0.1:9099" })
             )
         );
+    }
+
+    #[test]
+    fn the_emulators_answer_is_one_variable_per_line() {
+        assert_eq!(
+            env_lines("FIRESTORE_EMULATOR_HOST=127.0.0.1:8080\nFIREBASE_PROJECT_ID=demo-almadar\n")
+                .unwrap(),
+            pairs(&[
+                ("FIRESTORE_EMULATOR_HOST", "127.0.0.1:8080"),
+                ("FIREBASE_PROJECT_ID", "demo-almadar")
+            ])
+        );
+        assert_eq!(env_lines("").unwrap(), pairs(&[]));
+    }
+
+    #[test]
+    fn control_a_line_without_equals_is_refused_by_name() {
+        let err = env_lines("FIRESTORE_EMULATOR_HOST=127.0.0.1:8080\nemulators_timeout: no")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("emulators_timeout: no"), "{err}");
     }
 
     #[test]

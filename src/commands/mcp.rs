@@ -442,8 +442,9 @@ impl ProgramTools {
         let resolved = super::dev::resolve_to_temp(path)?;
         let schema: orbital_core::OrbitalSchema =
             serde_json::from_str(&std::fs::read_to_string(&resolved)?)?;
+        let host = orbital_server::SubstratePort(std::sync::Arc::new(super::program_host::ProgramHost));
         let runtime =
-            orbital_server::boot_runtime(&resolved, false, &std::env::vars().collect(), false)?;
+            orbital_server::boot_runtime_with(&resolved, false, &std::env::vars().collect(), false, Some(host))?;
         let declared: Vec<&String> = schema.inbound.iter().flatten().collect();
         let mut hooks = Vec::new();
         for route in orbital_core::runtime::inbound::inbound_routes_of(&schema) {
@@ -519,10 +520,12 @@ impl ProgramTools {
                     headers.push((key.to_ascii_lowercase(), value.to_string()));
                 }
             }
-            let answer = self.runtime.deliver_inbound(
+            // One tool call at a time: a handler that answers after keyed I/O completes is waited for, up to ten minutes.
+            let answer = self.runtime.deliver_inbound_awaiting(
                 name,
                 headers.iter().map(|(k, v)| (k.as_str(), v.as_str())),
                 &raw,
+                Some(std::time::Duration::from_secs(600)),
             );
             let body =
                 serde_json::from_str::<Value>(&answer.body).unwrap_or(Value::String(answer.body));

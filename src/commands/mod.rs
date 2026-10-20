@@ -21,6 +21,8 @@ pub(crate) mod mcp;
 pub(crate) mod reference;
 pub(crate) mod npm_project;
 pub(crate) mod parse;
+pub(crate) mod program_command;
+pub(crate) mod program_host;
 pub(crate) mod serve;
 pub(crate) mod sidecar_fetch;
 pub(crate) mod simulate;

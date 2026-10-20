@@ -21,6 +21,17 @@ pub(crate) fn stamp_schema_cli(
     output: Option<&Path>,
     imports_dir: Option<&Path>,
 ) -> anyhow::Result<()> {
+    let json = stamped_json(path, prior_path, imports_dir)?;
+    match output {
+        Some(out) => std::fs::write(out, &json)
+            .map_err(|e| anyhow::anyhow!("Failed to write {}: {}", out.display(), e))?,
+        None => println!("{}", json),
+    }
+    Ok(())
+}
+
+/// What `orb stamp` writes for the `.orb` at `path`.
+pub(crate) fn stamped_json(path: &Path, prior_path: Option<&Path>, imports_dir: Option<&Path>) -> anyhow::Result<String> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| anyhow::anyhow!("Failed to read {}: {}", path.display(), e))?;
     let content = crate::utils::translate_schema_content(&content);
@@ -66,12 +77,6 @@ pub(crate) fn stamp_schema_cli(
     // byte-stability of a re-stamped registry file.
     let value = serde_json::to_value(&schema)
         .map_err(|e| anyhow::anyhow!("Failed to serialize stamped schema: {}", e))?;
-    let json = serde_json::to_string_pretty(&orbital_core::util::canonical_json(&value))
-        .map_err(|e| anyhow::anyhow!("Failed to serialize stamped schema: {}", e))?;
-    match output {
-        Some(out) => std::fs::write(out, &json)
-            .map_err(|e| anyhow::anyhow!("Failed to write {}: {}", out.display(), e))?,
-        None => println!("{}", json),
-    }
-    Ok(())
+    serde_json::to_string_pretty(&orbital_core::util::canonical_json(&value))
+        .map_err(|e| anyhow::anyhow!("Failed to serialize stamped schema: {}", e))
 }

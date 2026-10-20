@@ -278,11 +278,19 @@ fn emit_manifest(opts: &EmitOptions, source: &str, source_path: &str) -> Result<
 
 // --- Target: lolo ----------------------------------------------------------
 
-fn emit_lolo(source: &str, output: Option<&Path>, source_path: &str) -> Result<()> {
+/// What `orb emit orb` writes for `source`: the program as canonical `.orb` JSON.
+pub(crate) fn orb_json(source: &str, source_path: &str) -> Result<String> {
+    canonical_orb_json(&parse_any_syntax_with_prior(source, None, source_path)?)
+}
+
+/// What `orb emit lolo` writes for `source`: the program as `.lolo` text.
+pub(crate) fn lolo_text(source: &str, source_path: &str) -> Result<String> {
     let schema = parse_any_syntax(source, source_path)?;
-    let lolo =
-        orbital_lolo::schema_to_lolo(&schema).map_err(|e| anyhow!("{}: {}", source_path, e))?;
-    write_output(&lolo, output)
+    orbital_lolo::schema_to_lolo(&schema).map_err(|e| anyhow!("{}: {}", source_path, e))
+}
+
+fn emit_lolo(source: &str, output: Option<&Path>, source_path: &str) -> Result<()> {
+    write_output(&lolo_text(source, source_path)?, output)
 }
 
 /// Parse either `.lolo` surface syntax or `.orb` JSON based on first

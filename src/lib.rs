@@ -1544,6 +1544,17 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
         // `cli.prompt`) still must never silently become an agent prompt —
         // that case stays gated behind ORB_AGENT_FALLBACK=1.
         None => {
+            if let Some(command) = cli.prompt.first().filter(|_| !cli.list) {
+                let cwd = std::env::current_dir()?;
+                let store = orbital_core::behavior_packages::user_store_dir().unwrap_or_else(|| cwd.clone());
+                if let Some(program) = commands::program_command::find_command_program(command, &cwd, &store)? {
+                    let (code, out) = commands::program_command::run_command_program(&program, command, &cli.prompt[1..], &cwd)?;
+                    if !out.is_empty() {
+                        println!("{out}");
+                    }
+                    std::process::exit(code);
+                }
+            }
             if cli.list {
                 spawn_agent_with_args(&["status"])
             } else if cli.prompt.is_empty()
