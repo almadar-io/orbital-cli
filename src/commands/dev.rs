@@ -75,7 +75,12 @@ pub(crate) fn resolve_to_temp(path: &std::path::Path) -> anyhow::Result<PathBuf>
     let (resolved, lazy) =
         orbital_compiler::phases::lazy::resolve_program_with_path(schema, &options, Some(path))
             .map_err(|e| anyhow::anyhow!("resolve {}: {e}", path.display()))?;
-    let out = std::env::temp_dir().join(format!("orbital-dev-{}.orb", std::process::id()));
+    // One directory per call: programs resolved concurrently in one process (the runner, its tests) never share files.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("orbital-dev-{}-{n}", std::process::id()));
+    std::fs::create_dir_all(&dir)?;
+    let out = dir.join("program.orb");
     std::fs::write(&out, serde_json::to_string(&resolved)?)?;
     let program_dir = path.parent().unwrap_or(std::path::Path::new("."));
     orbital_compiler::phases::messages::write_catalogs(&out, &resolved, program_dir)?;

@@ -20,7 +20,7 @@ use commands::{
     run_engines_install, run_engines_list, run_engines_remove, run_engines_update, run_i18n_check,
     run_i18n_vocab, run_language_which, run_serve, run_tests, run_which, simulate_render, stamp_schema_cli, validate_schema,
 };
-use utils::{evaluate_sexpr, spawn_agent, spawn_agent_with_args};
+use utils::evaluate_sexpr;
 
 pub use utils::{parse_schema_auto_typed, TypedParseError};
 
@@ -31,34 +31,6 @@ pub use utils::{parse_schema_auto_typed, TypedParseError};
 pub(crate) struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
-
-    /// Initial prompt for the agent (when no subcommand is given)
-    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-    pub(crate) prompt: Vec<String>,
-
-    /// LLM provider override
-    #[arg(long, global = true)]
-    pub(crate) provider: Option<String>,
-
-    /// Autonomy level: full, balanced, cautious
-    #[arg(long, global = true)]
-    pub(crate) autonomy: Option<String>,
-
-    /// Resume a previous session
-    #[arg(long, global = true)]
-    pub(crate) resume: Option<Option<String>>,
-
-    /// Resume the most recent session
-    #[arg(long, global = true)]
-    pub(crate) last: bool,
-
-    /// Cost budget in USD
-    #[arg(long, global = true)]
-    pub(crate) budget: Option<f64>,
-
-    /// List all sessions
-    #[arg(long)]
-    list: bool,
 }
 
 /// Available shell types for code generation
@@ -658,32 +630,6 @@ enum Commands {
         verbose: bool,
     },
 
-    /// Auto-fix validation errors in a schema (delegates to agent)
-    Fix {
-        /// Path to the .orb schema file
-        #[arg(value_name = "FILE")]
-        path: PathBuf,
-    },
-
-    /// Run evaluation specs (delegates to agent)
-    Eval {
-        /// Evaluation spec name
-        spec: Option<String>,
-
-        /// Run all evaluation specs
-        #[arg(long)]
-        all: bool,
-    },
-
-    /// View agent trace from a session
-    Trace {
-        /// Session ID to view
-        session: Option<String>,
-    },
-
-    /// Authenticate with Almadar Cloud
-    Login,
-
     /// Emit generated code for inspection (`.orb` JSON, TypeScript, or Python).
     ///
     /// Runs the same compile pipeline as `orb compile` but skips the shell
@@ -1173,11 +1119,8 @@ pub fn run() -> anyhow::Result<()> {
             | Some(Commands::Add { .. })
             | Some(Commands::Remove { .. })
             | Some(Commands::List { .. })
-            | Some(Commands::Login)
             | Some(Commands::Mcp { .. })
             | Some(Commands::EmitTrace { .. })
-            | Some(Commands::Trace { .. })
-            | Some(Commands::Eval { .. })
             | Some(Commands::Behaviors {
                 command: BehaviorsCommand::Which { .. }
             })
@@ -1498,28 +1441,6 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
         Some(Commands::Add { packages, global }) => commands::packages::run_add(packages, global),
         Some(Commands::Remove { packages, global }) => commands::packages::run_remove(packages, global),
         Some(Commands::List { json, global }) => commands::packages::run_list(json, global),
-        // Agent-delegating commands
-        Some(Commands::Fix { path }) => {
-            spawn_agent_with_args(&["fix", &path.display().to_string()])
-        }
-        Some(Commands::Eval { spec, all }) => {
-            let mut args = vec!["eval"];
-            if all {
-                args.push("--all");
-            }
-            if let Some(ref s) = spec {
-                args.push(s);
-            }
-            spawn_agent_with_args(&args)
-        }
-        Some(Commands::Trace { session }) => {
-            let mut args = vec!["trace"];
-            if let Some(ref s) = session {
-                args.push(s);
-            }
-            spawn_agent_with_args(&args)
-        }
-        Some(Commands::Login) => spawn_agent_with_args(&["login"]),
         Some(Commands::Mcp {
             program,
             command: None,
@@ -1566,24 +1487,11 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
             key_id,
         }),
         Some(Commands::EmitTrace { position }) => emit::trace::run(&position),
-        // No subcommand: a truly bare `orb` (no trailing words) spawns the
-        // interactive agent again (user decision 2026-08-27, reversing part
-        // of 2026-07-17's blanket disable). Unmatched/typo'd input (non-empty
-        // `cli.prompt`) still must never silently become an agent prompt —
-        // that case stays gated behind ORB_AGENT_FALLBACK=1.
         None => {
-            if cli.list {
-                spawn_agent_with_args(&["status"])
-            } else if cli.prompt.is_empty()
-                || std::env::var("ORB_AGENT_FALLBACK").is_ok_and(|v| v == "1")
-            {
-                spawn_agent(&cli)
-            } else {
-                anyhow::bail!(
-                    "unknown command {:?}. The free-prompt agent fallback is disabled for unmatched input — run `orb --help` for commands, or set ORB_AGENT_FALLBACK=1 to opt in.",
-                    cli.prompt.join(" ")
-                )
-            }
+            use clap::CommandFactory;
+            Cli::command().print_help()?;
+            println!();
+            Ok(())
         }
     }
 }

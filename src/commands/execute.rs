@@ -556,7 +556,7 @@ mod outcome_report_tests {
             },
             effects_executed: 0,
             effect_results: Vec::new(),
-            entity_data: Value::Null,
+            entity_data: orbital_core::runtime::shared_entity::SharedEntity::null(),
             linked_entity: "Doc".into(),
             event: fired_arm.map(|_| "KEY".to_string()),
             payload: Value::Null,

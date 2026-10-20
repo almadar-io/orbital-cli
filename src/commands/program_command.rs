@@ -45,11 +45,10 @@ fn reserved_word_of(hook: &str) -> Option<&'static str> {
 }
 
 /// The commands `args` (argv after the binary) may name, in the order they are tried: `w1 w2 …` is `w1-w2` with
-/// `…`, then `w1` with `w2 …`; a bare `--list` is `status`; any other leading flag names none.
+/// `…`, then `w1` with `w2 …`; a leading flag names none.
 fn command_candidates(args: &[String]) -> Vec<(String, &[String])> {
     let is_word = |a: &String| !a.starts_with('-');
     match args {
-        [flag, rest @ ..] if flag == "--list" => vec![("status".to_string(), rest)],
         [first, second, rest @ ..] if is_word(first) && is_word(second) => {
             vec![(format!("{first}-{second}"), rest), (first.clone(), &args[1..])]
         }
@@ -321,10 +320,10 @@ orbital EchoOrbital {
     fn program_first_a_clap_subcommand_word_resolves_to_the_program_declaring_it() {
         use clap::CommandFactory;
         let (cwd, store) = project("program-first", "cli");
-        with_programs(&cwd, &["cli-fix", "cli-behaviors", "cli-behaviors-describe"]);
+        with_programs(&cwd, &["cli-serve", "cli-behaviors", "cli-behaviors-describe"]);
         let clap = crate::Cli::command();
-        assert!(clap.find_subcommand("fix").is_some() && clap.find_subcommand("behaviors").is_some());
-        assert_eq!(routed(&["fix", "a"], &cwd, &store), Some(("fix".into(), words(&["a"]))));
+        assert!(clap.find_subcommand("serve").is_some() && clap.find_subcommand("behaviors").is_some());
+        assert_eq!(routed(&["serve", "a"], &cwd, &store), Some(("serve".into(), words(&["a"]))));
         assert_eq!(
             routed(&["behaviors", "describe", "x"], &cwd, &store),
             Some(("behaviors-describe".into(), words(&["x"]))),
@@ -342,16 +341,28 @@ orbital EchoOrbital {
         assert_eq!(routed(&["validate", "app.lolo"], &cwd, &store), None);
         assert_eq!(routed(&["behaviors", "catalog"], &cwd, &store), None);
         assert_eq!(routed(&["--help"], &cwd, &store), None);
-        assert_eq!(routed(&["--list"], &cwd, &store), None, "no cli-status program: --list stays with clap");
+        assert_eq!(routed(&["--list"], &cwd, &store), None, "a leading flag names no program");
         assert_eq!(routed(&[], &cwd, &store), None);
     }
 
     #[test]
-    fn list_flag_is_the_status_program_when_installed() {
-        let (cwd, store) = project("list-status", "cli");
-        with_programs(&cwd, &["cli-status"]);
-        assert_eq!(routed(&["--list"], &cwd, &store), Some(("status".into(), Vec::new())));
-        assert_eq!(routed(&["status"], &cwd, &store), Some(("status".into(), Vec::new())));
+    fn the_agent_words_are_not_clap_subcommands() {
+        use clap::Parser;
+        for args in [&["orb", "fix", "a.orb"][..], &["orb", "login"], &["orb", "eval", "--all"], &["orb", "trace"], &["orb", "--list"]] {
+            let error = crate::Cli::try_parse_from(args).err().unwrap_or_else(|| panic!("{args:?} parsed"));
+            assert!(
+                matches!(error.kind(), clap::error::ErrorKind::InvalidSubcommand | clap::error::ErrorKind::UnknownArgument),
+                "{args:?}: {:?}",
+                error.kind()
+            );
+        }
+    }
+
+    #[test]
+    fn control_a_kept_subcommand_still_parses() {
+        use clap::Parser;
+        assert!(crate::Cli::try_parse_from(["orb", "validate", "app.lolo"]).is_ok());
+        assert!(crate::Cli::try_parse_from(["orb"]).is_ok());
     }
 
     #[test]
@@ -418,6 +429,7 @@ orbital ListenerOrbital {
       INIT -> booting
         (os/tcp-listen "127.0.0.1" 0 { key: "listener" emit: { success: LISTENING failure: LISTEN_FAILED onMessage: ACCEPTED } })
       LISTENING -> listening
+        (emit BOUND { port: @payload.port })
       LISTEN_FAILED -> booting
     }
 
@@ -435,6 +447,7 @@ orbital ListenerOrbital {
       LISTENING { sock : number address : string port : number key : string }
       LISTEN_FAILED { error : string kind : string }
       ACCEPTED { sock : number peer : string }
+      BOUND -> external { port : number! }
     }
   }
 
@@ -453,18 +466,35 @@ orbital ListenerOrbital {
     }
 
     fn bound_port(runtime: &orbital_server::OrbitalServerRuntime) -> u16 {
-        let answers: Vec<String> = runtime.trace().into_iter().flat_map(|t| t.asks).map(|a| a.answer).collect();
-        let answer = answers.iter().find(|a| a.contains("port")).unwrap_or_else(|| panic!("no bind answer in {answers:?}"));
-        let after = &answer[answer.find("\"port\"").expect("a port field") + 6..];
-        let digits: String = after.chars().skip_while(|c| !c.is_ascii_digit()).take_while(char::is_ascii_digit).collect();
-        digits.parse().unwrap()
+        let emits: Vec<_> = runtime.trace().into_iter().flat_map(|t| t.outcomes).flat_map(|o| o.emits).collect();
+        let bound = emits.iter().find(|e| e.event == "BOUND").unwrap_or_else(|| panic!("no BOUND emit in {emits:?}"));
+        bound.payload["port"].as_f64().filter(|p| p.fract() == 0.0 && (1.0..=65535.0).contains(p)).map(|p| p as u16).expect("a port")
     }
 
     #[test]
     fn run_holds_a_listening_program_open_until_stopped() {
+        bounded(run_holds_a_listening_program_body);
+    }
+
+    /// Run `body` on a thread of its own and fail if it has not finished within 30 s, so a blocked listener, accept or
+    /// lock fails the test instead of hanging the binary.
+    fn bounded(body: fn()) {
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let outcome = std::panic::catch_unwind(body);
+            let _ = done.send(outcome.is_ok());
+        });
+        match finished.recv_timeout(std::time::Duration::from_secs(30)) {
+            Ok(true) => {}
+            Ok(false) => panic!("the bounded body failed (its panic is printed above)"),
+            Err(_) => panic!("the bounded body did not finish within 30 s"),
+        }
+    }
+
+    fn run_holds_a_listening_program_body() {
         let program = run_fixture("listener", LISTENER);
         let runtime = boot_run(&program, true).unwrap();
-        assert_eq!(runtime.open_calls(), vec!["listener".to_string()]);
+        assert_eq!(runtime.open_calls(), vec!["listener".to_string()], "{}", serde_json::to_string(&runtime.trace()).unwrap());
         let port = bound_port(&runtime);
         let (stop, stopped) = std::sync::mpsc::channel();
         let held = std::thread::spawn({
@@ -485,6 +515,10 @@ orbital ListenerOrbital {
 
     #[test]
     fn control_run_of_a_program_with_no_stream_ends_after_init() {
+        bounded(control_run_body);
+    }
+
+    fn control_run_body() {
         let program = run_fixture("idle", ECHO);
         let runtime = boot_run(&program, false).unwrap();
         let (_stop, stopped) = std::sync::mpsc::channel();
