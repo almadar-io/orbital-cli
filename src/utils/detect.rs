@@ -86,6 +86,7 @@ pub fn parse_schema_auto_typed(
 /// [`parse_schema_auto_typed`] additionally returning the L2 source map (see
 /// [`orbital_lolo::source_map::LoloSourceMap`]) on the `.lolo` branch; `None`
 /// for `.orb` JSON input (there's no `.lolo` source to map back to).
+/// The third element lists the authored ids a ledger-less `.orb` load replaced.
 pub fn parse_schema_auto_typed_with_map(
     content: &str,
     source_path: &str,
@@ -93,20 +94,21 @@ pub fn parse_schema_auto_typed_with_map(
     (
         orbital_core::schema::OrbitalSchema,
         Option<orbital_lolo::LoloSourceMap>,
+        Vec<orbital_core::stamp::ReplacedAuthoredId>,
     ),
     TypedParseError,
 > {
     use orbital_core::schema::parse_schema;
     match detect_syntax(content) {
         InputSyntax::Lolo => orbital_lolo::parse_and_lower_str_with_map(content, source_path)
-            .map(|(schema, map)| (schema, Some(map)))
+            .map(|(schema, map)| (schema, Some(map), Vec::new()))
             .map_err(TypedParseError::Lolo),
         InputSyntax::OrbJson => {
             let translated = translate_schema_content(content);
             parse_schema(&translated)
                 .map(|mut schema| {
-                    orbital_core::stamp::ensure_stamped(&mut schema);
-                    (schema, None)
+                    let replaced = orbital_core::stamp::ensure_stamped(&mut schema);
+                    (schema, None, replaced)
                 })
                 .map_err(|e| TypedParseError::Json(e.to_string()))
         }
@@ -121,6 +123,7 @@ pub(crate) fn parse_schema_auto_with_map(
 ) -> anyhow::Result<(
     orbital_core::schema::OrbitalSchema,
     Option<orbital_lolo::LoloSourceMap>,
+    Vec<orbital_core::stamp::ReplacedAuthoredId>,
 )> {
     parse_schema_auto_typed_with_map(content, source_path)
         .map_err(|e| anyhow::anyhow!("{}", e.describe()))

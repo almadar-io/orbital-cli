@@ -24,6 +24,8 @@ use std::rc::Rc;
 /// Bump when the entry shape or a rule below changes: it is part of the cache key.
 const INDEX_RULES: &str = "behavior-index-2";
 const WORKERS: usize = 8;
+/// The main thread's stack: a deep program outgrows the 2 MiB default in a debug build.
+pub(crate) const WORKER_STACK: usize = 8 * 1024 * 1024;
 const MAX_IMPORT_DEPTH: usize = 16;
 /// A worker drops the programs it has loaded after this many behaviors, bounding what a cold derive holds.
 const RELOAD_EVERY: usize = 48;
@@ -452,7 +454,9 @@ fn derive(
     let slots: Vec<Slot> = files.iter().map(|_| Slot::default()).collect();
     std::thread::scope(|scope| {
         for _ in 0..WORKERS.min(files.len()) {
-            scope.spawn(|| {
+            std::thread::Builder::new()
+                .stack_size(WORKER_STACK)
+                .spawn_scoped(scope, || {
                 let programs = std::cell::RefCell::new(Programs::new(packages, &owners));
                 let mut done = 0usize;
                 loop {
@@ -469,7 +473,8 @@ fn derive(
                         *slot = Some(entry);
                     }
                 }
-            });
+            })
+                .expect("failed to spawn an index worker");
         }
     });
     let mut out = Vec::with_capacity(files.len());

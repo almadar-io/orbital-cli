@@ -166,6 +166,7 @@ pub(crate) fn compile_schema(
         }
         translated_path
     };
+    crate::commands::validate::lint_gate(path)?;
 
     // i18n: re-read content for the language detection branch below
     // (the lolo branch produces JSON which contains no Arabic/Slovenian).
@@ -267,6 +268,7 @@ fn compile_mixed(
             path.clone()
         }
     };
+    crate::commands::validate::lint_gate(path)?;
 
     let mut total_files = 0;
 

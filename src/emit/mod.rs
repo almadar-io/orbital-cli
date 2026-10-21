@@ -336,6 +336,7 @@ fn emit_code(opts: EmitOptions, source: &str, source_path: &str) -> Result<()> {
     let unresolved = schema.clone();
     let module = compile_schema(schema, &compiler_options)
         .map_err(|e| anyhow!("Schema compilation failed: {}", e))?;
+    crate::commands::validate::lint_gate_source(source, source_path)?;
 
     let generate_options = orbital_compiler::GenerateOptions { compiler: compiler_options, ..Default::default() };
     let program_path = Path::new(source_path);

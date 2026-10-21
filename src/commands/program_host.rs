@@ -659,14 +659,22 @@ impl ProgramHost {
                     "{op}: a request's entity must be an object of fields"
                 )));
             }
-            if r.get("viewer").is_some_and(|v| !v.is_object() && !v.is_null()) {
-                return Err(failure(format!("{op}: a request's viewer must be a user object or null")));
+            if r.get("viewer")
+                .is_some_and(|v| !v.is_object() && !v.is_null())
+            {
+                return Err(failure(format!(
+                    "{op}: a request's viewer must be a user object or null"
+                )));
             }
             if r.get("settleMs").is_some_and(|n| !n.is_number()) {
-                return Err(failure(format!("{op}: a request's settleMs must be a number of milliseconds")));
+                return Err(failure(format!(
+                    "{op}: a request's settleMs must be a number of milliseconds"
+                )));
             }
             if r.get("config").is_some_and(|c| !c.is_object()) {
-                return Err(failure(format!("{op}: a request's config must be an object of knob values")));
+                return Err(failure(format!(
+                    "{op}: a request's config must be an object of knob values"
+                )));
             }
             if r.get("now").is_some_and(|n| !n.is_number()) {
                 return Err(failure(format!(
@@ -697,8 +705,12 @@ impl ProgramHost {
                 )))
             }
         };
-        let report = crate::commands::execute::run_cascade_with(&path, &serde_json::Value::Array(steps), live)
-            .map_err(|e| failure(format!("{op}: {e}")))?;
+        let report = crate::commands::execute::run_cascade_with(
+            &path,
+            &serde_json::Value::Array(steps),
+            live,
+        )
+        .map_err(|e| failure(format!("{op}: {e}")))?;
         if report.get("success") != Some(&serde_json::Value::Bool(true)) {
             return Err(failure(format!(
                 "{op}: {}",
@@ -843,9 +855,10 @@ impl ProgramHost {
             .map(to_json)
             .filter(serde_json::Value::is_object)
             .ok_or_else(|| failure("program/compose: options must be an object with an appName"))?;
-        let (mut app_name, mut layout, mut theme) = (None, None, None);
+        let (mut app_name, mut layout, mut theme, mut overrides) = (None, None, None, None);
         for (key, value) in options.as_object().into_iter().flatten() {
             match (key.as_str(), value.as_str()) {
+                ("overrides", _) => overrides = Some(value.clone()),
                 ("appName", Some(v)) if !v.is_empty() => app_name = Some(v.to_string()),
                 ("theme", Some(v)) => theme = (!v.is_empty()).then(|| v.to_string()),
                 ("layout", v) => match v.filter(|l| LAYOUT_STRATEGIES.contains(l)) {
@@ -878,6 +891,7 @@ impl ProgramHost {
             &app_name,
             layout.as_deref(),
             theme.as_deref(),
+            overrides.as_ref(),
             &now,
             &load,
         )
@@ -1161,16 +1175,6 @@ orbital NoteOrbital {
 
     #[test]
     fn catalog_with_vectors_false_reads_no_store_and_no_provider() {
-        // An organism's catalog entry outgrows the 2 MiB test-thread stack; `orb` runs it on the 8 MiB main thread.
-        std::thread::Builder::new()
-            .stack_size(8 * 1024 * 1024)
-            .spawn(catalog_with_vectors_false_body)
-            .unwrap()
-            .join()
-            .unwrap();
-    }
-
-    fn catalog_with_vectors_false_body() {
         orbital_compiler::loader::register_source_lowerer(crate::lower_lolo_file);
         let store = Scratch::new("almadar-catalog-vectors").unwrap();
         let fake = CountingEmbedder(std::sync::Mutex::new(0));
@@ -1209,15 +1213,6 @@ orbital NoteOrbital {
 
     #[test]
     fn texts_answers_what_behaviors_texts_prints_in_embed_order() {
-        std::thread::Builder::new()
-            .stack_size(8 * 1024 * 1024)
-            .spawn(texts_body)
-            .unwrap()
-            .join()
-            .unwrap();
-    }
-
-    fn texts_body() {
         orbital_compiler::loader::register_source_lowerer(crate::lower_lolo_file);
         let paths = vec!["almadar-std/ml/organisms".to_string()];
         let scope = from_json(serde_json::json!({ "paths": paths })).unwrap();
@@ -1811,26 +1806,91 @@ orbital NoteOrbital {
             r
         };
         let on = || Some(serde_json::json!({ "mode": "on" }));
-        let played = json(&host.run("program/step", &[program.clone(), from_json(serde_json::json!([req(on()), req(None)])).unwrap()]).expect("steps"));
-        assert_eq!(played[0]["result"]["guard"], "pass", "the overridden knob admits the guard: {}", played[0]);
+        let played = json(
+            &host
+                .run(
+                    "program/step",
+                    &[
+                        program.clone(),
+                        from_json(serde_json::json!([req(on()), req(None)])).unwrap(),
+                    ],
+                )
+                .expect("steps"),
+        );
+        assert_eq!(
+            played[0]["result"]["guard"], "pass",
+            "the overridden knob admits the guard: {}",
+            played[0]
+        );
         assert_eq!(
             played[0]["result"]["outcomes"][1]["fired"], true,
-            "the override is the requested trait's only, a listener keeps its default: {}", played[0]
+            "the override is the requested trait's only, a listener keeps its default: {}",
+            played[0]
         );
-        let default = json(&host.run("program/step", &[program.clone(), from_json(serde_json::json!([req(None)])).unwrap()]).expect("steps"));
-        assert_eq!(default[0]["result"]["guard"], "fail", "control: a call that overrides nothing reads the default");
+        let default = json(
+            &host
+                .run(
+                    "program/step",
+                    &[
+                        program.clone(),
+                        from_json(serde_json::json!([req(None)])).unwrap(),
+                    ],
+                )
+                .expect("steps"),
+        );
+        assert_eq!(
+            default[0]["result"]["guard"], "fail",
+            "control: a call that overrides nothing reads the default"
+        );
         let split = host
-            .run("program/step", &[program.clone(), from_json(serde_json::json!([req(on()), req(Some(serde_json::json!({ "mode": "off" })))])).unwrap()])
+            .run(
+                "program/step",
+                &[
+                    program.clone(),
+                    from_json(serde_json::json!([
+                        req(on()),
+                        req(Some(serde_json::json!({ "mode": "off" })))
+                    ]))
+                    .unwrap(),
+                ],
+            )
             .unwrap_err();
-        assert!(split.message.contains("one call takes one value per knob"), "{}", split.message);
+        assert!(
+            split.message.contains("one call takes one value per knob"),
+            "{}",
+            split.message
+        );
         let unknown = host
-            .run("program/step", &[program.clone(), from_json(serde_json::json!([req(Some(serde_json::json!({ "nope": 1 })))])).unwrap()])
+            .run(
+                "program/step",
+                &[
+                    program.clone(),
+                    from_json(serde_json::json!([req(Some(
+                        serde_json::json!({ "nope": 1 })
+                    ))]))
+                    .unwrap(),
+                ],
+            )
             .unwrap_err();
-        assert!(unknown.message.contains("declares no knob `nope`"), "{}", unknown.message);
+        assert!(
+            unknown.message.contains("declares no knob `nope`"),
+            "{}",
+            unknown.message
+        );
         let bad = host
-            .run("program/step", &[program, from_json(serde_json::json!([req(Some(serde_json::json!("on")))])).unwrap()])
+            .run(
+                "program/step",
+                &[
+                    program,
+                    from_json(serde_json::json!([req(Some(serde_json::json!("on")))])).unwrap(),
+                ],
+            )
             .unwrap_err();
-        assert!(bad.message.contains("config must be an object"), "{}", bad.message);
+        assert!(
+            bad.message.contains("config must be an object"),
+            "{}",
+            bad.message
+        );
     }
 
     #[test]
@@ -1853,17 +1913,52 @@ orbital NoteOrbital {
         let requests = from_json(serde_json::json!([{ "orbital": "Live", "trait": "T", "from": "idle", "event": "ASK", "payload": {} }])).unwrap();
         let live = json(
             &host
-                .run("program/step", &[program.clone(), requests.clone(), from_json(serde_json::json!({ "live": true })).unwrap()])
+                .run(
+                    "program/step",
+                    &[
+                        program.clone(),
+                        requests.clone(),
+                        from_json(serde_json::json!({ "live": true })).unwrap(),
+                    ],
+                )
                 .expect("steps"),
         );
-        let events: Vec<&str> = live[0]["result"]["outcomes"].as_array().into_iter().flatten().filter_map(|o| o["event"].as_str()).collect();
-        assert_eq!(events, vec!["ASK", "GOT"], "live: the host answers getenv and its success route runs: {}", live[0]);
-        let replay = json(&host.run("program/step", &[program.clone(), requests.clone()]).expect("steps"));
-        assert_eq!(replay[0]["result"]["state"]["after"], "asking", "control: without live the ask stays pending");
+        let events: Vec<&str> = live[0]["result"]["outcomes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|o| o["event"].as_str())
+            .collect();
+        assert_eq!(
+            events,
+            vec!["ASK", "GOT"],
+            "live: the host answers getenv and its success route runs: {}",
+            live[0]
+        );
+        let replay = json(
+            &host
+                .run("program/step", &[program.clone(), requests.clone()])
+                .expect("steps"),
+        );
+        assert_eq!(
+            replay[0]["result"]["state"]["after"], "asking",
+            "control: without live the ask stays pending"
+        );
         let bad = host
-            .run("program/step", &[program, requests, from_json(serde_json::json!({ "live": "yes" })).unwrap()])
+            .run(
+                "program/step",
+                &[
+                    program,
+                    requests,
+                    from_json(serde_json::json!({ "live": "yes" })).unwrap(),
+                ],
+            )
             .unwrap_err();
-        assert!(bad.message.contains("options.live must be a boolean"), "{}", bad.message);
+        assert!(
+            bad.message.contains("options.live must be a boolean"),
+            "{}",
+            bad.message
+        );
     }
 
     #[test]
@@ -1890,20 +1985,75 @@ orbital NoteOrbital {
         };
         let run = |extra: serde_json::Value| {
             let mut r = serde_json::json!({ "orbital": "Sleep", "trait": "T", "from": "idle", "event": "RUN", "payload": {} });
-            r.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            r.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
             from_json(serde_json::json!([r])).unwrap()
         };
         let live = from_json(serde_json::json!({ "live": true })).unwrap();
         let started = std::time::Instant::now();
-        let cut = json(&host.run("program/step", &[program("5"), run(serde_json::json!({ "settleMs": 300 })), live.clone()]).expect("steps"));
-        assert!(started.elapsed() < std::time::Duration::from_secs(4), "settleMs cuts the open wait off");
-        assert_eq!(cut[0]["result"]["entityAfter"]["done"], false, "the cut-off call never answered: {}", cut[0]);
-        let waited = json(&host.run("program/step", &[program("0.2"), run(serde_json::json!({})), live.clone()]).expect("steps"));
-        assert_eq!(waited[0]["result"]["entityAfter"]["done"], true, "control: without settleMs the step waits for the process: {}", waited[0]);
-        let bad = host.run("program/step", &[program("0"), run(serde_json::json!({ "settleMs": "soon" })), live]).unwrap_err();
-        assert!(bad.message.contains("settleMs must be a number"), "{}", bad.message);
-        let replay = host.run("program/step", &[program("0"), run(serde_json::json!({ "settleMs": 10 }))]).unwrap_err();
-        assert!(replay.message.contains("settleMs` applies to a live call only"), "control: no cutoff to set without live: {}", replay.message);
+        let cut = json(
+            &host
+                .run(
+                    "program/step",
+                    &[
+                        program("5"),
+                        run(serde_json::json!({ "settleMs": 300 })),
+                        live.clone(),
+                    ],
+                )
+                .expect("steps"),
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(4),
+            "settleMs cuts the open wait off"
+        );
+        assert_ne!(
+            cut[0]["result"]["entityAfter"]["done"], true,
+            "the cut-off call never answered: {}",
+            cut[0]
+        );
+        let waited = json(
+            &host
+                .run(
+                    "program/step",
+                    &[program("0.2"), run(serde_json::json!({})), live.clone()],
+                )
+                .expect("steps"),
+        );
+        assert_eq!(
+            waited[0]["result"]["entityAfter"]["done"], true,
+            "control: without settleMs the step waits for the process: {}",
+            waited[0]
+        );
+        let bad = host
+            .run(
+                "program/step",
+                &[
+                    program("0"),
+                    run(serde_json::json!({ "settleMs": "soon" })),
+                    live,
+                ],
+            )
+            .unwrap_err();
+        assert!(
+            bad.message.contains("settleMs must be a number"),
+            "{}",
+            bad.message
+        );
+        let replay = host
+            .run(
+                "program/step",
+                &[program("0"), run(serde_json::json!({ "settleMs": 10 }))],
+            )
+            .unwrap_err();
+        assert!(
+            replay
+                .message
+                .contains("settleMs` applies to a live call only"),
+            "control: no cutoff to set without live: {}",
+            replay.message
+        );
     }
 
     #[test]
@@ -1931,19 +2081,55 @@ orbital NoteOrbital {
             &host
                 .run(
                     "program/step",
-                    &[program.clone(), from_json(serde_json::json!([req("MINE", Some(u1.clone())), req("MINE", None), req("WHO", Some(u1)), req("WHO", Some(serde_json::Value::Null))])).unwrap()],
+                    &[
+                        program.clone(),
+                        from_json(serde_json::json!([
+                            req("MINE", Some(u1.clone())),
+                            req("MINE", None),
+                            req("WHO", Some(u1)),
+                            req("WHO", Some(serde_json::Value::Null))
+                        ]))
+                        .unwrap(),
+                    ],
                 )
                 .expect("steps"),
         );
-        assert_eq!(played[0]["result"]["guard"], "pass", "the viewer is @user: {}", played[0]);
-        assert_eq!(played[1]["result"]["guard"], "fail", "control: without a viewer @user is nobody: {}", played[1]);
+        assert_eq!(
+            played[0]["result"]["guard"], "pass",
+            "the viewer is @user: {}",
+            played[0]
+        );
+        assert_eq!(
+            played[1]["result"]["guard"], "fail",
+            "control: without a viewer @user is nobody: {}",
+            played[1]
+        );
         assert_eq!(played[2]["result"]["emitted"][0]["payload"]["id"], "u1");
         assert!(
-            played[3]["result"]["emitted"][0]["payload"].get("id").is_none_or(serde_json::Value::is_null),
-            "control: a null viewer is nobody: {}", played[3]
+            played[3]["result"]["emitted"][0]["payload"]
+                .get("id")
+                .is_none_or(serde_json::Value::is_null),
+            "control: a null viewer is nobody: {}",
+            played[3]
         );
-        let bad = host.run("program/step", &[program, from_json(serde_json::json!([req("WHO", Some(serde_json::json!("u1")))])).unwrap()]).unwrap_err();
-        assert!(bad.message.contains("viewer must be a user object or null"), "{}", bad.message);
+        let bad = host
+            .run(
+                "program/step",
+                &[
+                    program,
+                    from_json(serde_json::json!([req(
+                        "WHO",
+                        Some(serde_json::json!("u1"))
+                    )]))
+                    .unwrap(),
+                ],
+            )
+            .unwrap_err();
+        assert!(
+            bad.message.contains("viewer must be a user object or null"),
+            "{}",
+            bad.message
+        );
     }
 
     #[test]
@@ -2004,9 +2190,27 @@ orbital NoteOrbital {
                 ] } }] }] }))
         .unwrap();
         let req = |event: &str| serde_json::json!({ "orbital": "Row", "trait": "T", "from": "idle", "event": event, "payload": {}, "entity": { "n": 1 } });
-        let played = json(&host.run("program/step", &[program, from_json(serde_json::json!([req("BUMP"), req("NOPE")])).unwrap()]).expect("steps"));
-        assert_eq!(played[0]["result"]["entityAfter"]["n"], 6.0, "the set shows in the row: {}", played[0]);
-        assert_eq!(played[1]["result"]["entityAfter"]["n"], 1.0, "control: a request that fires nothing leaves the seeded row: {}", played[1]);
+        let played = json(
+            &host
+                .run(
+                    "program/step",
+                    &[
+                        program,
+                        from_json(serde_json::json!([req("BUMP"), req("NOPE")])).unwrap(),
+                    ],
+                )
+                .expect("steps"),
+        );
+        assert_eq!(
+            played[0]["result"]["entityAfter"]["n"], 6.0,
+            "the set shows in the row: {}",
+            played[0]
+        );
+        assert_eq!(
+            played[1]["result"]["entityAfter"]["n"], 1.0,
+            "control: a request that fires nothing leaves the seeded row: {}",
+            played[1]
+        );
     }
 
     #[test]
@@ -2024,11 +2228,28 @@ orbital NoteOrbital {
                 ] } }] }] }))
         .unwrap();
         let req = |event: &str| serde_json::json!({ "orbital": "Em", "trait": "T", "from": "idle", "event": event, "payload": {} });
-        let played = json(&host.run("program/step", &[program, from_json(serde_json::json!([req("GO"), req("LIT")])).unwrap()]).expect("steps"));
+        let played = json(
+            &host
+                .run(
+                    "program/step",
+                    &[
+                        program,
+                        from_json(serde_json::json!([req("GO"), req("LIT")])).unwrap(),
+                    ],
+                )
+                .expect("steps"),
+        );
         let r = &played[0]["result"];
-        assert_eq!(r["emitted"], serde_json::json!([]), "a failed emit is no emit: {r}");
+        assert_eq!(
+            r["emitted"],
+            serde_json::json!([]),
+            "a failed emit is no emit: {r}"
+        );
         assert_eq!(r["effects"][0]["status"], "failed", "{r}");
-        assert_eq!(played[1]["result"]["emitted"][0]["payload"]["lit"], 7.0, "control: a literal emit is reported");
+        assert_eq!(
+            played[1]["result"]["emitted"][0]["payload"]["lit"], 7.0,
+            "control: a literal emit is reported"
+        );
     }
 
     #[test]

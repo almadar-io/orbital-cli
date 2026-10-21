@@ -617,6 +617,96 @@ orbital ListenerOrbital {
         assert_eq!(hold(&runtime, &stopped), RunEnd::Idle);
     }
 
+    /// `relay: false` is G-ORB-472: `SplitCli` handles `cli-split` while only `SplitEngine` emits its answer.
+    fn split_program(relay: bool) -> String {
+        let relay_arm = if relay { "\n      RELAYED -> ready\n        (emit SPLIT_ANSWERED { status: @payload.status, body: @payload.body })" } else { "" };
+        let relay_listen = if relay {
+            "\n      SplitEngine.SPLIT_ANSWERED -> RELAYED\n      RELAYED { status : number!  body : string! }"
+        } else {
+            ""
+        };
+        format!(
+            r#"app fake-split [
+  version: "1.0.0",
+  inbound: ["cli-split"],
+  description: "Hands its call to an engine trait that answers."
+]
+
+orbital SplitOrbital {{
+  entity SplitRun [runtime] {{
+    id : string!
+  }}
+
+  trait SplitCli -> SplitRun [integration] {{
+    initial: ready
+
+    state ready {{
+      INIT -> ready
+      SPLIT_CALLED -> ready
+        (emit SPLIT_START {{}}){relay_arm}
+    }}
+
+    emits {{
+      SPLIT_ANSWERED -> internal {{ status : number! body : string! }}
+      SPLIT_START -> external {{}}
+    }}
+
+    listens {{
+      SPLIT_CALLED -> inbound "cli-split" answers SPLIT_ANSWERED {{
+        headers : Map string string
+        rawBody : string
+      }}{relay_listen}
+    }}
+  }}
+
+  trait SplitEngine -> SplitRun [integration] {{
+    initial: ready
+
+    state ready {{
+      INIT -> ready
+      STARTED -> ready
+        (emit SPLIT_ANSWERED {{ status: 200, body: "engine done" }})
+    }}
+
+    emits {{
+      SPLIT_ANSWERED -> external {{ status : number! body : string! }}
+    }}
+
+    listens {{
+      SplitCli.SPLIT_START -> STARTED
+      STARTED {{}}
+    }}
+  }}
+
+  page "/split" -> SplitCli, SplitEngine
+}}
+"#
+        )
+    }
+
+    #[test]
+    fn a_command_whose_answer_only_a_sibling_trait_emits_answers_unanswered_instead_of_hanging() {
+        bounded(|| {
+            let program = run_fixture("split", &split_program(false));
+            let CommandAnswer { code, body: out, .. } = run_command_program(&program, "split", &[], Path::new(".")).unwrap();
+            assert_eq!(code, 1, "{out}");
+            let body: serde_json::Value = serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}: {out}"));
+            assert_eq!(
+                (body["code"].as_str(), body["trait"].as_str(), body["event"].as_str()),
+                (Some("inbound-unanswered"), Some("SplitCli"), Some("SPLIT_CALLED"))
+            );
+        });
+    }
+
+    #[test]
+    fn control_a_command_that_relays_its_engines_answer_answers_it() {
+        bounded(|| {
+            let program = run_fixture("split-relay", &split_program(true));
+            let CommandAnswer { code, body: out, .. } = run_command_program(&program, "split", &[], Path::new(".")).unwrap();
+            assert_eq!((code, out.as_str()), (0, "engine done"));
+        });
+    }
+
     #[test]
     fn control_the_same_hook_outside_the_cli_topic_is_not_a_command() {
         let (cwd, store) = project("other-topic", "infra");

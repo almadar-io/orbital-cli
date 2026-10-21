@@ -267,17 +267,25 @@ orbital NotesOrbital {
         orbital_shell_rust::host::SubstratePort(std::sync::Arc::new(crate::commands::program_host::ProgramHost))
     }
 
-    /// The organism's own `net` grant and Http1 port: a composed trait's knobs cannot be set from the command line yet.
-    const STD_SERVER_PORT: u16 = 3000;
+    fn free_port() -> u16 {
+        std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    }
 
     #[test]
     fn a_composed_app_and_std_http_server_boot_on_the_shell_host_and_answer_health() {
         use std::io::{Read, Write};
+        let port = free_port();
+        let overrides = serde_json::json!({
+            "Http1.port": port,
+            "grants": { "net": [{ "target": format!("127.0.0.1:{port}"), "kinds": ["listen"] }] }
+        });
         let host = orbital_shell_rust::host::boot::boot_composed(
             vec![app_program("health"), std_http_server()],
             "served-notes",
+            Some(overrides),
             program_host(),
             orbital_shell_rust::host::boot::Catalogs::new(),
+            true,
             &[("NODE_ENV".to_string(), "development".to_string())].into_iter().collect(),
             true,
         )
@@ -287,12 +295,12 @@ orbital NotesOrbital {
         orbital_shell_rust::host::run::mount_init(&host).unwrap_or_else(|e| panic!("INIT: {e}"));
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         let mut conn = loop {
-            match std::net::TcpStream::connect(("127.0.0.1", STD_SERVER_PORT)) {
+            match std::net::TcpStream::connect(("127.0.0.1", port)) {
                 Ok(conn) => break conn,
                 Err(e) => {
                     assert!(
                         std::time::Instant::now() < deadline,
-                        "the composed server never listened on {STD_SERVER_PORT}: {e}; open calls {:?}; trace {}",
+                        "the composed server never listened on {port}: {e}; open calls {:?}; trace {}",
                         host.open_calls(),
                         serde_json::to_string(&host.trace()).unwrap()
                     );
@@ -314,8 +322,10 @@ orbital NotesOrbital {
         let error = orbital_shell_rust::host::boot::boot_composed(
             vec![app_program("refused"), orbital_core::Value::String("not a program".to_string())],
             "served-notes",
+            None,
             program_host(),
             orbital_shell_rust::host::boot::Catalogs::new(),
+            true,
             &Default::default(),
             false,
         )

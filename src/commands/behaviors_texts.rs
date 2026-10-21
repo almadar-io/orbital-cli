@@ -333,20 +333,23 @@ pub(crate) fn describe_all(
         .collect();
     std::thread::scope(|scope| {
         for _ in 0..DESCRIBE_WORKERS.min(registry.len()) {
-            scope.spawn(|| loop {
-                let i = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                let Some((name, entry)) = registry.get(i) else {
-                    break;
-                };
-                let facts = if skip_internal && entry.exposure.as_deref() == Some("internal") {
-                    Ok(Vec::new())
-                } else {
-                    text_facts(&format!("{prefix}/{name}"), name)
-                };
-                if let Ok(mut slot) = slots[i].lock() {
-                    *slot = Some(facts);
-                }
-            });
+            std::thread::Builder::new()
+                .stack_size(super::behaviors_index::WORKER_STACK)
+                .spawn_scoped(scope, || loop {
+                    let i = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let Some((name, entry)) = registry.get(i) else {
+                        break;
+                    };
+                    let facts = if skip_internal && entry.exposure.as_deref() == Some("internal") {
+                        Ok(Vec::new())
+                    } else {
+                        text_facts(&format!("{prefix}/{name}"), name)
+                    };
+                    if let Ok(mut slot) = slots[i].lock() {
+                        *slot = Some(facts);
+                    }
+                })
+                .expect("failed to spawn a describe worker");
         }
     });
     slots
