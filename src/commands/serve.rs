@@ -168,12 +168,16 @@ fn start_dev_emulators() -> anyhow::Result<Vec<(String, String)>> {
     let program = crate::commands::program_command::find_command_program("emulators", &cwd, &store)?.ok_or_else(|| {
         anyhow::anyhow!("no installed program provides `orb emulators` (std `cli/` std-orb-emulators): run `orb update`, or pass --no-emulators")
     })?;
-    let (code, out) =
+    let answer =
         crate::commands::program_command::run_command_program(&program, "emulators", &[], &cwd)?;
-    if code != 0 {
-        anyhow::bail!("the Firebase emulators did not start: {out}\nPass --no-emulators to serve without dev personas.");
+    if answer.code != 0 {
+        let stderr = answer.stderr.as_deref().unwrap_or("");
+        anyhow::bail!(
+            "the Firebase emulators did not start: {}{stderr}\nPass --no-emulators to serve without dev personas.",
+            answer.body
+        );
     }
-    env_lines(&out)
+    env_lines(&answer.body)
 }
 
 /// `KEY=value` lines, one per variable; a line without `=` is an error that names it.
@@ -215,6 +219,110 @@ fn open_when_listening(url: String, port: u16) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const APP: &str = r#"app served-notes [
+  version: "1.0.0",
+  description: "A one-orbital app served beside std-http-server."
+]
+
+orbital NotesOrbital {
+  entity Note [runtime] {
+    id : string!
+  }
+
+  trait Notes -> Note [interaction] {
+    initial: idle
+
+    state idle {
+      INIT -> idle
+    }
+  }
+
+  page "/notes" -> Notes
+}
+"#;
+
+    fn resolved_program(path: &Path) -> orbital_core::Value {
+        orbital_compiler::loader::register_source_lowerer(crate::lower_lolo_file);
+        let resolved = crate::commands::dev::resolve_to_temp(path).unwrap_or_else(|e| panic!("resolve {}: {e:#}", path.display()));
+        serde_json::from_str(&std::fs::read_to_string(&resolved).unwrap()).unwrap()
+    }
+
+    fn app_program(tag: &str) -> orbital_core::Value {
+        let dir = std::env::temp_dir().join(format!("orb-serve-composed-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("served-notes.lolo");
+        std::fs::write(&path, APP).unwrap();
+        resolved_program(&path)
+    }
+
+    fn std_http_server() -> orbital_core::Value {
+        resolved_program(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../packages/almadar-std/behaviors/lolo/net/organisms/std-http-server.lolo"),
+        )
+    }
+
+    fn program_host() -> orbital_shell_rust::host::SubstratePort {
+        orbital_shell_rust::host::SubstratePort(std::sync::Arc::new(crate::commands::program_host::ProgramHost))
+    }
+
+    /// The organism's own `net` grant and Http1 port: a composed trait's knobs cannot be set from the command line yet.
+    const STD_SERVER_PORT: u16 = 3000;
+
+    #[test]
+    fn a_composed_app_and_std_http_server_boot_on_the_shell_host_and_answer_health() {
+        use std::io::{Read, Write};
+        let host = orbital_shell_rust::host::boot::boot_composed(
+            vec![app_program("health"), std_http_server()],
+            "served-notes",
+            program_host(),
+            orbital_shell_rust::host::boot::Catalogs::new(),
+            &[("NODE_ENV".to_string(), "development".to_string())].into_iter().collect(),
+            true,
+        )
+        .unwrap_or_else(|e| panic!("boot: {e:#}"));
+        let names: Vec<String> = host.list_orbitals().into_iter().map(|o| o.name).collect();
+        assert!(names.iter().any(|n| n == "NotesOrbital"), "the app is composed in: {names:?}");
+        orbital_shell_rust::host::run::mount_init(&host).unwrap_or_else(|e| panic!("INIT: {e}"));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut conn = loop {
+            match std::net::TcpStream::connect(("127.0.0.1", STD_SERVER_PORT)) {
+                Ok(conn) => break conn,
+                Err(e) => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "the composed server never listened on {STD_SERVER_PORT}: {e}; open calls {:?}; trace {}",
+                        host.open_calls(),
+                        serde_json::to_string(&host.trace()).unwrap()
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+            }
+        };
+        conn.set_read_timeout(Some(std::time::Duration::from_secs(10))).unwrap();
+        conn.write_all(b"GET /api/health HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n").unwrap();
+        let mut reply = String::new();
+        let _ = conn.read_to_string(&mut reply);
+        host.cancel_open_calls();
+        assert!(reply.starts_with("HTTP/1.1 200"), "{reply:?}");
+        assert!(reply.contains("\"status\":\"healthy\""), "{reply:?}");
+    }
+
+    #[test]
+    fn control_a_compose_that_refuses_boots_nothing() {
+        let error = orbital_shell_rust::host::boot::boot_composed(
+            vec![app_program("refused"), orbital_core::Value::String("not a program".to_string())],
+            "served-notes",
+            program_host(),
+            orbital_shell_rust::host::boot::Catalogs::new(),
+            &Default::default(),
+            false,
+        )
+        .err()
+        .expect("a list holding a non-program is refused");
+        assert!(error.to_string().contains("program/compose: not a program"), "{error:#}");
+    }
 
     fn pairs(list: &[(&str, &str)]) -> Vec<(String, String)> {
         list.iter()

@@ -4,6 +4,7 @@
 //! (EXEC-INBOUND-1; the answer may come from a dispatch the handler's keyed completions cause,
 //! `orbital_shell_rust::host::Host::deliver_inbound_awaiting`).
 
+use orbital_shell_rust::host::run::{hold, stop_on_signal};
 use std::path::{Path, PathBuf};
 
 /// The hook a command's program declares.
@@ -68,157 +69,150 @@ pub(crate) fn resolve_program_command(args: &[String], cwd: &Path, user_store: &
         return Ok(None);
     }
     let programs = cli_programs(cwd, user_store)?;
-    for (command, argv) in candidates {
-        if let Some(program) = program_for(&programs, &hook_name(&command))? {
-            return Ok(Some(ProgramCommand { program, command, argv: argv.to_vec() }));
+    for (command, argv) in &candidates {
+        if let Some(program) = programs.declaring(&hook_name(command))? {
+            return Ok(Some(ProgramCommand { program, command: command.clone(), argv: argv.to_vec() }));
         }
     }
+    programs.unanswered(&candidates.iter().map(|(command, _)| hook_name(command)).collect::<Vec<_>>())?;
     Ok(None)
 }
 
 /// The installed program in a `cli` topic that declares the hook `cli-<command>`, from the behavior packages resolved
 /// from `cwd` and then `user_store`. More than one is an error that names them.
 pub(crate) fn find_command_program(command: &str, cwd: &Path, user_store: &Path) -> anyhow::Result<Option<PathBuf>> {
-    program_for(&cli_programs(cwd, user_store)?, &hook_name(command))
+    let programs = cli_programs(cwd, user_store)?;
+    let hook = hook_name(command);
+    let found = programs.declaring(&hook)?;
+    if found.is_none() {
+        programs.unanswered(std::slice::from_ref(&hook))?;
+    }
+    Ok(found)
 }
 
-/// Every installed `cli`-topic program with the inbound hooks it declares; one declaring a reserved word is an error.
-fn cli_programs(cwd: &Path, user_store: &Path) -> anyhow::Result<Vec<(PathBuf, Vec<String>)>> {
+/// The installed `cli`-topic programs, indexed by the hooks their app header declares (parsed, not lowered: a program
+/// that fails to lower still owns its command and reports the failure when that command runs). A program whose header
+/// cannot be parsed, or which declares a reserved word, owns no command; it is reported by a lookup no program answers.
+struct CliPrograms {
+    declared: Vec<(PathBuf, Vec<String>)>,
+    unusable: Vec<String>,
+}
+
+impl CliPrograms {
+    fn declaring(&self, hook: &str) -> anyhow::Result<Option<PathBuf>> {
+        let mut found: Vec<&PathBuf> =
+            self.declared.iter().filter(|(_, hooks)| hooks.iter().any(|h| h == hook)).map(|(p, _)| p).collect();
+        match found.len() {
+            0 => Ok(None),
+            1 => Ok(found.pop().cloned()),
+            _ => anyhow::bail!(
+                "more than one installed program declares `{hook}`: {}",
+                found.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
+            ),
+        }
+    }
+
+    /// Fails naming every unusable program, any of which may be the one meant to declare one of `hooks`.
+    fn unanswered(&self, hooks: &[String]) -> anyhow::Result<()> {
+        if self.unusable.is_empty() {
+            return Ok(());
+        }
+        let hooks = hooks.iter().map(|hook| format!("`{hook}`")).collect::<Vec<_>>().join(" or ");
+        anyhow::bail!(
+            "no installed program declares {hooks}, and these `cli` programs declare no command:\n{}",
+            self.unusable.join("\n")
+        )
+    }
+}
+
+fn cli_programs(cwd: &Path, user_store: &Path) -> anyhow::Result<CliPrograms> {
     let packages = orbital_core::behavior_packages::discover(cwd, user_store).map_err(|e| anyhow::anyhow!("{e}"))?;
-    let mut programs = Vec::new();
+    let mut programs = CliPrograms { declared: Vec::new(), unusable: Vec::new() };
     for package in &packages {
         let files = orbital_core::behavior_index::indexed_files(package).map_err(|e| anyhow::anyhow!("{e}"))?;
         for file in files.iter().filter(|file| file.topic() == "cli") {
             let Some(path) = orbital_core::behavior_index::lolo_path_of(package, file).filter(|p| p.is_file()) else {
                 continue;
             };
-            let schema = orbital_compiler::parse_file(&path).map_err(|e| anyhow::anyhow!("parse {}: {e}", path.display()))?;
-            let hooks = schema.inbound.unwrap_or_default();
+            let source = std::fs::read_to_string(&path).map_err(|e| anyhow::anyhow!("read {}: {e}", path.display()))?;
+            let hooks = match orbital_lolo::parse_str(&source) {
+                Ok(program) => program.app.inbound,
+                Err(inner) => {
+                    programs
+                        .unusable
+                        .push(orbital_lolo::LoloError::Parse { path: path.display().to_string(), inner }.render());
+                    continue;
+                }
+            };
             if let Some((hook, word)) = hooks.iter().find_map(|hook| reserved_word_of(hook).map(|word| (hook, word))) {
-                anyhow::bail!("{} declares `{hook}`, but `{word}` is a reserved `orb` command no program can take", path.display());
+                programs.unusable.push(format!(
+                    "{} declares `{hook}`, but `{word}` is a reserved `orb` command no program can take",
+                    path.display()
+                ));
+                continue;
             }
-            programs.push((path, hooks));
+            programs.declared.push((path, hooks));
         }
     }
     Ok(programs)
 }
 
-fn program_for(programs: &[(PathBuf, Vec<String>)], hook: &str) -> anyhow::Result<Option<PathBuf>> {
-    let mut found: Vec<&PathBuf> = programs.iter().filter(|(_, hooks)| hooks.iter().any(|h| h == hook)).map(|(p, _)| p).collect();
-    match found.len() {
-        0 => Ok(None),
-        1 => Ok(found.pop().cloned()),
-        _ => anyhow::bail!(
-            "more than one installed program declares `{hook}`: {}",
-            found.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
-        ),
+/// A command program's answer: the process exit code of its status, the body for stdout and the `stderr` text, if any.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct CommandAnswer {
+    pub(crate) code: i32,
+    pub(crate) body: String,
+    pub(crate) stderr: Option<String>,
+}
+
+impl CommandAnswer {
+    /// The body on `stdout` and the `stderr` text on `stderr`, each as a line when not empty.
+    pub(crate) fn write_to(
+        &self,
+        stdout: &mut dyn std::io::Write,
+        stderr: &mut dyn std::io::Write,
+    ) -> std::io::Result<()> {
+        if !self.body.is_empty() {
+            writeln!(stdout, "{}", self.body)?;
+        }
+        match self.stderr.as_deref() {
+            Some(text) if !text.is_empty() => writeln!(stderr, "{text}"),
+            _ => Ok(()),
+        }
     }
 }
 
-/// Run `program` as `orb <command> <argv…>`: its answer's body on stdout, its exit code returned.
-pub(crate) fn run_command_program(program: &Path, command: &str, argv: &[String], cwd: &Path) -> anyhow::Result<(i32, String)> {
+/// Run `program` as `orb <command> <argv…>`: its answer, with the exit code of its status.
+pub(crate) fn run_command_program(program: &Path, command: &str, argv: &[String], cwd: &Path) -> anyhow::Result<CommandAnswer> {
     let resolved = crate::commands::dev::resolve_to_temp(program)?;
     let host = orbital_shell_rust::host::SubstratePort(std::sync::Arc::new(crate::commands::program_host::ProgramHost));
     let runtime = orbital_shell_rust::host::boot::boot_file(&resolved, false, &std::env::vars().collect(), false, Some(host))?;
     let body = serde_json::json!({ "argv": argv, "cwd": cwd.display().to_string() }).to_string();
     let answer = runtime.deliver_inbound_awaiting(&hook_name(command), [("content-type", "application/json")], &body, None);
-    Ok((exit_code(answer.status), answer.body))
+    Ok(CommandAnswer { code: exit_code(answer.status), body: answer.body, stderr: answer.stderr })
 }
-
-/// The entity a run mounts its traits on, as an event request naming none addresses (`"default"`).
-const RUN_ENTITY: &str = "default";
 
 /// `orb run <program>`, booted: the program on the substrate host, `INIT` mounted on every trait.
 pub(crate) fn boot_run(program: &Path, trace: bool) -> anyhow::Result<std::sync::Arc<orbital_shell_rust::host::Host>> {
     let resolved = crate::commands::dev::resolve_to_temp(program)?;
     let host = orbital_shell_rust::host::SubstratePort(std::sync::Arc::new(crate::commands::program_host::ProgramHost));
     let runtime = orbital_shell_rust::host::boot::boot_file(&resolved, false, &std::env::vars().collect(), trace, Some(host))?;
-    let seeds: Vec<orbital_core::effects::MountSeed> = runtime
-        .list_orbitals()
-        .iter()
-        .filter_map(|orbital| runtime.get_orbital(&orbital.name))
-        .flat_map(|detail| detail.traits)
-        .map(|name| orbital_core::effects::MountSeed {
-            r#trait: name,
-            event: orbital_core::effects::LifecycleEvent::Init,
-        })
-        .collect();
-    if !seeds.is_empty() {
-        runtime.dispatch_mount(&seeds, RUN_ENTITY, orbital_core::Value::Null).map_err(|e| anyhow::anyhow!("INIT: {e}"))?;
-    }
+    orbital_shell_rust::host::run::mount_init(&runtime).map_err(|e| anyhow::anyhow!("INIT: {e}"))?;
     Ok(runtime)
-}
-
-/// How a run ended.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum RunEnd {
-    /// No keyed call was left open.
-    Idle,
-    /// A stop request arrived (SIGINT/SIGTERM); every open call was cancelled.
-    Stopped,
-}
-
-/// Keep `runtime` running while it has an open keyed call (a listener, a watch, a pending answer). A message on (or
-/// the hang-up of) `stop` cancels each open call through the `cancel-call` path and ends the run.
-pub(crate) fn hold_run(runtime: &orbital_shell_rust::host::Host, stop: &std::sync::mpsc::Receiver<()>) -> RunEnd {
-    const CHECK: std::time::Duration = std::time::Duration::from_millis(50);
-    loop {
-        if runtime.open_calls().is_empty() {
-            return RunEnd::Idle;
-        }
-        match stop.recv_timeout(CHECK) {
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-            Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                runtime.cancel_open_calls();
-                return RunEnd::Stopped;
-            }
-        }
-    }
-}
-
-/// A channel that receives one message when the process gets SIGINT or SIGTERM.
-#[cfg(unix)]
-pub(crate) fn stop_on_signal() -> anyhow::Result<std::sync::mpsc::Receiver<()>> {
-    use tokio::signal::unix::{signal, SignalKind};
-    let (sender, receiver) = std::sync::mpsc::channel();
-    let signals = tokio::runtime::Builder::new_current_thread().enable_io().build()?;
-    let (mut interrupt, mut terminate) = signals.block_on(async {
-        Ok::<_, std::io::Error>((signal(SignalKind::interrupt())?, signal(SignalKind::terminate())?))
-    })?;
-    std::thread::Builder::new().name("orb-run-signals".to_string()).spawn(move || {
-        signals.block_on(async {
-            tokio::select! {
-                _ = interrupt.recv() => {}
-                _ = terminate.recv() => {}
-            }
-        });
-        let _ = sender.send(());
-    })?;
-    Ok(receiver)
-}
-
-#[cfg(not(unix))]
-pub(crate) fn stop_on_signal() -> anyhow::Result<std::sync::mpsc::Receiver<()>> {
-    let (sender, receiver) = std::sync::mpsc::channel();
-    let signals = tokio::runtime::Builder::new_current_thread().enable_io().build()?;
-    std::thread::Builder::new().name("orb-run-signals".to_string()).spawn(move || {
-        let _ = signals.block_on(tokio::signal::ctrl_c());
-        let _ = sender.send(());
-    })?;
-    Ok(receiver)
 }
 
 /// `orb run <program>`: boot it, hold it while it has open calls, stop cleanly on SIGINT/SIGTERM.
 pub(crate) fn run_program(program: &Path) -> anyhow::Result<()> {
     let stop = stop_on_signal()?;
     let runtime = boot_run(program, false)?;
-    hold_run(&runtime, &stop);
+    hold(&runtime, &stop);
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use orbital_shell_rust::host::run::{RunEnd, RUN_ENTITY};
 
     const ECHO: &str = r#"app fake-echo [
   version: "1.0.0",
@@ -290,10 +284,92 @@ orbital EchoOrbital {
         let program = find_command_program("echo", &cwd, &store).unwrap().expect("the cli program is found");
         assert!(program.ends_with("cli/atoms/fake-echo.lolo"), "{}", program.display());
         assert_eq!(find_command_program("nope", &cwd, &store).unwrap(), None, "control: no program declares cli-nope");
-        let (code, out) = run_command_program(&program, "echo", &["hello".into(), "world".into()], &cwd).unwrap();
+        let CommandAnswer { code, body: out, .. } = run_command_program(&program, "echo", &["hello".into(), "world".into()], &cwd).unwrap();
         assert_eq!((code, out.as_str()), (0, "hello world"));
-        let (code, out) = run_command_program(&program, "echo", &[], &cwd).unwrap();
+        let CommandAnswer { code, body: out, .. } = run_command_program(&program, "echo", &[], &cwd).unwrap();
         assert_eq!((code, out.as_str()), (2, "usage: orb echo <words>"), "a refused input is exit 2 with its message");
+    }
+
+    fn with_stderr_program(cwd: &Path) {
+        let dir = cwd.join("node_modules/@fake/cli/behaviors/lolo/cli/atoms");
+        let source = ECHO
+            .replace("cli-echo", "cli-warn")
+            .replace(
+                r#"{ status: 400, body: "usage: orb echo <words>" }"#,
+                r#"{ status: 400, body: "", stderr: "usage: orb warn <words>" }"#,
+            )
+            .replace("{ status : number! body : string! }", "{ status : number! body : string! stderr : string }");
+        std::fs::write(dir.join("fake-warn.lolo"), source).unwrap();
+    }
+
+    fn written(answer: &CommandAnswer) -> (String, String) {
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        answer.write_to(&mut out, &mut err).unwrap();
+        (String::from_utf8(out).unwrap(), String::from_utf8(err).unwrap())
+    }
+
+    #[test]
+    fn an_answer_stderr_reaches_stderr_and_its_status_is_the_exit_code() {
+        let (cwd, store) = project("stderr", "cli");
+        with_stderr_program(&cwd);
+        let program = find_command_program("warn", &cwd, &store).unwrap().expect("the stderr program is found");
+        let refused = run_command_program(&program, "warn", &[], &cwd).unwrap();
+        assert_eq!(
+            refused,
+            CommandAnswer { code: 2, body: String::new(), stderr: Some("usage: orb warn <words>".into()) }
+        );
+        assert_eq!(written(&refused), (String::new(), "usage: orb warn <words>\n".into()));
+        let answered = run_command_program(&program, "warn", &["hi".into()], &cwd).unwrap();
+        assert_eq!(
+            answered,
+            CommandAnswer { code: 0, body: "hi".into(), stderr: None },
+            "an answer that omits stderr has none"
+        );
+        assert_eq!(written(&answered), ("hi\n".into(), String::new()));
+    }
+
+    #[test]
+    fn control_an_answer_without_stderr_prints_its_body_on_stdout_only() {
+        let (cwd, store) = project("no-stderr", "cli");
+        let program = find_command_program("echo", &cwd, &store).unwrap().expect("the cli program is found");
+        let refused = run_command_program(&program, "echo", &[], &cwd).unwrap();
+        assert_eq!(refused, CommandAnswer { code: 2, body: "usage: orb echo <words>".into(), stderr: None });
+        assert_eq!(written(&refused), ("usage: orb echo <words>\n".into(), String::new()));
+    }
+
+    #[test]
+    fn a_program_that_fails_to_lower_fails_only_its_own_command() {
+        let (cwd, store) = project("lower-broken", "cli");
+        let dir = cwd.join("node_modules/@fake/cli/behaviors/lolo/cli/atoms");
+        std::fs::write(
+            dir.join("fake-bad.lolo"),
+            ECHO.replace("cli-echo", "cli-bad").replace("status : number!", "status : Nope!"),
+        )
+        .unwrap();
+        let echo = find_command_program("echo", &cwd, &store).unwrap().expect("the healthy command still resolves");
+        let CommandAnswer { code, body: out, .. } = run_command_program(&echo, "echo", &["hi".into()], &cwd).unwrap();
+        assert_eq!((code, out.as_str()), (0, "hi"));
+        let bad =
+            find_command_program("bad", &cwd, &store).unwrap().expect("the broken program's hook is still readable");
+        assert!(bad.ends_with("cli/atoms/fake-bad.lolo"), "{}", bad.display());
+        let error = run_command_program(&bad, "bad", &[], &cwd).unwrap_err().to_string();
+        assert!(error.contains("fake-bad.lolo") && error.contains("Nope"), "{error}");
+        assert_eq!(
+            find_command_program("nope", &cwd, &store).unwrap(),
+            None,
+            "control: a lowering failure is not a missing command"
+        );
+    }
+
+    #[test]
+    fn an_unparseable_program_is_reported_only_where_no_healthy_program_answers() {
+        let (cwd, store) = project("parse-broken", "cli");
+        with_broken_program(&cwd);
+        let echo = find_command_program("echo", &cwd, &store).unwrap().expect("the healthy command still resolves");
+        assert!(echo.ends_with("cli/atoms/fake-echo.lolo"), "{}", echo.display());
+        assert_eq!(routed(&["echo", "hi"], &cwd, &store), Some(("echo".into(), words(&["hi"]))));
+        let error = find_command_program("nope", &cwd, &store).unwrap_err().to_string();
+        assert!(error.contains("fake-broken.lolo") && error.contains("`cli-nope`"), "{error}");
     }
 
     fn with_programs(cwd: &Path, hooks: &[&str]) {
@@ -331,8 +407,19 @@ orbital EchoOrbital {
         );
         assert_eq!(routed(&["behaviors", "catalog"], &cwd, &store), Some(("behaviors".into(), words(&["catalog"]))));
         let command = resolve_program_command(&words(&["behaviors", "describe", "hi"]), &cwd, &store).unwrap().unwrap();
-        let (code, out) = run_command_program(&command.program, &command.command, &command.argv, &cwd).unwrap();
+        let CommandAnswer { code, body: out, .. } = run_command_program(&command.program, &command.command, &command.argv, &cwd).unwrap();
         assert_eq!((code, out.as_str()), (0, "hi"));
+    }
+
+    #[test]
+    fn simulate_and_language_which_resolve_to_their_programs_and_clap_no_longer_has_them() {
+        use clap::Parser;
+        let (cwd, store) = project("route1", "cli");
+        with_programs(&cwd, &["cli-simulate", "cli-language"]);
+        assert_eq!(routed(&["simulate", "app.lolo"], &cwd, &store), Some(("simulate".into(), words(&["app.lolo"]))));
+        assert_eq!(routed(&["language", "which"], &cwd, &store), Some(("language".into(), words(&["which"]))));
+        assert!(crate::Cli::try_parse_from(["orb", "validate", "a.lolo", "--simulate"]).is_err());
+        assert!(crate::Cli::try_parse_from(["orb", "language", "which"]).is_err());
     }
 
     #[test]
@@ -397,7 +484,12 @@ orbital EchoOrbital {
     fn a_program_declaring_a_reserved_word_is_refused() {
         let (cwd, store) = project("reserved-declared", "cli");
         with_programs(&cwd, &["cli-validate"]);
-        let error = resolve_program_command(&words(&["echo", "hi"]), &cwd, &store).unwrap_err().to_string();
+        assert_eq!(
+            routed(&["echo", "hi"], &cwd, &store),
+            Some(("echo".into(), words(&["hi"]))),
+            "other commands still resolve"
+        );
+        let error = resolve_program_command(&words(&["nope"]), &cwd, &store).unwrap_err().to_string();
         assert!(error.contains("`cli-validate`") && error.contains("`validate` is a reserved"), "{error}");
         assert_eq!(routed(&["validate", "a.lolo"], &cwd, &store), None, "the reserved word itself still reaches clap");
     }
@@ -499,7 +591,7 @@ orbital ListenerOrbital {
         let (stop, stopped) = std::sync::mpsc::channel();
         let held = std::thread::spawn({
             let runtime = runtime.clone();
-            move || hold_run(&runtime, &stopped)
+            move || hold(&runtime, &stopped)
         });
         let _conn = std::net::TcpStream::connect(("127.0.0.1", port)).expect("the listener accepts");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -522,7 +614,7 @@ orbital ListenerOrbital {
         let program = run_fixture("idle", ECHO);
         let runtime = boot_run(&program, false).unwrap();
         let (_stop, stopped) = std::sync::mpsc::channel();
-        assert_eq!(hold_run(&runtime, &stopped), RunEnd::Idle);
+        assert_eq!(hold(&runtime, &stopped), RunEnd::Idle);
     }
 
     #[test]

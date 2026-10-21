@@ -248,8 +248,8 @@ pub(crate) fn execute_cascade_cli(
 
 /// `orb execute <FILE> --steps '[{trait, event, payload}, …]'`: each step through the same kernel
 /// in order, so what one step leaves behind (a held delivery, a state) is what the next one meets.
-pub(crate) fn execute_cascade_steps_cli(path: &Path, steps: &str) -> anyhow::Result<()> {
-    print_cascade_report(parse_json_arg(Some(steps)).and_then(|steps| run_cascade(path, &steps)))
+pub(crate) fn execute_cascade_steps_cli(path: &Path, steps: &str, live: bool) -> anyhow::Result<()> {
+    print_cascade_report(parse_json_arg(Some(steps)).and_then(|steps| run_cascade_with(path, &steps, live)))
 }
 
 fn print_cascade_report(report: anyhow::Result<serde_json::Value>) -> anyhow::Result<()> {
@@ -269,6 +269,7 @@ fn outcome_report(
     let emits: Vec<serde_json::Value> = r
         .effect_results
         .iter()
+        .filter(|er| !er.is_failed())
         .filter_map(|er| match &er.effect {
             Effect::Emit { event, payload } => Some(serde_json::json!({
                 "event": event,
@@ -312,6 +313,104 @@ fn outcome_report(
     })
 }
 
+/// The program with each step's `config` knob values written over its trait's declared defaults, in a file of its
+/// own; `None` when no step overrides a knob. The compiler folds `@config` into the program at resolve time, so an
+/// override is the program's for the whole call: two steps giving one trait's knob different values are refused.
+fn with_step_config(path: &Path, steps: &[serde_json::Value]) -> anyhow::Result<Option<StepConfigFile>> {
+    let mut knobs: std::collections::BTreeMap<(String, String), serde_json::Value> = Default::default();
+    for (i, step) in steps.iter().enumerate() {
+        match &step["config"] {
+            serde_json::Value::Null => {}
+            serde_json::Value::Object(values) => {
+                let trait_name = step["trait"].as_str().unwrap_or_default().to_string();
+                for (knob, value) in values {
+                    match knobs.insert((trait_name.clone(), knob.clone()), value.clone()) {
+                        Some(earlier) if &earlier != value => anyhow::bail!(
+                            "step {i}: config.{knob} of {trait_name} is {value}, but an earlier step set it to {earlier}; \
+                             one call takes one value per knob (the compiler folds @config at resolve time)"
+                        ),
+                        _ => {}
+                    }
+                }
+            }
+            _ => anyhow::bail!("step {i}: `config` must be an object of knob values"),
+        }
+    }
+    if knobs.is_empty() {
+        return Ok(None);
+    }
+    let text = std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("Failed to read {}: {e}", path.display()))?;
+    let mut program: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| anyhow::anyhow!("step config: {} is not .orb JSON: {e}", path.display()))?;
+    for ((trait_name, knob), value) in knobs {
+        let declared = program["orbitals"]
+            .as_array_mut()
+            .into_iter()
+            .flatten()
+            .filter_map(|o| o["traits"].as_array_mut())
+            .flatten()
+            .find(|t| t["name"] == trait_name.as_str() && t.get("stateMachine").is_some())
+            .and_then(|t| t.get_mut("config"))
+            .and_then(|c| c.get_mut(&knob))
+            .and_then(serde_json::Value::as_object_mut)
+            .ok_or_else(|| anyhow::anyhow!("step config: {trait_name} declares no knob `{knob}`"))?;
+        declared.insert("default".to_string(), value);
+    }
+    // Beside the program, so its relative imports resolve as they do from the program itself.
+    let file = path.with_file_name(format!(
+        ".orb-step-config-{}-{}.orb",
+        std::process::id(),
+        STEP_CONFIG_FILES.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+    ));
+    std::fs::write(&file, serde_json::to_string(&program)?)?;
+    Ok(Some(StepConfigFile(file)))
+}
+
+/// The configured program's file, removed when the call ends.
+struct StepConfigFile(std::path::PathBuf);
+
+impl Drop for StepConfigFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+static STEP_CONFIG_FILES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// A live step waits for its open keyed calls (a spawned process, a stream) to end. With the request's `settleMs`,
+/// a call still open after it is cancelled through `cancel-call`; without it the step waits, never cutting one off.
+fn settle_open_calls(host: &orbital_shell_rust::host::Host, settle_ms: Option<f64>) {
+    let (stop, stopped) = std::sync::mpsc::channel::<()>();
+    match settle_ms {
+        Some(ms) => {
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(ms.max(0.0) as u64));
+                let _ = stop.send(());
+            });
+            orbital_shell_rust::host::run::hold(host, &stopped);
+        }
+        None => {
+            orbital_shell_rust::host::run::hold(host, &stopped);
+            drop(stop);
+        }
+    }
+}
+
+/// A step's host answer: a keyed os/* or http ask is left pending (its answer event is a later step's to play,
+/// G-ORB-459); every other ask is answered as a kernel with no host answers it.
+fn step_answer(
+    kernel: &orbital_core::runtime::RuntimeKernel,
+    request: &orbital_core::runtime::resumable::IoRequest,
+) -> orbital_core::runtime::resumable::IoAnswer {
+    use orbital_core::runtime::resumable::{BlockingHost, IoAnswer, IoRequest};
+    match request {
+        IoRequest::Os { key: Some(_), .. }
+        | IoRequest::Http { key: Some(_), .. }
+        | IoRequest::HttpStream { key: Some(_), .. } => IoAnswer::ServiceDeferred,
+        other => BlockingHost { source: kernel.entity_source().as_ref(), service: None, substrate: None }.answer(other),
+    }
+}
+
 /// The program at `path`, parsed and resolved the way a cascade runs it.
 pub(crate) fn resolve_program(path: &Path) -> anyhow::Result<orbital_core::OrbitalSchema> {
     use orbital_compiler::{phases::lazy::resolve_program_with_path, CompilerOptions};
@@ -326,29 +425,30 @@ pub(crate) fn resolve_program(path: &Path) -> anyhow::Result<orbital_core::Orbit
 }
 
 pub(crate) fn run_cascade(path: &Path, steps: &serde_json::Value) -> anyhow::Result<serde_json::Value> {
+    run_cascade_with(path, steps, false)
+}
+
+/// [`run_cascade`]; `live` runs the steps on the native program host (`orbital_shell_rust::host`), so their os/* and
+/// http asks are answered by this machine instead of left pending (G-ORB-459).
+pub(crate) fn run_cascade_with(path: &Path, steps: &serde_json::Value, live: bool) -> anyhow::Result<serde_json::Value> {
     use orbital_core::runtime::{EntitySource, InMemoryEntityCache, RuntimeKernel};
 
     let steps = steps
         .as_array()
         .ok_or_else(|| anyhow::anyhow!("--steps must be a JSON array"))?;
+    let configured = with_step_config(path, steps)?;
+    let path = configured.as_ref().map_or(path, |file| file.0.as_path());
     let resolved = resolve_program(path)?;
 
     let pinned_now: std::sync::Arc<std::sync::Mutex<Option<f64>>> = Default::default();
     let clock_pin = std::sync::Arc::clone(&pinned_now);
-    let kernel = RuntimeKernel::new(
-        orbital_core::RuntimeEnvironment::Server,
-        std::sync::Arc::new(InMemoryEntityCache::new()) as std::sync::Arc<dyn EntitySource>,
-        orbital_core::KernelConfig {
-            clock: Some(std::sync::Arc::new(move || {
-                clock_pin
-                    .lock()
-                    .ok()
-                    .and_then(|pin| *pin)
-                    .unwrap_or_else(orbital_core::time_util::now_millis_f64)
-            })),
-            ..Default::default()
-        },
-    );
+    let clock: orbital_core::runtime::DispatchClock = std::sync::Arc::new(move || {
+        clock_pin
+            .lock()
+            .ok()
+            .and_then(|pin| *pin)
+            .unwrap_or_else(orbital_core::time_util::now_millis_f64)
+    });
     let trait_defs: std::collections::BTreeMap<String, TraitDefinition> =
         resolved
             .orbitals
@@ -359,9 +459,34 @@ pub(crate) fn run_cascade(path: &Path, steps: &serde_json::Value) -> anyhow::Res
                 _ => None,
             })
             .collect();
-    kernel
-        .register_schema(resolved)
-        .map_err(|e| anyhow::anyhow!("Failed to register {}: {e}", path.display()))?;
+    let live_host = if live {
+        let program = crate::commands::dev::resolve_to_temp(path)?;
+        let config = orbital_shell_rust::host::HostConfig {
+            substrate: Some(orbital_shell_rust::host::SubstratePort(std::sync::Arc::new(
+                crate::commands::program_host::ProgramHost,
+            ))),
+            clock: Some(clock.clone()),
+            ..orbital_shell_rust::host::HostConfig::default()
+        };
+        Some(orbital_shell_rust::host::boot::boot_file_with(&program, false, &std::env::vars().collect(), false, config)?)
+    } else {
+        None
+    };
+    let replay_kernel;
+    let kernel: &RuntimeKernel = match &live_host {
+        Some(host) => host.kernel(),
+        None => {
+            replay_kernel = RuntimeKernel::new(
+                orbital_core::RuntimeEnvironment::Server,
+                std::sync::Arc::new(InMemoryEntityCache::new()) as std::sync::Arc<dyn EntitySource>,
+                orbital_core::KernelConfig { clock: Some(clock), ..Default::default() },
+            );
+            replay_kernel
+                .register_schema(resolved)
+                .map_err(|e| anyhow::anyhow!("Failed to register {}: {e}", path.display()))?;
+            &replay_kernel
+        }
+    };
     kernel.set_record_entity_after(true);
 
     let known = kernel.trait_snapshot(Some("singleton"));
@@ -380,6 +505,17 @@ pub(crate) fn run_cascade(path: &Path, steps: &serde_json::Value) -> anyhow::Res
             serde_json::Value::Null => None,
             serde_json::Value::Object(fields) => Some(fields),
             _ => anyhow::bail!("step {i}: `entity` must be an object of fields"),
+        };
+        let viewer = match &step["viewer"] {
+            serde_json::Value::Null => None,
+            user @ serde_json::Value::Object(_) => Some(to_core_value(user)?),
+            _ => anyhow::bail!("step {i}: `viewer` must be a user object or null"),
+        };
+        let settle_ms = match &step["settleMs"] {
+            serde_json::Value::Null => None,
+            serde_json::Value::Number(n) if live => n.as_f64(),
+            serde_json::Value::Number(_) => anyhow::bail!("step {i}: `settleMs` applies to a live call only"),
+            _ => anyhow::bail!("step {i}: `settleMs` must be a number of milliseconds"),
         };
         let now = match &step["now"] {
             serde_json::Value::Null => None,
@@ -417,11 +553,27 @@ pub(crate) fn run_cascade(path: &Path, steps: &serde_json::Value) -> anyhow::Res
             serde_json::Value::Null => orbital_core::Value::Null,
             p => to_core_value(p)?,
         };
-        let outcomes = kernel.dispatch(trait_name, None, event, payload);
+        let viewing = viewer.map(|user| kernel.enter_viewer(user));
+        let outcomes = match &live_host {
+            Some(host) => {
+                let played = host.dispatch(trait_name, "singleton", event, payload).map_err(|e| e.to_string());
+                settle_open_calls(host, settle_ms);
+                played
+            }
+            None => kernel
+                .start_dispatch(trait_name, None, event, payload, None, None)
+                .and_then(|progress| {
+                    orbital_core::runtime::resumable::drive_blocking(kernel, progress, &|request| step_answer(kernel, request))
+                })
+                .map_err(|e| e.to_string()),
+        };
+        drop(viewing);
         *pinned_now
             .lock()
             .map_err(|_| anyhow::anyhow!("step {i}: the clock pin is poisoned"))? = None;
         let outcomes = outcomes.map_err(|e| anyhow::anyhow!("step {i} dispatch failed: {e}"))?;
+        let entity_after = serde_json::to_value(kernel.snapshot_trait(trait_name, None).entity)
+            .unwrap_or(serde_json::Value::Null);
         // The moved traits' rows after the step, so a caller can read what a step wrote
         // (an id it generated, a list it changed) and feed it to the next step.
         let entities: serde_json::Map<String, serde_json::Value> = outcomes
@@ -460,7 +612,7 @@ pub(crate) fn run_cascade(path: &Path, steps: &serde_json::Value) -> anyhow::Res
             .into_iter()
             .map(|(name, (state, _))| (name, serde_json::Value::String(state)))
             .collect();
-        reports.push(serde_json::json!({ "outcomes": outcomes, "states": states, "entities": entities }));
+        reports.push(serde_json::json!({ "outcomes": outcomes, "states": states, "entities": entities, "entityAfter": entity_after }));
     }
     let dispatch_modes: serde_json::Map<String, serde_json::Value> = kernel
         .trait_snapshot(Some("singleton"))

@@ -361,9 +361,20 @@ pub(crate) fn describe_all(
 
 /// `orb behaviors texts`: every embedding text under the scopes, as a JSON array.
 pub(crate) fn run_texts(paths: Vec<String>, kind: Option<String>) -> anyhow::Result<()> {
-    let kind = kind.as_deref().map(TextKind::parse).transpose()?;
+    let all = texts(&paths, kind.as_deref())?;
+    let stdout = std::io::stdout();
+    let mut out = std::io::BufWriter::with_capacity(1 << 20, stdout.lock());
+    serde_json::to_writer(&mut out, &all)?;
+    out.write_all(b"\n")?;
+    out.flush()?;
+    Ok(())
+}
+
+/// Every embedding text under the scopes, in embed order: what `orb behaviors texts` prints.
+pub(crate) fn texts(paths: &[String], kind: Option<&str>) -> anyhow::Result<Vec<TextEntry>> {
+    let kind = kind.map(TextKind::parse).transpose()?;
     let mut all: Vec<TextEntry> = Vec::new();
-    for package in scoped_behaviors(&paths)? {
+    for package in scoped_behaviors(paths)? {
         let registry: Vec<(String, RegistryEntry)> = package
             .behaviors
             .iter()
@@ -372,12 +383,7 @@ pub(crate) fn run_texts(paths: Vec<String>, kind: Option<String>) -> anyhow::Res
         let facts = describe_all(&package.prefix, &registry, kind)?;
         all.extend(texts_of(&registry, &facts, kind));
     }
-    let stdout = std::io::stdout();
-    let mut out = std::io::BufWriter::with_capacity(1 << 20, stdout.lock());
-    serde_json::to_writer(&mut out, &all)?;
-    out.write_all(b"\n")?;
-    out.flush()?;
-    Ok(())
+    Ok(all)
 }
 
 #[cfg(test)]

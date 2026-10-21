@@ -764,10 +764,13 @@ fn verify_one(
     let mut l2: Option<orbital_core::render_report::RenderReport> = None;
     let mut l2_server: Option<orbital_core::render_report::RenderReport> = None;
     let mut l2_server_ok = true;
+    let mut l2_client_ok = true;
     if run_l2 {
-        let report =
+        let mut report =
             crate::utils::desktop::probe(&item, schema.clone(), resolved_traits.as_deref(), false)?;
-        emit(json_mode, report.headline());
+        let (l2_ok, headline) = judge_render(&mut report)?;
+        l2_client_ok = l2_ok;
+        emit(json_mode, headline);
         for v in &report.verdicts {
             if !v.passed {
                 emit(json_mode, format!("    L2 FAIL {} — {}", v.name, v.detail));
@@ -797,13 +800,14 @@ fn verify_one(
         // Layer 2 (server) — the SAME render contract driven over real HTTP against a
         // live `orbital-server`, verifying server routes + serialization + client together.
         if server_effective {
-            let l2s = crate::utils::desktop::probe(
+            let mut l2s = crate::utils::desktop::probe(
                 &item,
                 schema.clone(),
                 resolved_traits.as_deref(),
                 true,
             )?;
-            emit(json_mode, format!("{} [server]", l2s.headline()));
+            let (_, headline) = judge_render(&mut l2s)?;
+            emit(json_mode, format!("{headline} [server]"));
             for v in &l2s.verdicts {
                 if !v.passed {
                     l2_server_ok = false;
@@ -877,7 +881,7 @@ fn verify_one(
         }
     }
 
-    let ok = l1_ok && l2.as_ref().is_none_or(|r| r.ok()) && l2_server_ok && shell_ok;
+    let ok = l1_ok && l2_client_ok && l2_server_ok && shell_ok;
 
     Ok(VerifyOneOutcome {
         ok,
@@ -887,6 +891,76 @@ fn verify_one(
         l2_server,
         shell: shell_verdict,
     })
+}
+
+/// `std-render-report`'s answers to `steps`, in order: each step's `REPORT_RESULT` payload.
+fn render_report_results(steps: Vec<serde_json::Value>) -> Result<Vec<serde_json::Value>> {
+    let path =
+        crate::commands::behaviors_catalog::behavior_source_path("almadar-std/std-render-report")?;
+    let count = steps.len();
+    let report = crate::commands::execute::run_cascade(&path, &serde_json::Value::Array(steps))?;
+    if report.get("success") != Some(&serde_json::Value::Bool(true)) {
+        anyhow::bail!(
+            "std-render-report: {}",
+            report
+                .get("error")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("the run failed")
+        );
+    }
+    (0..count)
+        .map(|i| {
+            report["steps"][i]["outcomes"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|o| o.get("emits").and_then(serde_json::Value::as_array))
+                .flatten()
+                .find(|e| e["event"] == "REPORT_RESULT")
+                .map(|e| e["payload"].clone())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("std-render-report: step {i} answered no REPORT_RESULT")
+                })
+        })
+        .collect()
+}
+
+/// Judge each of `report`'s checks from its offenders (RENDER_VERDICT), then read the
+/// report's headline and whether it passed (RENDER_HEADLINE), through `std-render-report`.
+fn judge_render(report: &mut orbital_core::render_report::RenderReport) -> Result<(bool, String)> {
+    let step = |event: &str, payload: serde_json::Value| serde_json::json!({ "trait": "RenderReporter", "event": event, "payload": payload });
+    let verdicts = render_report_results(
+        report
+            .verdicts
+            .iter()
+            .map(|v| {
+                step(
+                    "RENDER_VERDICT",
+                    serde_json::json!({ "name": v.name, "offenders": v.offenders }),
+                )
+            })
+            .collect(),
+    )?;
+    for (verdict, judged) in report.verdicts.iter_mut().zip(&verdicts) {
+        verdict.passed = judged["passed"] == true;
+        verdict.detail = judged["detail"].as_str().unwrap_or_default().to_string();
+    }
+    let headline = render_report_results(vec![step(
+        "RENDER_HEADLINE",
+        serde_json::json!({
+            "item": report.item,
+            "verdicts": report.verdicts,
+            "slotsRendered": report.slots_rendered,
+            "hasTraits": report.traits.is_some(),
+            "traits": report.traits.clone().unwrap_or_default(),
+            "stubbed": report.stubbed,
+        }),
+    )])?;
+    let answer = &headline[0];
+    Ok((
+        answer["ok"] == true,
+        answer["headline"].as_str().unwrap_or_default().to_string(),
+    ))
 }
 
 /// `orb verify --web`: the native browser walk of `path`'s web client ([`orbital_verify::web_walk`]). Exits non-zero when a
@@ -1361,6 +1435,69 @@ fn engine_status(er: &engines::EngineReport) -> &'static str {
 #[cfg(test)]
 mod verdict_tests {
     use super::*;
+    use orbital_core::render_report::{RenderReport, RenderVerdict};
+
+    fn probed(
+        item: &str,
+        checks: &[(&str, &[&str])],
+        slots: usize,
+        traits: Option<&[&str]>,
+        stubbed: &[&str],
+    ) -> RenderReport {
+        let strings = |xs: &[&str]| xs.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        RenderReport {
+            item: item.into(),
+            verdicts: checks
+                .iter()
+                .map(|(name, offenders)| RenderVerdict {
+                    name: name.to_string(),
+                    passed: false,
+                    detail: String::new(),
+                    offenders: strings(offenders),
+                })
+                .collect(),
+            slots_rendered: slots,
+            access_scoped_empty: vec![],
+            traits: traits.map(strings),
+            stubbed: strings(stubbed),
+        }
+    }
+
+    #[test]
+    fn render_verdicts_and_headline_fold_through_std_render_report() {
+        orbital_compiler::loader::register_source_lowerer(crate::lower_lolo_file);
+        let mut pass = probed("x", &[("a", &[])], 2, None, &[]);
+        assert_eq!(
+            judge_render(&mut pass).unwrap(),
+            (
+                true,
+                "[PASS] x (client render) — 1/1 checks, 2 slots".to_string()
+            )
+        );
+        assert!(pass.verdicts[0].passed && pass.verdicts[0].detail.is_empty());
+
+        let mut fail = probed(
+            "m",
+            &[
+                ("renderer_coverage", &["b", "a", "b"]),
+                ("entity_data_bound", &[]),
+            ],
+            3,
+            Some(&["T", "U"]),
+            &["health-bar"],
+        );
+        assert_eq!(
+            judge_render(&mut fail).unwrap(),
+            (
+                false,
+                "[trait T, U] [FAIL] m (client render) — 1/2 checks, 3 slots, 1 stubbed"
+                    .to_string()
+            )
+        );
+        assert!(!fail.verdicts[0].passed);
+        assert_eq!(fail.verdicts[0].detail, "3 offender(s): a, b");
+        assert!(fail.verdicts[1].passed && fail.verdicts[1].detail.is_empty());
+    }
 
     fn report(ran: bool, passed: usize, failed: usize, checks: usize) -> engines::EngineReport {
         engines::EngineReport {

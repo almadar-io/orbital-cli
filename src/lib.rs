@@ -18,7 +18,7 @@ use commands::{
     compile_schema, execute_cascade_cli, execute_cascade_steps_cli, execute_schema_cli,
     format_schema, parse_schema, resolve_schema_cli, run_convert, run_dev_mode,
     run_engines_install, run_engines_list, run_engines_remove, run_engines_update, run_i18n_check,
-    run_i18n_vocab, run_language_which, run_serve, run_tests, run_which, simulate_render, stamp_schema_cli, validate_schema,
+    run_i18n_vocab, run_serve, run_tests, run_which, stamp_schema_cli, validate_schema,
 };
 use utils::evaluate_sexpr;
 
@@ -111,10 +111,6 @@ enum Commands {
         /// Path to services-registry.json (auto-discovered if not specified)
         #[arg(long)]
         services: Option<PathBuf>,
-
-        /// Simulate render output — trace every reachable state and report what render-ui effects fire
-        #[arg(long)]
-        simulate: bool,
 
         /// Fail on any warning (the 0 errors / 0 warnings bar)
         #[arg(long)]
@@ -265,6 +261,11 @@ enum Commands {
         /// authored effect of the fired arm ran.
         #[arg(long, conflicts_with_all = ["event", "trait_name", "payload"])]
         steps: Option<String>,
+
+        /// With `--steps`: run the steps on the native program host, so their os/* and http asks are answered
+        /// by this machine instead of left pending.
+        #[arg(long, requires = "steps")]
+        live: bool,
     },
 
     /// Stamp V4 identity (ids + ledger) onto a name-only `.orb` schema.
@@ -805,20 +806,7 @@ enum Commands {
         command: EnginesCommand,
     },
 
-    /// The language data `orb` compiles against — `@almadar/core` (patterns,
-    /// theme presets, fixtures) and `@almadar/std`'s operator table — installed,
-    /// pinned npm packages (Almadar_Behavior_Packages.md §14).
-    Language {
-        #[command(subcommand)]
-        command: LanguageCommand,
-    },
 
-}
-
-#[derive(Subcommand)]
-enum LanguageCommand {
-    /// Which copy of each language package compiles here.
-    Which,
 }
 
 #[derive(Subcommand)]
@@ -1100,11 +1088,9 @@ pub fn run() -> anyhow::Result<()> {
     let cwd = std::env::current_dir()?;
     let store = orbital_core::behavior_packages::user_store_dir().unwrap_or_else(|| cwd.clone());
     if let Some(command) = commands::program_command::resolve_program_command(&args, &cwd, &store)? {
-        let (code, out) = commands::program_command::run_command_program(&command.program, &command.command, &command.argv, &cwd)?;
-        if !out.is_empty() {
-            println!("{out}");
-        }
-        std::process::exit(code);
+        let answer = commands::program_command::run_command_program(&command.program, &command.command, &command.argv, &cwd)?;
+        answer.write_to(&mut std::io::stdout(), &mut std::io::stderr())?;
+        std::process::exit(answer.code);
     }
 
     let cli = Cli::parse();
@@ -1114,7 +1100,6 @@ pub fn run() -> anyhow::Result<()> {
         None | Some(Commands::Validate { .. })
             | Some(Commands::I18n { .. })
             | Some(Commands::Engines { .. })
-            | Some(Commands::Language { .. })
             | Some(Commands::Update { .. })
             | Some(Commands::Add { .. })
             | Some(Commands::Remove { .. })
@@ -1146,23 +1131,16 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
             json,
             patterns,
             services,
-            simulate,
             deny_warnings,
             final_program,
-        }) => {
-            validate_schema(
-                &path,
-                json,
-                patterns.as_deref(),
-                services.as_deref(),
-                deny_warnings,
-                final_program,
-            )?;
-            if simulate {
-                simulate_render(&path, patterns.as_deref())?;
-            }
-            Ok(())
-        }
+        }) => validate_schema(
+            &path,
+            json,
+            patterns.as_deref(),
+            services.as_deref(),
+            deny_warnings,
+            final_program,
+        ),
         Some(Commands::Parse { path }) => parse_schema(&path),
         Some(Commands::Signatures { out }) => print_lolo_signatures(out.as_deref()),
         Some(Commands::Complete {
@@ -1218,8 +1196,9 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
         Some(Commands::Execute {
             path,
             steps: Some(steps),
+            live,
             ..
-        }) => execute_cascade_steps_cli(&path, &steps),
+        }) => execute_cascade_steps_cli(&path, &steps, live),
         Some(Commands::Execute {
             path,
             event: Some(event),
@@ -1432,9 +1411,6 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
                 runtime,
                 compiled,
             } => run_engines_remove(global, runtime, compiled),
-        },
-        Some(Commands::Language { command }) => match command {
-            LanguageCommand::Which => run_language_which(),
         },
         Some(Commands::Run { program }) => commands::program_command::run_program(&program),
         Some(Commands::Update { global }) => commands::packages::run_update(global),

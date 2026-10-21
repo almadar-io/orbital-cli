@@ -327,6 +327,75 @@ impl ProgramHost {
         from_json(described)
     }
 
+    /// `behavior/texts`: the embedding texts under `{ paths, kind? }`, as `orb behaviors texts --json` prints them.
+    fn texts(scope: Option<&Value>) -> Result<Value, SubstrateFailure> {
+        let json = scope.map(to_json).unwrap_or(serde_json::Value::Null);
+        let Some(paths) = json
+            .get("paths")
+            .and_then(serde_json::Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .map(|v| v.as_str().map(str::to_string))
+                    .collect::<Option<Vec<String>>>()
+            })
+            .flatten()
+        else {
+            return Err(failure(
+                "behavior/texts: paths: expected a list of registry folders",
+            ));
+        };
+        let kind = match json.get("kind") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(serde_json::Value::String(k)) => Some(k.as_str()),
+            Some(_) => return Err(failure("behavior/texts: kind: expected a string")),
+        };
+        let texts = crate::commands::behaviors_texts::texts(&paths, kind)
+            .map_err(|e| failure(format!("behavior/texts: {e}")))?;
+        from_json(serde_json::to_value(texts).map_err(|e| failure(e.to_string()))?)
+    }
+
+    /// `behavior/packages`: each installed behavior package's `{ root, prefix, vectors }`, `vectors` being the
+    /// `orb.vectors` snapshot the lock resolves (the cached sidecar when locked), `null` when none is declared.
+    fn packages() -> Result<Value, SubstrateFailure> {
+        let cwd = std::env::current_dir().map_err(|e| failure(e.to_string()))?;
+        let packages = super::npm_project::discover_from(&cwd)
+            .map_err(|e| failure(format!("behavior/packages: {e}")))?;
+        let mut out = Vec::new();
+        for pkg in &packages {
+            let vectors = crate::commands::sidecar_fetch::resolve_vectors(
+                pkg,
+                &crate::commands::sidecar_fetch::UreqFetcher,
+            )
+            .map_err(|e| failure(format!("behavior/packages: {e}")))?;
+            out.push(serde_json::json!({
+                "root": pkg.root.to_string_lossy(),
+                "prefix": pkg.prefix,
+                "vectors": vectors.map(|v| v.to_string_lossy().into_owned()),
+            }));
+        }
+        from_json(serde_json::Value::Array(out))
+    }
+
+    /// `behavior/source`: the behavior as a program; with `options.file: true`, its source file as `{ path, source }`
+    /// (the file text), what `orb mcp`'s `read_behavior` answers.
+    fn source(
+        op: &str,
+        value: Option<&Value>,
+        options: Option<&Value>,
+    ) -> Result<Value, SubstrateFailure> {
+        let behavior = Self::behavior_of(op, value)?;
+        if option_flag(options, "file") == Some(true) {
+            let path = crate::commands::behaviors_catalog::behavior_source_path(&behavior)
+                .map_err(|e| failure(format!("{op}: {e}")))?;
+            let source = std::fs::read_to_string(&path)
+                .map_err(|e| failure(format!("{op}: {}: {e}", path.display())))?;
+            return from_json(serde_json::json!({ "path": path, "source": source }));
+        }
+        let source = crate::commands::behaviors_catalog::source(&behavior)
+            .map_err(|e| failure(format!("{op}: {e}")))?;
+        from_json(source)
+    }
+
     fn resolve_behavior(&self, behavior: &str) -> Result<Value, SubstrateFailure> {
         let path = crate::commands::behaviors_catalog::behavior_source_path(behavior)
             .map_err(|e| failure(format!("behavior/resolve: {e}")))?;
@@ -590,6 +659,15 @@ impl ProgramHost {
                     "{op}: a request's entity must be an object of fields"
                 )));
             }
+            if r.get("viewer").is_some_and(|v| !v.is_object() && !v.is_null()) {
+                return Err(failure(format!("{op}: a request's viewer must be a user object or null")));
+            }
+            if r.get("settleMs").is_some_and(|n| !n.is_number()) {
+                return Err(failure(format!("{op}: a request's settleMs must be a number of milliseconds")));
+            }
+            if r.get("config").is_some_and(|c| !c.is_object()) {
+                return Err(failure(format!("{op}: a request's config must be an object of knob values")));
+            }
             if r.get("now").is_some_and(|n| !n.is_number()) {
                 return Err(failure(format!(
                     "{op}: a request's now must be a number (ms since the epoch)"
@@ -600,7 +678,7 @@ impl ProgramHost {
             .iter()
             .map(|r| {
                 let mut step = serde_json::json!({ "trait": r["trait"], "event": r["event"], "payload": r.get("payload").cloned().unwrap_or(serde_json::json!({})), "from": r["from"] });
-                for key in ["entity", "now"] {
+                for key in ["entity", "config", "now", "settleMs", "viewer"] {
                     if let Some(v) = r.get(key) {
                         step[key] = v.clone();
                     }
@@ -610,7 +688,16 @@ impl ProgramHost {
             .collect();
         let scratch = Scratch::new("almadar-step")?;
         let path = scratch.write("program.orb", &program.to_string())?;
-        let report = crate::commands::execute::run_cascade(&path, &serde_json::Value::Array(steps))
+        let live = match options.map(to_json).as_ref().and_then(|o| o.get("live")) {
+            None | Some(serde_json::Value::Null) => false,
+            Some(serde_json::Value::Bool(b)) => *b,
+            Some(other) => {
+                return Err(failure(format!(
+                    "{op}: options.live must be a boolean, not {other}"
+                )))
+            }
+        };
+        let report = crate::commands::execute::run_cascade_with(&path, &serde_json::Value::Array(steps), live)
             .map_err(|e| failure(format!("{op}: {e}")))?;
         if report.get("success") != Some(&serde_json::Value::Bool(true)) {
             return Err(failure(format!(
@@ -695,6 +782,7 @@ impl ProgramHost {
                     out
                 }).collect::<Vec<_>>(),
                 "ensures": outcome.get("ensures").cloned().unwrap_or(serde_json::json!([])),
+                "entityAfter": report["steps"][i]["entityAfter"],
                 "outcomes": moved.iter().map(|o| serde_json::json!({
                     "orbital": o["orbital"],
                     "trait": o["trait"],
@@ -817,12 +905,9 @@ impl SubstrateHandler for ProgramHost {
                 let embedder = embedder.as_ref().map(|e| e as &dyn Embedder);
                 Self::describe(op, args.first(), args.get(1), embedder, None)
             }
-            "behavior/source" => {
-                let behavior = Self::behavior_of(op, args.first())?;
-                let source = crate::commands::behaviors_catalog::source(&behavior)
-                    .map_err(|e| failure(format!("{op}: {e}")))?;
-                from_json(source)
-            }
+            "behavior/texts" => Self::texts(args.first()),
+            "behavior/packages" => Self::packages(),
+            "behavior/source" => Self::source(op, args.first(), args.get(1)),
             "behavior/resolve" => self.resolve_behavior(&Self::behavior_of(op, args.first())?),
             "program/compose" => self.compose(args),
             "program/eval" => self.eval(program_arg(op, args.first())?, args.get(1)),
@@ -947,6 +1032,39 @@ orbital NoteOrbital {
             host.run("behavior/source", &[missing]).is_err(),
             "control: an unknown behavior fails"
         );
+    }
+
+    #[test]
+    fn source_with_the_file_option_answers_the_path_and_file_text_as_read_behavior_does() {
+        orbital_compiler::loader::register_source_lowerer(crate::lower_lolo_file);
+        let value = from_json(serde_json::json!({ "behavior": "almadar-std/std-retry" })).unwrap();
+        let file = from_json(serde_json::json!({ "file": true })).unwrap();
+        let answered =
+            json(&ProgramHost::source("behavior/source", Some(&value), Some(&file)).expect("file"));
+        let path =
+            crate::commands::behaviors_catalog::behavior_source_path("almadar-std/std-retry")
+                .unwrap();
+        assert_eq!(
+            answered,
+            serde_json::json!({ "path": path, "source": std::fs::read_to_string(&path).unwrap() })
+        );
+        assert!(answered["path"]
+            .as_str()
+            .unwrap()
+            .ends_with("std-retry.lolo"));
+        let program =
+            json(&ProgramHost::source("behavior/source", Some(&value), None).expect("program"));
+        assert_eq!(
+            program,
+            json(
+                &from_json(
+                    crate::commands::behaviors_catalog::source("almadar-std/std-retry").unwrap()
+                )
+                .unwrap()
+            ),
+            "control: without the option the answer stays the program"
+        );
+        assert!(program.get("path").is_none());
     }
 
     /// An embedder that answers locally and counts the texts it embedded.
@@ -1087,6 +1205,90 @@ orbital NoteOrbital {
                     && e["vectors"].as_object().is_some_and(|v| !v.is_empty())),
             "control: by default the vectors are attached"
         );
+    }
+
+    #[test]
+    fn texts_answers_what_behaviors_texts_prints_in_embed_order() {
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(texts_body)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    fn texts_body() {
+        orbital_compiler::loader::register_source_lowerer(crate::lower_lolo_file);
+        let paths = vec!["almadar-std/ml/organisms".to_string()];
+        let scope = from_json(serde_json::json!({ "paths": paths })).unwrap();
+        let all = json(&ProgramHost::texts(Some(&scope)).expect("texts"));
+        let printed = crate::commands::behaviors_texts::texts(&paths, None).unwrap();
+        assert_eq!(
+            all,
+            json(&from_json(serde_json::to_value(&printed).unwrap()).unwrap())
+        );
+        let keys: Vec<&str> = all
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["key"].as_str().unwrap())
+            .collect();
+        let organisms = keys
+            .iter()
+            .take_while(|k| !k.contains('#') && !k.contains('/'))
+            .count();
+        assert!(organisms > 0, "{keys:?}");
+        let capabilities = keys[organisms..]
+            .iter()
+            .take_while(|k| k.ends_with("#capabilities"))
+            .count();
+        assert!(
+            keys[organisms + capabilities..]
+                .iter()
+                .all(|k| k.contains('/')),
+            "organism texts, then capability texts, then knob texts: {keys:?}"
+        );
+
+        let only = from_json(serde_json::json!({ "paths": paths, "kind": "capability" })).unwrap();
+        let capability = json(&ProgramHost::texts(Some(&only)).expect("capability texts"));
+        assert_eq!(capability.as_array().unwrap().len(), capabilities);
+        let bad = from_json(serde_json::json!({ "paths": paths, "kind": "nope" })).unwrap();
+        assert!(
+            ProgramHost::texts(Some(&bad)).is_err(),
+            "control: an unknown kind fails"
+        );
+        let none = from_json(serde_json::json!({ "kind": "knob" })).unwrap();
+        assert!(
+            ProgramHost::texts(Some(&none)).is_err(),
+            "control: no paths fails"
+        );
+    }
+
+    #[test]
+    fn packages_lists_each_installed_package_with_its_resolved_vectors() {
+        let listed = json(&ProgramHost::packages().expect("packages"));
+        let cwd = std::env::current_dir().unwrap();
+        let installed = crate::commands::npm_project::discover_from(&cwd).unwrap();
+        let entries = listed.as_array().unwrap();
+        assert_eq!(entries.len(), installed.len());
+        assert!(!entries.is_empty());
+        for (entry, pkg) in entries.iter().zip(&installed) {
+            assert_eq!(entry["prefix"], pkg.prefix.as_str());
+            assert_eq!(entry["root"], pkg.root.to_string_lossy().as_ref());
+            let vectors = crate::commands::sidecar_fetch::resolve_vectors(
+                pkg,
+                &crate::commands::sidecar_fetch::UreqFetcher,
+            )
+            .unwrap();
+            match vectors {
+                Some(path) => assert_eq!(entry["vectors"], path.to_string_lossy().as_ref()),
+                None => assert!(
+                    entry["vectors"].is_null(),
+                    "control: no orb.vectors is null"
+                ),
+            }
+        }
+        assert!(entries.iter().any(|e| e["prefix"] == "almadar-std"));
     }
 
     #[test]
@@ -1577,6 +1779,256 @@ orbital NoteOrbital {
         assert_eq!(r["emitted"][0]["payload"]["status"], 200.0, "{r}");
         assert_eq!(r["emitted"][0]["payload"]["lit"], 7.0, "control: a literal");
         assert_eq!(r["outcomes"][0]["emitted"], r["emitted"]);
+    }
+
+    #[test]
+    fn step_overrides_a_config_knob_for_the_call() {
+        let host = ProgramHost;
+        let program = from_json(serde_json::json!({ "name": "KnobApp", "orbitals": [{ "name": "Knob",
+            "entity": { "name": "K", "persistence": "runtime", "fields": [{ "name": "id", "type": "string" }] },
+            "pages": [],
+            "traits": [
+                { "name": "T", "linkedEntity": "K",
+                  "config": { "mode": { "type": "string", "default": "off" } },
+                  "stateMachine": {
+                    "states": [{ "name": "idle", "isInitial": true }, { "name": "on" }],
+                    "transitions": [
+                        { "from": "idle", "to": "on", "event": "GO", "guard": ["=", "@config.mode", "on"], "effects": [["emit", "WENT", {}]] }
+                    ] } },
+                { "name": "L", "linkedEntity": "K",
+                  "config": { "mode": { "type": "string", "default": "off" } },
+                  "listens": [{ "event": "WENT", "triggers": "HEARD", "source": { "kind": "trait", "trait": "T" } }],
+                  "stateMachine": {
+                    "states": [{ "name": "idle", "isInitial": true }, { "name": "heard" }],
+                    "transitions": [{ "from": "idle", "to": "heard", "event": "HEARD", "guard": ["=", "@config.mode", "off"] }] } }
+            ] }] }))
+        .unwrap();
+        let req = |config: Option<serde_json::Value>| {
+            let mut r = serde_json::json!({ "orbital": "Knob", "trait": "T", "from": "idle", "event": "GO", "payload": {} });
+            if let Some(c) = config {
+                r["config"] = c;
+            }
+            r
+        };
+        let on = || Some(serde_json::json!({ "mode": "on" }));
+        let played = json(&host.run("program/step", &[program.clone(), from_json(serde_json::json!([req(on()), req(None)])).unwrap()]).expect("steps"));
+        assert_eq!(played[0]["result"]["guard"], "pass", "the overridden knob admits the guard: {}", played[0]);
+        assert_eq!(
+            played[0]["result"]["outcomes"][1]["fired"], true,
+            "the override is the requested trait's only, a listener keeps its default: {}", played[0]
+        );
+        let default = json(&host.run("program/step", &[program.clone(), from_json(serde_json::json!([req(None)])).unwrap()]).expect("steps"));
+        assert_eq!(default[0]["result"]["guard"], "fail", "control: a call that overrides nothing reads the default");
+        let split = host
+            .run("program/step", &[program.clone(), from_json(serde_json::json!([req(on()), req(Some(serde_json::json!({ "mode": "off" })))])).unwrap()])
+            .unwrap_err();
+        assert!(split.message.contains("one call takes one value per knob"), "{}", split.message);
+        let unknown = host
+            .run("program/step", &[program.clone(), from_json(serde_json::json!([req(Some(serde_json::json!({ "nope": 1 })))])).unwrap()])
+            .unwrap_err();
+        assert!(unknown.message.contains("declares no knob `nope`"), "{}", unknown.message);
+        let bad = host
+            .run("program/step", &[program, from_json(serde_json::json!([req(Some(serde_json::json!("on")))])).unwrap()])
+            .unwrap_err();
+        assert!(bad.message.contains("config must be an object"), "{}", bad.message);
+    }
+
+    #[test]
+    fn step_runs_an_os_effect_only_when_the_call_is_live() {
+        let host = ProgramHost;
+        let program = from_json(serde_json::json!({ "name": "LiveApp",
+            "osGrants": { "fs": [], "exec": [], "net": [], "env": ["HOME"], "stdio": [], "sys": [], "desktop": [] },
+            "orbitals": [{ "name": "Live",
+            "entity": { "name": "L", "persistence": "runtime", "fields": [{ "name": "id", "type": "string" }] },
+            "pages": [],
+            "traits": [{ "name": "T", "linkedEntity": "L", "stateMachine": {
+                "states": [{ "name": "idle", "isInitial": true }, { "name": "asking" }, { "name": "got" }],
+                "transitions": [
+                    { "from": "idle", "to": "asking", "event": "ASK", "effects": [
+                        ["os/getenv", "HOME", { "key": "home", "emit": { "success": "GOT", "failure": "NOGO" } }]] },
+                    { "from": "asking", "to": "got", "event": "GOT" },
+                    { "from": "asking", "to": "idle", "event": "NOGO" }
+                ] } }] }] }))
+        .unwrap();
+        let requests = from_json(serde_json::json!([{ "orbital": "Live", "trait": "T", "from": "idle", "event": "ASK", "payload": {} }])).unwrap();
+        let live = json(
+            &host
+                .run("program/step", &[program.clone(), requests.clone(), from_json(serde_json::json!({ "live": true })).unwrap()])
+                .expect("steps"),
+        );
+        let events: Vec<&str> = live[0]["result"]["outcomes"].as_array().into_iter().flatten().filter_map(|o| o["event"].as_str()).collect();
+        assert_eq!(events, vec!["ASK", "GOT"], "live: the host answers getenv and its success route runs: {}", live[0]);
+        let replay = json(&host.run("program/step", &[program.clone(), requests.clone()]).expect("steps"));
+        assert_eq!(replay[0]["result"]["state"]["after"], "asking", "control: without live the ask stays pending");
+        let bad = host
+            .run("program/step", &[program, requests, from_json(serde_json::json!({ "live": "yes" })).unwrap()])
+            .unwrap_err();
+        assert!(bad.message.contains("options.live must be a boolean"), "{}", bad.message);
+    }
+
+    #[test]
+    fn step_live_waits_for_open_calls_unless_settle_ms_cuts_them_off() {
+        let host = ProgramHost;
+        let program = |seconds: &str| {
+            from_json(serde_json::json!({ "name": "SleepApp",
+                "osGrants": { "fs": [], "exec": ["sleep"], "net": [], "env": [], "stdio": [], "sys": [], "desktop": [] },
+                "orbitals": [{ "name": "Sleep",
+                "entity": { "name": "S", "persistence": "runtime", "fields": [{ "name": "id", "type": "string" }, { "name": "done", "type": "boolean", "default": false }] },
+                "pages": [],
+                "traits": [{ "name": "T", "linkedEntity": "S", "stateMachine": {
+                    "states": [{ "name": "idle", "isInitial": true }, { "name": "running" }, { "name": "done" }],
+                    "transitions": [
+                        { "from": "idle", "to": "running", "event": "RUN", "effects": [
+                            ["os/spawn", "sleep", [seconds], { "cwd": null, "env": null, "stdin": "null", "stdout": "null", "stderr": "null", "detached": false },
+                                { "key": "spawn", "emit": { "success": "SPAWNED", "failure": "FAILED" } }]] },
+                        { "from": "running", "to": "running", "event": "SPAWNED", "effects": [
+                            ["os/wait", "@payload.pid", { "key": "wait", "emit": { "success": "WAITED", "failure": "FAILED" } }]] },
+                        { "from": "running", "to": "done", "event": "WAITED", "effects": [["set", "@entity.done", true]] },
+                        { "from": "running", "to": "idle", "event": "FAILED" }
+                    ] } }] }] }))
+            .unwrap()
+        };
+        let run = |extra: serde_json::Value| {
+            let mut r = serde_json::json!({ "orbital": "Sleep", "trait": "T", "from": "idle", "event": "RUN", "payload": {} });
+            r.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            from_json(serde_json::json!([r])).unwrap()
+        };
+        let live = from_json(serde_json::json!({ "live": true })).unwrap();
+        let started = std::time::Instant::now();
+        let cut = json(&host.run("program/step", &[program("5"), run(serde_json::json!({ "settleMs": 300 })), live.clone()]).expect("steps"));
+        assert!(started.elapsed() < std::time::Duration::from_secs(4), "settleMs cuts the open wait off");
+        assert_eq!(cut[0]["result"]["entityAfter"]["done"], false, "the cut-off call never answered: {}", cut[0]);
+        let waited = json(&host.run("program/step", &[program("0.2"), run(serde_json::json!({})), live.clone()]).expect("steps"));
+        assert_eq!(waited[0]["result"]["entityAfter"]["done"], true, "control: without settleMs the step waits for the process: {}", waited[0]);
+        let bad = host.run("program/step", &[program("0"), run(serde_json::json!({ "settleMs": "soon" })), live]).unwrap_err();
+        assert!(bad.message.contains("settleMs must be a number"), "{}", bad.message);
+        let replay = host.run("program/step", &[program("0"), run(serde_json::json!({ "settleMs": 10 }))]).unwrap_err();
+        assert!(replay.message.contains("settleMs` applies to a live call only"), "control: no cutoff to set without live: {}", replay.message);
+    }
+
+    #[test]
+    fn step_dispatches_as_the_request_viewer() {
+        let host = ProgramHost;
+        let program = from_json(serde_json::json!({ "name": "SeeApp", "orbitals": [{ "name": "See",
+            "entity": { "name": "V", "persistence": "runtime", "fields": [{ "name": "id", "type": "string" }] },
+            "pages": [],
+            "traits": [{ "name": "T", "linkedEntity": "V", "stateMachine": {
+                "states": [{ "name": "idle", "isInitial": true }],
+                "transitions": [
+                    { "from": "idle", "to": "idle", "event": "WHO", "effects": [["emit", "SEEN", { "id": "@user.id" }]] },
+                    { "from": "idle", "to": "idle", "event": "MINE", "guard": ["=", "@user.id", "u1"] }
+                ] } }] }] }))
+        .unwrap();
+        let req = |event: &str, viewer: Option<serde_json::Value>| {
+            let mut r = serde_json::json!({ "orbital": "See", "trait": "T", "from": "idle", "event": event, "payload": {} });
+            if let Some(v) = viewer {
+                r["viewer"] = v;
+            }
+            r
+        };
+        let u1 = serde_json::json!({ "id": "u1", "email": "u1@example.com" });
+        let played = json(
+            &host
+                .run(
+                    "program/step",
+                    &[program.clone(), from_json(serde_json::json!([req("MINE", Some(u1.clone())), req("MINE", None), req("WHO", Some(u1)), req("WHO", Some(serde_json::Value::Null))])).unwrap()],
+                )
+                .expect("steps"),
+        );
+        assert_eq!(played[0]["result"]["guard"], "pass", "the viewer is @user: {}", played[0]);
+        assert_eq!(played[1]["result"]["guard"], "fail", "control: without a viewer @user is nobody: {}", played[1]);
+        assert_eq!(played[2]["result"]["emitted"][0]["payload"]["id"], "u1");
+        assert!(
+            played[3]["result"]["emitted"][0]["payload"].get("id").is_none_or(serde_json::Value::is_null),
+            "control: a null viewer is nobody: {}", played[3]
+        );
+        let bad = host.run("program/step", &[program, from_json(serde_json::json!([req("WHO", Some(serde_json::json!("u1")))])).unwrap()]).unwrap_err();
+        assert!(bad.message.contains("viewer must be a user object or null"), "{}", bad.message);
+    }
+
+    #[test]
+    fn step_reports_an_os_effect_without_running_or_failing_it() {
+        let host = ProgramHost;
+        let program = from_json(serde_json::json!({ "name": "OsApp",
+            "osGrants": { "env": ["HOME"] },
+            "orbitals": [{ "name": "Os",
+            "entity": { "name": "O", "persistence": "runtime", "fields": [{ "name": "id", "type": "string" }, { "name": "n", "type": "number", "default": 0 }] },
+            "pages": [],
+            "traits": [{ "name": "T", "linkedEntity": "O", "stateMachine": {
+                "states": [{ "name": "idle", "isInitial": true }, { "name": "asking" }],
+                "transitions": [
+                    { "from": "idle", "to": "asking", "event": "ASK", "effects": [
+                        ["set", "@entity.n", 1],
+                        ["os/getenv", "HOME", { "key": "home", "emit": { "success": "GOT", "failure": "NOGO" } }]] },
+                    { "from": "asking", "to": "idle", "event": "GOT" },
+                    { "from": "asking", "to": "idle", "event": "NOGO" }
+                ] } }] }] }))
+        .unwrap();
+        let requests = from_json(serde_json::json!([{ "orbital": "Os", "trait": "T", "from": "idle", "event": "ASK", "payload": {} }])).unwrap();
+        let played = json(
+            &host
+                .run("program/step", &[program, requests])
+                .expect("steps"),
+        );
+        let r = &played[0]["result"];
+        let os = r["effects"]
+            .as_array()
+            .and_then(|es| es.iter().find(|e| e["type"] == "os/getenv"))
+            .cloned();
+        assert!(
+            os.as_ref().is_some_and(|e| e["status"] != "failed"),
+            "the os ask is reported, not failed: {r}"
+        );
+        assert_eq!(
+            r["effects"][0]["status"], "executed",
+            "control: the arm's other effect runs"
+        );
+        assert_eq!(
+            r["state"]["after"], "asking",
+            "no answer event re-enters the trait: {r}"
+        );
+        assert_eq!(r["outcomes"].as_array().map(Vec::len), Some(1), "{r}");
+    }
+
+    #[test]
+    fn step_reports_the_row_the_requested_trait_holds_after_it() {
+        let host = ProgramHost;
+        let program = from_json(serde_json::json!({ "name": "RowApp", "orbitals": [{ "name": "Row",
+            "entity": { "name": "R", "persistence": "runtime", "fields": [{ "name": "id", "type": "string" }, { "name": "n", "type": "number", "default": 0 }] },
+            "pages": [],
+            "traits": [{ "name": "T", "linkedEntity": "R", "stateMachine": {
+                "states": [{ "name": "idle", "isInitial": true }],
+                "transitions": [
+                    { "from": "idle", "to": "idle", "event": "BUMP", "effects": [["set", "@entity.n", ["+", "@entity.n", 5]]] },
+                    { "from": "idle", "to": "idle", "event": "NOPE", "guard": ["=", 1, 2], "effects": [["set", "@entity.n", 99]] }
+                ] } }] }] }))
+        .unwrap();
+        let req = |event: &str| serde_json::json!({ "orbital": "Row", "trait": "T", "from": "idle", "event": event, "payload": {}, "entity": { "n": 1 } });
+        let played = json(&host.run("program/step", &[program, from_json(serde_json::json!([req("BUMP"), req("NOPE")])).unwrap()]).expect("steps"));
+        assert_eq!(played[0]["result"]["entityAfter"]["n"], 6.0, "the set shows in the row: {}", played[0]);
+        assert_eq!(played[1]["result"]["entityAfter"]["n"], 1.0, "control: a request that fires nothing leaves the seeded row: {}", played[1]);
+    }
+
+    #[test]
+    fn step_never_reports_an_emit_whose_payload_failed_to_evaluate() {
+        let host = ProgramHost;
+        let program = from_json(serde_json::json!({ "name": "EmApp", "orbitals": [{ "name": "Em",
+            "entity": { "name": "Req", "persistence": "runtime", "fields": [{ "name": "id", "type": "string" }, { "name": "items", "type": "array", "default": [], "items": { "type": "object", "properties": { "id": { "name": "id", "type": "number" } } } }] },
+            "pages": [],
+            "traits": [{ "name": "T", "linkedEntity": "Req", "stateMachine": {
+                "states": [{ "name": "idle", "isInitial": true }],
+                "transitions": [
+                    { "from": "idle", "to": "idle", "event": "GO", "effects": [
+                        ["emit", "BAD", { "list": ["array/append", ["object/get", ["array/find", "@entity.items", ["fn", "p", ["=", "@p.id", 9]]], "list"], 1] }]] },
+                    { "from": "idle", "to": "idle", "event": "LIT", "effects": [["emit", "GOOD", { "lit": 7 }]] }
+                ] } }] }] }))
+        .unwrap();
+        let req = |event: &str| serde_json::json!({ "orbital": "Em", "trait": "T", "from": "idle", "event": event, "payload": {} });
+        let played = json(&host.run("program/step", &[program, from_json(serde_json::json!([req("GO"), req("LIT")])).unwrap()]).expect("steps"));
+        let r = &played[0]["result"];
+        assert_eq!(r["emitted"], serde_json::json!([]), "a failed emit is no emit: {r}");
+        assert_eq!(r["effects"][0]["status"], "failed", "{r}");
+        assert_eq!(played[1]["result"]["emitted"][0]["payload"]["lit"], 7.0, "control: a literal emit is reported");
     }
 
     #[test]

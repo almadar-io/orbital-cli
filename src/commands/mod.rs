@@ -25,7 +25,6 @@ pub(crate) mod program_command;
 pub(crate) mod program_host;
 pub(crate) mod serve;
 pub(crate) mod sidecar_fetch;
-pub(crate) mod simulate;
 pub(crate) mod stamp;
 pub(crate) mod test;
 pub(crate) mod validate;
@@ -44,10 +43,8 @@ pub(crate) use engines_cmd::{
 };
 pub(crate) use execute::{execute_cascade_cli, execute_cascade_steps_cli, execute_schema_cli};
 pub(crate) use i18n::{run_i18n_check, run_i18n_vocab};
-pub(crate) use language::run_which as run_language_which;
 pub(crate) use parse::{format_schema, parse_schema, resolve_schema_cli};
 pub(crate) use serve::run_serve;
-pub(crate) use simulate::simulate_render;
 pub(crate) use stamp::stamp_schema_cli;
 pub(crate) use test::run_tests;
 pub(crate) use validate::validate_schema;

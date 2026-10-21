@@ -3,6 +3,7 @@
 
 use crate::utils::i18n::translate_schema_content;
 use crate::{SourcePosition, ValidationJsonError};
+use orbital_compiler::phases::validation::ErrorCode;
 
 /// Syntax variant detected from file content.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -538,7 +539,7 @@ pub(crate) fn typed_parse_error_to_json(
             let path_loc = format!("{path}:{}:{}", span.line, span.col);
             let (code, suggestion) = match te {
                 TypeError::UnknownType { suggestion, name, .. } => (
-                    "ORB_T_TYPE_UNKNOWN",
+                    ErrorCode::TypeUnknown.as_str(),
                     Some(match (suggestion, foreign_type_translation(name)) {
                         (Some(s), _) => format!("did you mean {s:?}?"),
                         (None, Some(t)) => t.to_string(),
@@ -548,49 +549,49 @@ pub(crate) fn typed_parse_error_to_json(
                     }),
                 ),
                 TypeError::CircularType { .. } => (
-                    "ORB_T_TYPE_CYCLE",
+                    ErrorCode::TypeCycle.as_str(),
                     Some(
                         "break the cycle by removing one reference in the composition chain"
                             .to_string(),
                     ),
                 ),
                 TypeError::KindMismatch { .. } => (
-                    "ORB_T_TYPE_KIND_MISMATCH",
+                    ErrorCode::TypeKindMismatch.as_str(),
                     Some("composed types must share a kind (all Entity, all Trait, …)".to_string()),
                 ),
                 TypeError::CompositionConflict { field, .. } => (
-                    "ORB_T_TYPE_COMPOSITION_CONFLICT",
+                    ErrorCode::TypeCompositionConflict.as_str(),
                     Some(format!(
                         "remove field {field:?} from one side or reconcile its type"
                     )),
                 ),
                 TypeError::AnnotationMismatch { .. } => (
-                    "ORB_T_TYPE_ANNOTATION_MISMATCH",
+                    ErrorCode::TypeAnnotationMismatch.as_str(),
                     Some(
                         "update the body to match the annotated type or drop the `::` annotation"
                             .to_string(),
                     ),
                 ),
                 TypeError::UnknownTypeParam { name, alias, .. } => (
-                    "ORB_T_TYPE_UNKNOWN_PARAM",
+                    ErrorCode::TypeUnknownParam.as_str(),
                     Some(format!(
                         "type parameter {name:?} is not declared on alias {alias:?}"
                     )),
                 ),
                 TypeError::WrongTypeArgCount { expected, got, .. } => (
-                    "ORB_T_TYPE_WRONG_ARG_COUNT",
+                    ErrorCode::TypeWrongArgCount.as_str(),
                     Some(format!(
                         "supply exactly {expected} type argument(s), got {got}"
                     )),
                 ),
                 TypeError::EventTypeWrongKind { name, actual, .. } => (
-                    "ORB_T_EVENT_TYPE_WRONG_KIND",
+                    ErrorCode::EventTypeWrongKind.as_str(),
                     Some(format!(
                         "declare {name:?} with `type {name} = Event<...>`, got a {actual} instead"
                     )),
                 ),
                 TypeError::GenericTypeForbidden { name, .. } => (
-                    "ORB_T_GENERIC_TYPE_DEPRECATED",
+                    ErrorCode::GenericTypeDeprecated.as_str(),
                     Some(format!(
                         "replace `{name}`: renderable content → `node`; structured data → an inline shape, a named `type` alias, or `Map K V`; a value of several kinds → a named tagged-union `type` alias, or the concrete primitive; the row of an entity → `@entity` / `@entity @config.<knob>`"
                     )),
