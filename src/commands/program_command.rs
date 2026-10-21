@@ -2,7 +2,7 @@
 //! command, resolved before `orb`'s own subcommands so a Rust variant cannot shadow a program. `orb` boots it, delivers
 //! `{ argv, cwd }` to that hook as JSON, prints the answer's body and exits with the answer's status class
 //! (EXEC-INBOUND-1; the answer may come from a dispatch the handler's keyed completions cause,
-//! `OrbitalServerRuntime::deliver_inbound_awaiting`).
+//! `orbital_shell_rust::host::Host::deliver_inbound_awaiting`).
 
 use std::path::{Path, PathBuf};
 
@@ -118,8 +118,8 @@ fn program_for(programs: &[(PathBuf, Vec<String>)], hook: &str) -> anyhow::Resul
 /// Run `program` as `orb <command> <argv…>`: its answer's body on stdout, its exit code returned.
 pub(crate) fn run_command_program(program: &Path, command: &str, argv: &[String], cwd: &Path) -> anyhow::Result<(i32, String)> {
     let resolved = crate::commands::dev::resolve_to_temp(program)?;
-    let host = orbital_server::SubstratePort(std::sync::Arc::new(crate::commands::program_host::ProgramHost));
-    let runtime = orbital_server::boot_runtime_with(&resolved, false, &std::env::vars().collect(), false, Some(host))?;
+    let host = orbital_shell_rust::host::SubstratePort(std::sync::Arc::new(crate::commands::program_host::ProgramHost));
+    let runtime = orbital_shell_rust::host::boot::boot_file(&resolved, false, &std::env::vars().collect(), false, Some(host))?;
     let body = serde_json::json!({ "argv": argv, "cwd": cwd.display().to_string() }).to_string();
     let answer = runtime.deliver_inbound_awaiting(&hook_name(command), [("content-type", "application/json")], &body, None);
     Ok((exit_code(answer.status), answer.body))
@@ -129,10 +129,10 @@ pub(crate) fn run_command_program(program: &Path, command: &str, argv: &[String]
 const RUN_ENTITY: &str = "default";
 
 /// `orb run <program>`, booted: the program on the substrate host, `INIT` mounted on every trait.
-pub(crate) fn boot_run(program: &Path, trace: bool) -> anyhow::Result<std::sync::Arc<orbital_server::OrbitalServerRuntime>> {
+pub(crate) fn boot_run(program: &Path, trace: bool) -> anyhow::Result<std::sync::Arc<orbital_shell_rust::host::Host>> {
     let resolved = crate::commands::dev::resolve_to_temp(program)?;
-    let host = orbital_server::SubstratePort(std::sync::Arc::new(crate::commands::program_host::ProgramHost));
-    let runtime = orbital_server::boot_runtime_with(&resolved, false, &std::env::vars().collect(), trace, Some(host))?;
+    let host = orbital_shell_rust::host::SubstratePort(std::sync::Arc::new(crate::commands::program_host::ProgramHost));
+    let runtime = orbital_shell_rust::host::boot::boot_file(&resolved, false, &std::env::vars().collect(), trace, Some(host))?;
     let seeds: Vec<orbital_core::effects::MountSeed> = runtime
         .list_orbitals()
         .iter()
@@ -160,7 +160,7 @@ pub(crate) enum RunEnd {
 
 /// Keep `runtime` running while it has an open keyed call (a listener, a watch, a pending answer). A message on (or
 /// the hang-up of) `stop` cancels each open call through the `cancel-call` path and ends the run.
-pub(crate) fn hold_run(runtime: &orbital_server::OrbitalServerRuntime, stop: &std::sync::mpsc::Receiver<()>) -> RunEnd {
+pub(crate) fn hold_run(runtime: &orbital_shell_rust::host::Host, stop: &std::sync::mpsc::Receiver<()>) -> RunEnd {
     const CHECK: std::time::Duration = std::time::Duration::from_millis(50);
     loop {
         if runtime.open_calls().is_empty() {
@@ -465,7 +465,7 @@ orbital ListenerOrbital {
         path
     }
 
-    fn bound_port(runtime: &orbital_server::OrbitalServerRuntime) -> u16 {
+    fn bound_port(runtime: &orbital_shell_rust::host::Host) -> u16 {
         let emits: Vec<_> = runtime.trace().into_iter().flat_map(|t| t.outcomes).flat_map(|o| o.emits).collect();
         let bound = emits.iter().find(|e| e.event == "BOUND").unwrap_or_else(|| panic!("no BOUND emit in {emits:?}"));
         bound.payload["port"].as_f64().filter(|p| p.fract() == 0.0 && (1.0..=65535.0).contains(p)).map(|p| p as u16).expect("a port")

@@ -333,10 +333,21 @@ pub(crate) fn run_cascade(path: &Path, steps: &serde_json::Value) -> anyhow::Res
         .ok_or_else(|| anyhow::anyhow!("--steps must be a JSON array"))?;
     let resolved = resolve_program(path)?;
 
+    let pinned_now: std::sync::Arc<std::sync::Mutex<Option<f64>>> = Default::default();
+    let clock_pin = std::sync::Arc::clone(&pinned_now);
     let kernel = RuntimeKernel::new(
         orbital_core::RuntimeEnvironment::Server,
         std::sync::Arc::new(InMemoryEntityCache::new()) as std::sync::Arc<dyn EntitySource>,
-        Default::default(),
+        orbital_core::KernelConfig {
+            clock: Some(std::sync::Arc::new(move || {
+                clock_pin
+                    .lock()
+                    .ok()
+                    .and_then(|pin| *pin)
+                    .unwrap_or_else(orbital_core::time_util::now_millis_f64)
+            })),
+            ..Default::default()
+        },
     );
     let trait_defs: std::collections::BTreeMap<String, TraitDefinition> =
         resolved
@@ -365,24 +376,52 @@ pub(crate) fn run_cascade(path: &Path, steps: &serde_json::Value) -> anyhow::Res
         if !known.contains_key(trait_name) {
             anyhow::bail!("step {i}: {} has no trait \"{trait_name}\"", path.display());
         }
-        if let Some(from) = step["from"].as_str() {
-            let entity = kernel.snapshot_trait(trait_name, None).entity;
+        let seed = match &step["entity"] {
+            serde_json::Value::Null => None,
+            serde_json::Value::Object(fields) => Some(fields),
+            _ => anyhow::bail!("step {i}: `entity` must be an object of fields"),
+        };
+        let now = match &step["now"] {
+            serde_json::Value::Null => None,
+            serde_json::Value::Number(n) => n.as_f64(),
+            _ => anyhow::bail!("step {i}: `now` must be a number (ms since the epoch)"),
+        };
+        if step["from"].is_string() || seed.is_some() {
+            let current = kernel.snapshot_trait(trait_name, None);
+            let entity = match seed {
+                None => current.entity,
+                Some(fields) => {
+                    let mut row = match current.entity {
+                        Value::Object(row) => row,
+                        _ => Default::default(),
+                    };
+                    for (key, value) in fields {
+                        row.insert(key.clone(), to_core_value(value)?);
+                    }
+                    Value::Object(row)
+                }
+            };
             kernel.restore_trait(
                 trait_name,
                 None,
                 orbital_core::TraitSnapshot {
-                    state: from.to_string(),
+                    state: step["from"].as_str().map(str::to_string).unwrap_or_default(),
                     entity,
                 },
             );
         }
+        *pinned_now
+            .lock()
+            .map_err(|_| anyhow::anyhow!("step {i}: the clock pin is poisoned"))? = now;
         let payload = match &step["payload"] {
             serde_json::Value::Null => orbital_core::Value::Null,
             p => to_core_value(p)?,
         };
-        let outcomes = kernel
-            .dispatch(trait_name, None, event, payload)
-            .map_err(|e| anyhow::anyhow!("step {i} dispatch failed: {e}"))?;
+        let outcomes = kernel.dispatch(trait_name, None, event, payload);
+        *pinned_now
+            .lock()
+            .map_err(|_| anyhow::anyhow!("step {i}: the clock pin is poisoned"))? = None;
+        let outcomes = outcomes.map_err(|e| anyhow::anyhow!("step {i} dispatch failed: {e}"))?;
         // The moved traits' rows after the step, so a caller can read what a step wrote
         // (an id it generated, a list it changed) and feed it to the next step.
         let entities: serde_json::Map<String, serde_json::Value> = outcomes
@@ -397,6 +436,10 @@ pub(crate) fn run_cascade(path: &Path, steps: &serde_json::Value) -> anyhow::Res
             .iter()
             .map(|(t, r)| {
                 let mut report = outcome_report(t, r);
+                report["orbital"] = kernel
+                    .orbital_of_trait(t)
+                    .map_or(serde_json::Value::Null, serde_json::Value::String);
+                report["event"] = serde_json::Value::String(r.event.clone().unwrap_or_else(|| event.to_string()));
                 let ensures = trait_defs
                     .get(t.as_str())
                     .map(|td| {
@@ -591,6 +634,7 @@ mod outcome_report_tests {
             failure: None,
             callsite_payload: None,
             cascade_dropped: Vec::new(),
+            cascade_cut: None,
         }
     }
 

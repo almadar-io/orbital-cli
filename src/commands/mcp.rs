@@ -414,7 +414,7 @@ fn call_tool(params: &Value) -> Value {
 /// `orb mcp --program <file>`: the program's declared inbound hooks served as tools beside the language's.
 /// A call is delivered as the hook's request (EXEC-INBOUND-1) and answered with what the handler answered.
 pub(crate) struct ProgramTools {
-    runtime: std::sync::Arc<orbital_server::OrbitalServerRuntime>,
+    runtime: std::sync::Arc<orbital_shell_rust::host::Host>,
     hooks: Vec<HookTool>,
 }
 
@@ -442,9 +442,9 @@ impl ProgramTools {
         let resolved = super::dev::resolve_to_temp(path)?;
         let schema: orbital_core::OrbitalSchema =
             serde_json::from_str(&std::fs::read_to_string(&resolved)?)?;
-        let host = orbital_server::SubstratePort(std::sync::Arc::new(super::program_host::ProgramHost));
+        let host = orbital_shell_rust::host::SubstratePort(std::sync::Arc::new(super::program_host::ProgramHost));
         let runtime =
-            orbital_server::boot_runtime_with(&resolved, false, &std::env::vars().collect(), false, Some(host))?;
+            orbital_shell_rust::host::boot::boot_file(&resolved, false, &std::env::vars().collect(), false, Some(host))?;
         let declared: Vec<&String> = schema.inbound.iter().flatten().collect();
         let mut hooks = Vec::new();
         for route in orbital_core::runtime::inbound::inbound_routes_of(&schema) {

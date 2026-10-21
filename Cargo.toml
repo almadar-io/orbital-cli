@@ -22,6 +22,7 @@ orbital-core = { path = "../orbital-core", features = ["client-http", "native-tr
 orbital-compiler = { path = "../orbital-compiler" }
 orbital-lolo = { path = "../orbital-lolo" }
 orbital-server = { path = "../orbital-server" }
+orbital-shell-rust = { path = "../orbital-shell-rust" }
 orbital-verify = { path = "../orbital-verify" }
 # The sandbox manifest `orb emit manifest` builds and signs.
 io-gate = { path = "../io-gate" }
