@@ -757,14 +757,15 @@ fn unicode_escape_gets_hint() {
     let result = validate_lolo(lolo, "unicode-escape");
     let err = first_parse_error(&result);
     let sugg = err["suggestion"].as_str().unwrap();
+    // `\u{H}` escapes are part of the string grammar, so a brace-less `\u` is a malformed unicode escape.
     assert!(
-        sugg.contains("not a valid string escape"),
-        "suggestion must name the escape rule: {sugg}"
+        sugg.contains("unicode escape is `\\u{H}`"),
+        "suggestion must name the unicode escape rule: {sugg}"
     );
     let fix = err["fixGuidance"].as_str().unwrap();
     assert!(
-        fix.contains("UTF-8"),
-        "fixGuidance must say to write the character directly: {fix}"
+        fix.contains("\\u{1F600}"),
+        "fixGuidance must show the braced form: {fix}"
     );
 }
 
