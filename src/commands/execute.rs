@@ -312,13 +312,9 @@ fn outcome_report(
     })
 }
 
-pub(crate) fn run_cascade(path: &Path, steps: &serde_json::Value) -> anyhow::Result<serde_json::Value> {
+/// The program at `path`, parsed and resolved the way a cascade runs it.
+pub(crate) fn resolve_program(path: &Path) -> anyhow::Result<orbital_core::OrbitalSchema> {
     use orbital_compiler::{phases::lazy::resolve_program_with_path, CompilerOptions};
-    use orbital_core::runtime::{EntitySource, InMemoryEntityCache, RuntimeKernel};
-
-    let steps = steps
-        .as_array()
-        .ok_or_else(|| anyhow::anyhow!("--steps must be a JSON array"))?;
     let content = std::fs::read_to_string(path)
         .map_err(|e| anyhow::anyhow!("Failed to read {}: {}", path.display(), e))?;
     let schema = parse_schema_auto(&content, &path.display().to_string())
@@ -326,6 +322,16 @@ pub(crate) fn run_cascade(path: &Path, steps: &serde_json::Value) -> anyhow::Res
     let (resolved, _lazy) =
         resolve_program_with_path(schema, &CompilerOptions::from_env(), Some(path))
             .map_err(|e| anyhow::anyhow!("Failed to resolve {}: {}", path.display(), e))?;
+    Ok(resolved)
+}
+
+pub(crate) fn run_cascade(path: &Path, steps: &serde_json::Value) -> anyhow::Result<serde_json::Value> {
+    use orbital_core::runtime::{EntitySource, InMemoryEntityCache, RuntimeKernel};
+
+    let steps = steps
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("--steps must be a JSON array"))?;
+    let resolved = resolve_program(path)?;
 
     let kernel = RuntimeKernel::new(
         orbital_core::RuntimeEnvironment::Server,

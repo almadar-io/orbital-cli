@@ -4,9 +4,10 @@
 //! commands (`emit orb`, `emit lolo`, `stamp` + `validate --json --deny-warnings`, `behaviors catalog|describe|source
 //! --json`, `resolve`); each answer here is the value those commands print, staged the same way.
 
+use crate::commands::behaviors_vectors::{Embedder, ProviderEmbedder};
 use orbital_core::effects::executor::{SubstrateFailure, SubstrateHandler};
 use orbital_core::Value;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// The program host of the project `orb` runs in: behavior specifiers and relative imports resolve from the process's
 /// working directory, as the `orb` commands resolve them.
@@ -25,6 +26,12 @@ fn to_json(value: &Value) -> serde_json::Value {
 
 fn from_json(value: serde_json::Value) -> Result<Value, SubstrateFailure> {
     serde_json::from_value(value).map_err(|e| failure(e.to_string()))
+}
+
+/// A boolean option of an op's options argument; absent or not a boolean is `None`.
+fn option_flag(options: Option<&Value>, key: &str) -> Option<bool> {
+    let _ = (options, key);
+    None
 }
 
 /// A scratch directory removed when dropped.
@@ -266,7 +273,18 @@ impl ProgramHost {
             .ok_or_else(|| failure(format!("{op}: expected a value naming its behavior")))
     }
 
-    fn catalog(&self, scope: Option<&Value>) -> Result<Value, SubstrateFailure> {
+    /// `behavior/catalog`: `options.vectors: false` omits the vectors, so neither the store nor `embedder` is read.
+    fn catalog(
+        scope: Option<&Value>,
+        options: Option<&Value>,
+        embedder: Option<&dyn Embedder>,
+        user_dir: Option<&Path>,
+    ) -> Result<Value, SubstrateFailure> {
+        use crate::commands::behaviors_catalog::{catalog_with, Vectors};
+        let vectors = match option_flag(options, "vectors") {
+            Some(false) => Vectors::Omit,
+            _ => Vectors::Attach(embedder),
+        };
         let json = scope.map(to_json).unwrap_or(serde_json::Value::Null);
         let strings = |key: &str| -> Option<Vec<String>> {
             json.get(key)
@@ -283,9 +301,29 @@ impl ProgramHost {
             ));
         };
         let exposure = strings("exposure").unwrap_or_default();
-        let entries = crate::commands::behaviors_catalog::catalog(&paths, &exposure)
+        let entries = catalog_with(&paths, &exposure, vectors, user_dir)
             .map_err(|e| failure(format!("behavior/catalog: {e}")))?;
         from_json(serde_json::to_value(entries).map_err(|e| failure(e.to_string()))?)
+    }
+
+    /// `behavior/describe`: `options.knobVectors: true` attaches a trait's knob vectors as `orb behaviors describe
+    /// --knob-vectors` does, a miss embedded by `embedder`.
+    fn describe(
+        op: &str,
+        value: Option<&Value>,
+        options: Option<&Value>,
+        embedder: Option<&dyn Embedder>,
+        user_dir: Option<&Path>,
+    ) -> Result<Value, SubstrateFailure> {
+        use crate::commands::behaviors_catalog::{describe_with, Vectors};
+        let target = Self::describe_target(op, value)?;
+        let vectors = match option_flag(options, "knobVectors") {
+            Some(true) => Vectors::Attach(embedder),
+            _ => Vectors::Omit,
+        };
+        let described = describe_with(target, None, vectors, user_dir)
+            .map_err(|e| failure(format!("{op}: {e}")))?;
+        from_json(described)
     }
 
     fn resolve_behavior(&self, behavior: &str) -> Result<Value, SubstrateFailure> {
@@ -527,11 +565,13 @@ impl ProgramHost {
     }
 
     /// `program/step`: each request `{orbital, trait, from, event, payload}` played against the program in one
-    /// kernel run, from its own `from` state; each answered as asked with the circuit it ran.
+    /// kernel run, from its own `from` state; each answered as asked with the circuit it ran. `options.render`
+    /// adds each request's rendered slots, walked by the render probe against the desktop renderer.
     fn step(
         &self,
         program: serde_json::Value,
         requests: Option<&Value>,
+        options: Option<&Value>,
     ) -> Result<Value, SubstrateFailure> {
         let op = "program/step";
         let requests = requests
@@ -562,6 +602,24 @@ impl ProgramHost {
                     .unwrap_or("the run failed")
             )));
         }
+        let render = match options.map(to_json).as_ref().and_then(|o| o.get("render")) {
+            None | Some(serde_json::Value::Null) => false,
+            Some(serde_json::Value::Bool(b)) => *b,
+            Some(other) => {
+                return Err(failure(format!(
+                    "{op}: options.render must be a boolean, not {other}"
+                )))
+            }
+        };
+        let renderer = if render {
+            let schema = crate::commands::execute::resolve_program(&path)
+                .map_err(|e| failure(format!("{op}: {e}")))?;
+            let target = crate::utils::desktop::target()
+                .map_err(|e| failure(format!("{op}: options.render: {e}")))?;
+            Some((schema, target))
+        } else {
+            None
+        };
         let mut played = Vec::new();
         for (i, request) in requests.iter().enumerate() {
             let trait_name = request["trait"].as_str().unwrap_or_default();
@@ -612,6 +670,26 @@ impl ProgramHost {
             });
             if let Some(f) = fired {
                 result["firedArm"] = f;
+            }
+            if let Some((schema, target)) = &renderer {
+                let payload: orbital_core::Value = serde_json::from_value(
+                    request
+                        .get("payload")
+                        .cloned()
+                        .unwrap_or(serde_json::json!({})),
+                )
+                .map_err(|e| failure(format!("{op}: payload: {e}")))?;
+                let slots = orbital_core::client::render_probe::played_render_facts(
+                    schema,
+                    trait_name,
+                    request["event"].as_str().unwrap_or_default(),
+                    payload,
+                    target,
+                    |s, _| orbital_core::client::render_probe::seeded_kernel(s),
+                )
+                .map_err(|e| failure(format!("{op}: render: {e}")))?;
+                result["rendered"] =
+                    serde_json::to_value(slots).map_err(|e| failure(e.to_string()))?;
             }
             let mut step = request.clone();
             step["result"] = result;
@@ -691,12 +769,15 @@ impl SubstrateHandler for ProgramHost {
             },
             "program/print" => self.print(program_arg(op, args.first())?),
             "program/validate" => self.validate(program_arg(op, args.first())?, args.get(1)),
-            "behavior/catalog" => self.catalog(args.first()),
+            "behavior/catalog" => {
+                let embedder = ProviderEmbedder::from_env();
+                let embedder = embedder.as_ref().map(|e| e as &dyn Embedder);
+                Self::catalog(args.first(), args.get(1), embedder, None)
+            }
             "behavior/describe" => {
-                let target = Self::describe_target(op, args.first())?;
-                let described = crate::commands::behaviors_catalog::describe(target)
-                    .map_err(|e| failure(format!("{op}: {e}")))?;
-                from_json(described)
+                let embedder = ProviderEmbedder::from_env();
+                let embedder = embedder.as_ref().map(|e| e as &dyn Embedder);
+                Self::describe(op, args.first(), args.get(1), embedder, None)
             }
             "behavior/source" => {
                 let behavior = Self::behavior_of(op, args.first())?;
@@ -707,7 +788,7 @@ impl SubstrateHandler for ProgramHost {
             "behavior/resolve" => self.resolve_behavior(&Self::behavior_of(op, args.first())?),
             "program/compose" => self.compose(args),
             "program/eval" => self.eval(program_arg(op, args.first())?, args.get(1)),
-            "program/step" => self.step(program_arg(op, args.first())?, args.get(1)),
+            "program/step" => self.step(program_arg(op, args.first())?, args.get(1), args.get(2)),
             "behavior/dependencies" => self.dependencies(program_arg(op, args.first())?),
             other => Err(failure(format!(
                 "{other}: not an op the native program host answers"
@@ -827,6 +908,136 @@ orbital NoteOrbital {
         assert!(
             host.run("behavior/source", &[missing]).is_err(),
             "control: an unknown behavior fails"
+        );
+    }
+
+    /// An embedder that answers locally and counts the texts it embedded.
+    struct CountingEmbedder(std::sync::Mutex<usize>);
+
+    impl Embedder for CountingEmbedder {
+        fn model(&self) -> &str {
+            "test-model"
+        }
+        fn embed(&self, texts: &[String]) -> anyhow::Result<Vec<Vec<f32>>> {
+            *self.0.lock().unwrap() += texts.len();
+            Ok(texts
+                .iter()
+                .map(|t| vec![t.len() as f32, 1.0, -1.0, 0.5])
+                .collect())
+        }
+    }
+
+    #[test]
+    fn describe_attaches_knob_vectors_only_with_the_knob_vectors_option_as_the_verb_does() {
+        orbital_compiler::loader::register_source_lowerer(crate::lower_lolo_file);
+        let store = Scratch::new("almadar-knob-vectors").unwrap();
+        let fake = CountingEmbedder(std::sync::Mutex::new(0));
+        let value =
+            from_json(serde_json::json!({ "behavior": "almadar-std/std-retry", "trait": "Retry" }))
+                .unwrap();
+        let with = from_json(serde_json::json!({ "knobVectors": true })).unwrap();
+        let attached = json(
+            &ProgramHost::describe(
+                "behavior/describe",
+                Some(&value),
+                Some(&with),
+                Some(&fake),
+                Some(&store.0),
+            )
+            .expect("describe with knob vectors"),
+        );
+        let knobs = attached["knobs"].as_array().unwrap();
+        assert_eq!(knobs.len(), 4, "{attached}");
+        assert!(knobs
+            .iter()
+            .all(|k| k["vector"].as_array().is_some_and(|v| v.len() == 4)));
+        assert_eq!(attached["model"], "test-model");
+        let verb = crate::commands::behaviors_catalog::describe_with(
+            crate::commands::behaviors_catalog::DescribeTarget::Spec(
+                "almadar-std/std-retry.traits.Retry".into(),
+            ),
+            None,
+            crate::commands::behaviors_catalog::Vectors::Attach(Some(&fake)),
+            Some(&store.0),
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_string(&attached).unwrap(),
+            serde_json::to_string(&verb).unwrap(),
+            "the op answers what `describe --knob-vectors` prints"
+        );
+
+        let embedded = *fake.0.lock().unwrap();
+        let without = json(
+            &ProgramHost::describe(
+                "behavior/describe",
+                Some(&value),
+                None,
+                Some(&fake),
+                Some(&store.0),
+            )
+            .expect("describe"),
+        );
+        assert!(without["knobs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|k| k.get("vector").is_none()));
+        assert_eq!(without["model"], "");
+        let off = from_json(serde_json::json!({ "knobVectors": false })).unwrap();
+        let declined = json(
+            &ProgramHost::describe(
+                "behavior/describe",
+                Some(&value),
+                Some(&off),
+                Some(&fake),
+                Some(&store.0),
+            )
+            .expect("describe knobVectors false"),
+        );
+        assert_eq!(declined, without);
+        assert_eq!(
+            *fake.0.lock().unwrap(),
+            embedded,
+            "control: no knob vectors, no embedding"
+        );
+    }
+
+    #[test]
+    fn catalog_with_vectors_false_reads_no_store_and_no_provider() {
+        orbital_compiler::loader::register_source_lowerer(crate::lower_lolo_file);
+        let store = Scratch::new("almadar-catalog-vectors").unwrap();
+        let fake = CountingEmbedder(std::sync::Mutex::new(0));
+        let scope =
+            from_json(serde_json::json!({ "paths": ["almadar-std/ml/organisms"] })).unwrap();
+        let off = from_json(serde_json::json!({ "vectors": false })).unwrap();
+        let bare = json(
+            &ProgramHost::catalog(Some(&scope), Some(&off), Some(&fake), Some(&store.0))
+                .expect("catalog without vectors"),
+        );
+        let entries = bare.as_array().unwrap();
+        assert!(!entries.is_empty());
+        assert!(entries
+            .iter()
+            .all(|e| e["vectors"] == serde_json::json!({}) && e["model"] == ""));
+        assert_eq!(*fake.0.lock().unwrap(), 0, "the provider is never asked");
+        assert_eq!(
+            std::fs::read_dir(&store.0).unwrap().count(),
+            0,
+            "the user store is never opened"
+        );
+
+        let full = json(
+            &ProgramHost::catalog(Some(&scope), None, Some(&fake), Some(&store.0))
+                .expect("catalog"),
+        );
+        assert!(
+            full.as_array()
+                .unwrap()
+                .iter()
+                .all(|e| e["model"] == "test-model"
+                    && e["vectors"].as_object().is_some_and(|v| !v.is_empty())),
+            "control: by default the vectors are attached"
         );
     }
 
@@ -959,21 +1170,54 @@ orbital NoteOrbital {
             { "orbital": "Counting", "trait": "Count", "from": "ready", "event": "GATED", "payload": {} }
         ]))
         .unwrap();
-        let played = json(&host.run("program/step", &[program, requests]).expect("steps"));
+        let played = json(
+            &host
+                .run("program/step", &[program.clone(), requests.clone()])
+                .expect("steps"),
+        );
         let inc = &played[0]["result"];
-        assert_eq!(inc["effects"][0]["routed"], false, "an executed set routes nothing");
+        assert_eq!(
+            inc["effects"][0]["routed"], false,
+            "an executed set routes nothing"
+        );
         assert_eq!(inc["ensures"][0]["verdict"], "held", "{inc}");
         assert_eq!(inc["ensures"][1]["verdict"], "broken");
-        assert_eq!(inc["ensures"][1]["proposition"], serde_json::json!(["=", "@entity.count", 99]));
+        assert_eq!(
+            inc["ensures"][1]["proposition"],
+            serde_json::json!(["=", "@entity.count", 99])
+        );
         assert_eq!(inc["ensures"][1]["counterexample"]["entity"]["count"], 1);
-        assert_eq!(inc["ensures"][1]["counterexample"]["fromEntity"]["count"], 0);
+        assert_eq!(
+            inc["ensures"][1]["counterexample"]["fromEntity"]["count"],
+            0
+        );
         let gated = &played[1]["result"];
         assert_eq!(gated["transitionFired"], false);
         assert_eq!(gated["ensures"][0]["verdict"], "inconclusive", "{gated}");
         assert_eq!(gated["ensures"][0]["reason"], "the transition did not fire");
         assert!(
-            serde_json::from_value::<orbital_core::program_machine::PlayedStep>(played[0].clone()).is_ok(),
+            serde_json::from_value::<orbital_core::program_machine::PlayedStep>(played[0].clone())
+                .is_ok(),
             "the host answers the typed PlayedStep wire"
+        );
+        assert!(
+            inc.get("rendered").is_none(),
+            "control: no render facts unless options.render asks"
+        );
+        let bad = host
+            .run(
+                "program/step",
+                &[
+                    program,
+                    requests,
+                    from_json(serde_json::json!({ "render": "yes" })).unwrap(),
+                ],
+            )
+            .unwrap_err();
+        assert!(
+            bad.message.contains("options.render must be a boolean"),
+            "{}",
+            bad.message
         );
     }
 

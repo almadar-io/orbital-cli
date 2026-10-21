@@ -39,7 +39,7 @@ pub(crate) const RENDERER: &str = "dioxus";
 
 /// The desktop program's renderer as a Layer 2 probe target: its coverage
 /// lists, and game canvases painted by the program.
-struct RemoteTarget {
+pub(crate) struct RemoteTarget {
     binary: PathBuf,
     supported: HashSet<String>,
     stubbed: HashSet<String>,
@@ -64,7 +64,7 @@ impl RenderTarget for RemoteTarget {
     }
 }
 
-fn target() -> anyhow::Result<RemoteTarget> {
+pub(crate) fn target() -> anyhow::Result<RemoteTarget> {
     let binary = locate()?;
     match desktop_protocol::request(&binary, DesktopRequest::Coverage { renderer: RENDERER.to_string() }).map_err(failure)? {
         DesktopReply::Coverage { supported, stubbed } => Ok(RemoteTarget {
