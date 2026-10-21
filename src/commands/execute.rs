@@ -266,7 +266,6 @@ fn outcome_report(
     r: &orbital_core::runtime::ProcessEventResult,
 ) -> serde_json::Value {
     use orbital_core::effects::Effect;
-    use orbital_core::runtime::EffectRunStatus;
     let emits: Vec<serde_json::Value> = r
         .effect_results
         .iter()
@@ -297,21 +296,8 @@ fn outcome_report(
         .effect_runs
         .iter()
         .map(|run| {
-            let expr = serde_json::to_value(&run.effect).unwrap_or(serde_json::Value::Null);
-            let (head, args) = match expr.as_array().map(Vec::as_slice) {
-                Some([serde_json::Value::String(head), args @ ..]) => (head.clone(), args.to_vec()),
-                _ => (String::new(), Vec::new()),
-            };
-            let status = match run.status {
-                EffectRunStatus::Executed => "executed",
-                EffectRunStatus::Failed => "failed",
-                EffectRunStatus::Skipped => "skipped",
-            };
-            let mut entry = serde_json::json!({ "type": head, "args": args, "status": status });
-            if let Some(error) = &run.error {
-                entry["error"] = serde_json::Value::String(error.clone());
-            }
-            entry
+            serde_json::to_value(orbital_core::program_machine::played_effect(run))
+                .unwrap_or(serde_json::Value::Null)
         })
         .collect();
     serde_json::json!({
@@ -346,9 +332,20 @@ pub(crate) fn run_cascade(path: &Path, steps: &serde_json::Value) -> anyhow::Res
         std::sync::Arc::new(InMemoryEntityCache::new()) as std::sync::Arc<dyn EntitySource>,
         Default::default(),
     );
+    let trait_defs: std::collections::BTreeMap<String, TraitDefinition> =
+        resolved
+            .orbitals
+            .iter()
+            .flat_map(|o| o.traits.iter())
+            .filter_map(|t| match t {
+                orbital_core::schema::types::TraitReference::Inline(td) => Some((td.name.clone(), td.clone())),
+                _ => None,
+            })
+            .collect();
     kernel
         .register_schema(resolved)
         .map_err(|e| anyhow::anyhow!("Failed to register {}: {e}", path.display()))?;
+    kernel.set_record_entity_after(true);
 
     let known = kernel.trait_snapshot(Some("singleton"));
     let mut reports = Vec::with_capacity(steps.len());
@@ -390,8 +387,25 @@ pub(crate) fn run_cascade(path: &Path, steps: &serde_json::Value) -> anyhow::Res
                 (t.to_string(), serde_json::to_value(&row).unwrap_or(serde_json::Value::Null))
             })
             .collect();
-        let outcomes: Vec<serde_json::Value> =
-            outcomes.iter().map(|(t, r)| outcome_report(t, r)).collect();
+        let outcomes: Vec<serde_json::Value> = outcomes
+            .iter()
+            .map(|(t, r)| {
+                let mut report = outcome_report(t, r);
+                let ensures = trait_defs
+                    .get(t.as_str())
+                    .map(|td| {
+                        orbital_core::program_machine::played_ensures(
+                            td,
+                            r.event.as_deref().unwrap_or(event),
+                            r,
+                        )
+                    })
+                    .unwrap_or_default();
+                report["ensures"] =
+                    serde_json::to_value(ensures).unwrap_or(serde_json::Value::Array(Vec::new()));
+                report
+            })
+            .collect();
         let states: serde_json::Map<String, serde_json::Value> = kernel
             .trait_snapshot(Some("singleton"))
             .into_iter()
@@ -596,7 +610,7 @@ mod outcome_report_tests {
         );
         assert_eq!(
             report["effects"],
-            serde_json::json!([{ "type": "set", "args": ["@entity.mode", "visual"], "status": "executed" }])
+            serde_json::json!([{ "type": "set", "args": ["@entity.mode", "visual"], "status": "executed", "routed": false }])
         );
         assert_eq!(report["previousState"], serde_json::json!("NORMAL"));
     }

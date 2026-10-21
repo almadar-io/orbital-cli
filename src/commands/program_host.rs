@@ -608,6 +608,7 @@ impl ProgramHost {
                     if let Some(e) = g.get("error") { out["error"] = e.clone(); }
                     out
                 }).collect::<Vec<_>>(),
+                "ensures": outcome.get("ensures").cloned().unwrap_or(serde_json::json!([])),
             });
             if let Some(f) = fired {
                 result["firedArm"] = f;
@@ -935,6 +936,45 @@ orbital NoteOrbital {
         );
         assert_eq!(graph["orbitals"]["R"], serde_json::json!(["std-retry"]));
         assert_eq!(graph["behaviors"]["std-retry"]["layer"], "std");
+    }
+
+    #[test]
+    fn step_reports_each_ensures_judged_by_the_kernel_and_whether_a_failure_was_routed() {
+        let host = ProgramHost;
+        let program = from_json(serde_json::json!({ "name": "CounterApp", "orbitals": [{ "name": "Counting",
+            "entity": { "name": "Counter", "persistence": "runtime", "fields": [{ "name": "id", "type": "string" }, { "name": "count", "type": "number", "default": 0 }] },
+            "pages": [],
+            "traits": [{ "name": "Count", "linkedEntity": "Counter", "stateMachine": {
+                "states": [{ "name": "ready", "isInitial": true }],
+                "transitions": [
+                    { "from": "ready", "to": "ready", "event": "INC",
+                      "effects": [["set", "@entity.count", ["+", "@entity.count", 1]]],
+                      "ensures": [["=", "@entity.count", ["+", "@fromEntity.count", 1]], ["=", "@entity.count", 99]] },
+                    { "from": "ready", "to": "ready", "event": "GATED", "guard": ["=", 1, 2],
+                      "ensures": [["=", "@entity.count", 0]] }
+                ] } }] }] }))
+        .unwrap();
+        let requests = from_json(serde_json::json!([
+            { "orbital": "Counting", "trait": "Count", "from": "ready", "event": "INC", "payload": {} },
+            { "orbital": "Counting", "trait": "Count", "from": "ready", "event": "GATED", "payload": {} }
+        ]))
+        .unwrap();
+        let played = json(&host.run("program/step", &[program, requests]).expect("steps"));
+        let inc = &played[0]["result"];
+        assert_eq!(inc["effects"][0]["routed"], false, "an executed set routes nothing");
+        assert_eq!(inc["ensures"][0]["verdict"], "held", "{inc}");
+        assert_eq!(inc["ensures"][1]["verdict"], "broken");
+        assert_eq!(inc["ensures"][1]["proposition"], serde_json::json!(["=", "@entity.count", 99]));
+        assert_eq!(inc["ensures"][1]["counterexample"]["entity"]["count"], 1);
+        assert_eq!(inc["ensures"][1]["counterexample"]["fromEntity"]["count"], 0);
+        let gated = &played[1]["result"];
+        assert_eq!(gated["transitionFired"], false);
+        assert_eq!(gated["ensures"][0]["verdict"], "inconclusive", "{gated}");
+        assert_eq!(gated["ensures"][0]["reason"], "the transition did not fire");
+        assert!(
+            serde_json::from_value::<orbital_core::program_machine::PlayedStep>(played[0].clone()).is_ok(),
+            "the host answers the typed PlayedStep wire"
+        );
     }
 
     #[test]
