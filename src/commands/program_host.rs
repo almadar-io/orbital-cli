@@ -586,10 +586,14 @@ impl ProgramHost {
                 }
             }
             if r.get("entity").is_some_and(|e| !e.is_object()) {
-                return Err(failure(format!("{op}: a request's entity must be an object of fields")));
+                return Err(failure(format!(
+                    "{op}: a request's entity must be an object of fields"
+                )));
             }
             if r.get("now").is_some_and(|n| !n.is_number()) {
-                return Err(failure(format!("{op}: a request's now must be a number (ms since the epoch)")));
+                return Err(failure(format!(
+                    "{op}: a request's now must be a number (ms since the epoch)"
+                )));
             }
         }
         let steps: Vec<serde_json::Value> = requests
@@ -636,11 +640,18 @@ impl ProgramHost {
             None
         };
         let emitted_of = |o: &serde_json::Value, i: usize| -> Vec<serde_json::Value> {
-            o.get("emits").and_then(serde_json::Value::as_array).into_iter().flatten().map(|e| {
-                let mut out = serde_json::json!({ "type": e["event"], "timestamp": i });
-                if let Some(p) = e.get("payload").filter(|p| !p.is_null()) { out["payload"] = p.clone(); }
-                out
-            }).collect()
+            o.get("emits")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .map(|e| {
+                    let mut out = serde_json::json!({ "type": e["event"], "timestamp": i });
+                    if let Some(p) = e.get("payload").filter(|p| !p.is_null()) {
+                        out["payload"] = p.clone();
+                    }
+                    out
+                })
+                .collect()
         };
         let mut played = Vec::new();
         for (i, request) in requests.iter().enumerate() {
@@ -989,8 +1000,8 @@ orbital NoteOrbital {
         )
         .unwrap();
         assert_eq!(
-            serde_json::to_string(&attached).unwrap(),
-            serde_json::to_string(&verb).unwrap(),
+            attached,
+            json(&from_json(verb).unwrap()),
             "the op answers what `describe --knob-vectors` prints"
         );
 
@@ -1032,6 +1043,16 @@ orbital NoteOrbital {
 
     #[test]
     fn catalog_with_vectors_false_reads_no_store_and_no_provider() {
+        // An organism's catalog entry outgrows the 2 MiB test-thread stack; `orb` runs it on the 8 MiB main thread.
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(catalog_with_vectors_false_body)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    fn catalog_with_vectors_false_body() {
         orbital_compiler::loader::register_source_lowerer(crate::lower_lolo_file);
         let store = Scratch::new("almadar-catalog-vectors").unwrap();
         let fake = CountingEmbedder(std::sync::Mutex::new(0));
@@ -1263,7 +1284,9 @@ orbital NoteOrbital {
         .unwrap();
         let step = |extra: serde_json::Value| {
             let mut r = serde_json::json!({ "orbital": "Gating", "trait": "G", "from": "ready", "payload": {} });
-            r.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            r.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
             r
         };
         let requests = from_json(serde_json::json!([
@@ -1273,12 +1296,34 @@ orbital NoteOrbital {
             step(serde_json::json!({ "event": "LATE" }))
         ]))
         .unwrap();
-        let played = json(&host.run("program/step", &[program, requests]).expect("steps"));
-        assert_eq!(played[0]["result"]["guard"], "pass", "a seeded owner admits the guard: {}", played[0]);
-        assert_eq!(played[1]["result"]["guard"], "fail", "control: another owner does not");
-        assert_eq!(played[2]["result"]["guard"], "fail", "a pinned @now of 0 is not past 1000: {}", played[2]);
-        assert_eq!(played[3]["result"]["guard"], "pass", "control: the real clock is");
-        assert_eq!(played[0]["entity"], serde_json::json!({ "owner": "ann" }), "the request is answered as asked");
+        let played = json(
+            &host
+                .run("program/step", &[program, requests])
+                .expect("steps"),
+        );
+        assert_eq!(
+            played[0]["result"]["guard"], "pass",
+            "a seeded owner admits the guard: {}",
+            played[0]
+        );
+        assert_eq!(
+            played[1]["result"]["guard"], "fail",
+            "control: another owner does not"
+        );
+        assert_eq!(
+            played[2]["result"]["guard"], "fail",
+            "a pinned @now of 0 is not past 1000: {}",
+            played[2]
+        );
+        assert_eq!(
+            played[3]["result"]["guard"], "pass",
+            "control: the real clock is"
+        );
+        assert_eq!(
+            played[0]["entity"],
+            serde_json::json!({ "owner": "ann" }),
+            "the request is answered as asked"
+        );
     }
 
     #[test]
@@ -1299,7 +1344,11 @@ orbital NoteOrbital {
             ] }] }))
         .unwrap();
         let requests = from_json(serde_json::json!([{ "orbital": "Auth", "trait": "ApiKeys", "from": "idle", "event": "ISSUE", "payload": {} }])).unwrap();
-        let played = json(&host.run("program/step", &[program, requests]).expect("steps"));
+        let played = json(
+            &host
+                .run("program/step", &[program, requests])
+                .expect("steps"),
+        );
         let outcomes = &played[0]["result"]["outcomes"];
         assert_eq!(outcomes.as_array().map(Vec::len), Some(2), "{outcomes}");
         assert_eq!(outcomes[0]["orbital"], "Auth");
@@ -1308,10 +1357,16 @@ orbital NoteOrbital {
         assert_eq!(outcomes[0]["event"], "ISSUE");
         assert_eq!(outcomes[0]["arm"], 0);
         assert_eq!(outcomes[1]["trait"], "ServerBearer");
-        assert_eq!(outcomes[1]["event"], "ARM", "the listener's own event: {outcomes}");
+        assert_eq!(
+            outcomes[1]["event"], "ARM",
+            "the listener's own event: {outcomes}"
+        );
         assert_eq!(outcomes[1]["fired"], true);
         assert_eq!(outcomes[1]["arm"], 0);
-        assert_eq!((&outcomes[1]["from"], &outcomes[1]["to"]), (&serde_json::json!("idle"), &serde_json::json!("armed")));
+        assert_eq!(
+            (&outcomes[1]["from"], &outcomes[1]["to"]),
+            (&serde_json::json!("idle"), &serde_json::json!("armed"))
+        );
     }
 
     #[test]
@@ -1325,7 +1380,11 @@ orbital NoteOrbital {
                 "transitions": [{ "from": "NORMAL", "to": "INSERT", "event": "KEY", "guard": ["=", "@payload.key", "i"] }] } }] }] }))
         .unwrap();
         let requests = from_json(serde_json::json!([{ "orbital": "Editor", "trait": "Modes", "from": "NORMAL", "event": "KEY", "payload": { "key": "i" } }])).unwrap();
-        let played = json(&host.run("program/step", &[program, requests]).expect("steps"));
+        let played = json(
+            &host
+                .run("program/step", &[program, requests])
+                .expect("steps"),
+        );
         let r = &played[0]["result"];
         assert_eq!(
             r["outcomes"],
@@ -1359,19 +1418,40 @@ orbital NoteOrbital {
             &host
                 .run(
                     "program/step",
-                    &[program, from_json(serde_json::json!([req("PUT"), req("HAS_ITEM"), req("HAS_BODY"), req("HAS_N")])).unwrap()],
+                    &[
+                        program,
+                        from_json(serde_json::json!([
+                            req("PUT"),
+                            req("HAS_ITEM"),
+                            req("HAS_BODY"),
+                            req("HAS_N")
+                        ]))
+                        .unwrap(),
+                    ],
                 )
                 .expect("steps"),
         );
-        assert_eq!(played[1]["result"]["guard"], "pass", "the appended object is there: {}", played[1]);
-        assert_eq!(played[2]["result"]["guard"], "pass", "the bytes read back: {}", played[2]);
-        assert_eq!(played[3]["result"]["guard"], "pass", "control: the scalar carries");
+        assert_eq!(
+            played[1]["result"]["guard"], "pass",
+            "the appended object is there: {}",
+            played[1]
+        );
+        assert_eq!(
+            played[2]["result"]["guard"], "pass",
+            "the bytes read back: {}",
+            played[2]
+        );
+        assert_eq!(
+            played[3]["result"]["guard"], "pass",
+            "control: the scalar carries"
+        );
     }
 
     #[test]
     fn step_seeds_nested_arrays_of_objects_and_keeps_the_unseeded_siblings() {
         let host = ProgramHost;
-        let obj = |props: serde_json::Value| serde_json::json!({ "type": "object", "properties": props });
+        let obj =
+            |props: serde_json::Value| serde_json::json!({ "type": "object", "properties": props });
         let program = from_json(serde_json::json!({ "name": "JudgeApp", "orbitals": [{ "name": "Judge",
             "entity": { "name": "Run", "persistence": "runtime", "fields": [
                 { "name": "id", "type": "string" },
@@ -1392,19 +1472,38 @@ orbital NoteOrbital {
             &host
                 .run(
                     "program/step",
-                    &[program, from_json(serde_json::json!([
-                        req("TARGETS", full.clone()),
-                        req("VERDICTS", full),
-                        req("TARGETS", serde_json::json!({ "judged": [] })),
-                        req("NO_JUDGED", serde_json::json!({ "judged": [] }))
-                    ])).unwrap()],
+                    &[
+                        program,
+                        from_json(serde_json::json!([
+                            req("TARGETS", full.clone()),
+                            req("VERDICTS", full),
+                            req("TARGETS", serde_json::json!({ "judged": [] })),
+                            req("NO_JUDGED", serde_json::json!({ "judged": [] }))
+                        ]))
+                        .unwrap(),
+                    ],
                 )
                 .expect("steps"),
         );
-        assert_eq!(played[0]["result"]["guard"], "pass", "nested targets read back: {}", played[0]);
-        assert_eq!(played[1]["result"]["guard"], "pass", "nested verdicts read back: {}", played[1]);
-        assert_eq!(played[2]["result"]["guard"], "pass", "seeding judged keeps played: {}", played[2]);
-        assert_eq!(played[3]["result"]["guard"], "pass", "control: the seeded field itself is replaced");
+        assert_eq!(
+            played[0]["result"]["guard"], "pass",
+            "nested targets read back: {}",
+            played[0]
+        );
+        assert_eq!(
+            played[1]["result"]["guard"], "pass",
+            "nested verdicts read back: {}",
+            played[1]
+        );
+        assert_eq!(
+            played[2]["result"]["guard"], "pass",
+            "seeding judged keeps played: {}",
+            played[2]
+        );
+        assert_eq!(
+            played[3]["result"]["guard"], "pass",
+            "control: the seeded field itself is replaced"
+        );
     }
 
     #[test]
@@ -1423,10 +1522,37 @@ orbital NoteOrbital {
                 ] } }] }] }))
         .unwrap();
         let req = |event: &str| serde_json::json!({ "orbital": "P", "trait": "T", "from": "idle", "event": event, "payload": {} });
-        let both = json(&host.run("program/step", &[program.clone(), from_json(serde_json::json!([req("MAKE"), req("DROP")])).unwrap()]).expect("steps"));
-        assert_eq!(both[1]["result"]["emitted"][0]["type"], "DROPPED", "{}", both[1]);
-        let alone = json(&host.run("program/step", &[program, from_json(serde_json::json!([req("DROP")])).unwrap()]).expect("steps"));
-        assert_eq!(alone[0]["result"]["emitted"][0]["type"], "DROP_FAILED", "control: no row, not found");
+        let both = json(
+            &host
+                .run(
+                    "program/step",
+                    &[
+                        program.clone(),
+                        from_json(serde_json::json!([req("MAKE"), req("DROP")])).unwrap(),
+                    ],
+                )
+                .expect("steps"),
+        );
+        assert_eq!(
+            both[1]["result"]["emitted"][0]["type"], "DROPPED",
+            "{}",
+            both[1]
+        );
+        let alone = json(
+            &host
+                .run(
+                    "program/step",
+                    &[
+                        program,
+                        from_json(serde_json::json!([req("DROP")])).unwrap(),
+                    ],
+                )
+                .expect("steps"),
+        );
+        assert_eq!(
+            alone[0]["result"]["emitted"][0]["type"], "DROP_FAILED",
+            "control: no row, not found"
+        );
     }
 
     #[test]
@@ -1442,7 +1568,11 @@ orbital NoteOrbital {
                         ["emit", "RESPOND", { "status": ["if", "@big", 413, 200], "lit": 7 }]]] }] } }] }] }))
         .unwrap();
         let requests = from_json(serde_json::json!([{ "orbital": "Em", "trait": "T", "from": "idle", "event": "GO", "payload": { "n": 3 } }])).unwrap();
-        let played = json(&host.run("program/step", &[program, requests]).expect("steps"));
+        let played = json(
+            &host
+                .run("program/step", &[program, requests])
+                .expect("steps"),
+        );
         let r = &played[0]["result"];
         assert_eq!(r["emitted"][0]["payload"]["status"], 200.0, "{r}");
         assert_eq!(r["emitted"][0]["payload"]["lit"], 7.0, "control: a literal");
@@ -1460,13 +1590,21 @@ orbital NoteOrbital {
                 "transitions": [{ "from": "ready", "to": "ready", "event": "GO" }] } }] }] }))
         .unwrap();
         for (bad, says) in [
-            (serde_json::json!({ "entity": "ann" }), "entity must be an object"),
+            (
+                serde_json::json!({ "entity": "ann" }),
+                "entity must be an object",
+            ),
             (serde_json::json!({ "now": "noon" }), "now must be a number"),
         ] {
             let mut r = serde_json::json!({ "orbital": "Gating", "trait": "G", "from": "ready", "event": "GO", "payload": {} });
-            r.as_object_mut().unwrap().extend(bad.as_object().unwrap().clone());
+            r.as_object_mut()
+                .unwrap()
+                .extend(bad.as_object().unwrap().clone());
             let err = host
-                .run("program/step", &[program.clone(), from_json(serde_json::json!([r])).unwrap()])
+                .run(
+                    "program/step",
+                    &[program.clone(), from_json(serde_json::json!([r])).unwrap()],
+                )
                 .unwrap_err();
             assert!(err.message.contains(says), "{}", err.message);
         }
