@@ -121,12 +121,13 @@ pub(crate) fn inspect(source: &str, options: &Value) -> Result<Value, SubstrateF
         for item in items {
             let mut anchors = Vec::new();
             collect_anchors(&item.schema, documents, origins, None, &mut anchors);
+            sort_anchors(&mut anchors);
             maps.push(json!({"orbital": item.orbital, "orbRef": item.orb_ref, "program": item.schema, "sourceMap": anchors}));
             collect_lazy(&item.lazy, documents, origins, maps);
         }
     }
     collect_lazy(&lazy, &documents, &origins, &mut lazy_maps);
-    anchors.sort_by(|a, b| a["pointer"].as_str().cmp(&b["pointer"].as_str()));
+    sort_anchors(&mut anchors);
     let mut definitions = Vec::new();
     for orbital in &program.orbitals {
         for reference in &orbital.traits {
@@ -157,6 +158,15 @@ pub(crate) fn inspect(source: &str, options: &Value) -> Result<Value, SubstrateF
         json!({"program": program, "authoredProgram": authored_program, "definitions": definitions, "composition": composition, "sourceMap": anchors, "imports": imports, "lazy": lazy_maps,
         "path": path, "version": options.get("version"), "columnEncoding": "unicode-scalar", "lengthEncoding": "utf-8-bytes", "lineBase": 1, "columnBase": 1}),
     )
+}
+
+fn sort_anchors(anchors: &mut [Value]) {
+    anchors.sort_by(|a, b| {
+        a["pointer"]
+            .as_str()
+            .cmp(&b["pointer"].as_str())
+            .then_with(|| a["path"].as_str().cmp(&b["path"].as_str()))
+    });
 }
 
 fn composition_bindings(
