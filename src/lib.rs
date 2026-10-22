@@ -894,7 +894,7 @@ pub fn run() -> anyhow::Result<()> {
     // Namespaced structured logging (mirror of @almadar/logger). Quiet by default
     // (warn/error only); enable namespaces with e.g. ALMADAR_DEBUG='almadar:runtime:*'.
     orbital_core::logging::init();
-    orbital_compiler::loader::register_source_lowerer(lower_lolo_file);
+    orbital_compiler::loader::register_source_lowerer(|path, _, _| lower_lolo_file(path));
     orbital_compiler::phases::reflect::register_trait_describer(describe_trait_value);
 
     let args: Vec<String> = std::env::args().skip(1).collect();

@@ -954,7 +954,7 @@ orbital NoteOrbital {
 
     #[test]
     fn read_lowers_text_to_the_program_emit_orb_prints_and_print_writes_it_back() {
-        orbital_compiler::loader::register_source_lowerer(crate::lower_lolo_file);
+        orbital_compiler::loader::register_source_lowerer(|path, _, _| crate::lower_lolo_file(path));
         let host = ProgramHost;
         let program = host
             .run("program/read", &[Value::String(NOTE.to_string())])
@@ -980,7 +980,7 @@ orbital NoteOrbital {
 
     #[test]
     fn validate_reports_the_validators_findings_and_a_bad_name_before_any_run() {
-        orbital_compiler::loader::register_source_lowerer(crate::lower_lolo_file);
+        orbital_compiler::loader::register_source_lowerer(|path, _, _| crate::lower_lolo_file(path));
         let host = ProgramHost;
         let program = host
             .run("program/read", &[Value::String(NOTE.to_string())])
@@ -1007,7 +1007,7 @@ orbital NoteOrbital {
 
     #[test]
     fn the_behavior_ops_answer_what_the_behaviors_commands_print() {
-        orbital_compiler::loader::register_source_lowerer(crate::lower_lolo_file);
+        orbital_compiler::loader::register_source_lowerer(|path, _, _| crate::lower_lolo_file(path));
         let host = ProgramHost;
         let value = from_json(serde_json::json!({ "behavior": "almadar-std/std-retry" })).unwrap();
         let source = json(
@@ -1035,7 +1035,7 @@ orbital NoteOrbital {
 
     #[test]
     fn source_with_the_file_option_answers_the_path_and_file_text_as_read_behavior_does() {
-        orbital_compiler::loader::register_source_lowerer(crate::lower_lolo_file);
+        orbital_compiler::loader::register_source_lowerer(|path, _, _| crate::lower_lolo_file(path));
         let value = from_json(serde_json::json!({ "behavior": "almadar-std/std-retry" })).unwrap();
         let file = from_json(serde_json::json!({ "file": true })).unwrap();
         let answered =
@@ -1084,7 +1084,7 @@ orbital NoteOrbital {
 
     #[test]
     fn describe_attaches_knob_vectors_only_with_the_knob_vectors_option_as_the_verb_does() {
-        orbital_compiler::loader::register_source_lowerer(crate::lower_lolo_file);
+        orbital_compiler::loader::register_source_lowerer(|path, _, _| crate::lower_lolo_file(path));
         let store = Scratch::new("almadar-knob-vectors").unwrap();
         let fake = CountingEmbedder(std::sync::Mutex::new(0));
         let value =
@@ -1160,7 +1160,7 @@ orbital NoteOrbital {
 
     #[test]
     fn catalog_with_vectors_false_reads_no_store_and_no_provider() {
-        orbital_compiler::loader::register_source_lowerer(crate::lower_lolo_file);
+        orbital_compiler::loader::register_source_lowerer(|path, _, _| crate::lower_lolo_file(path));
         let store = Scratch::new("almadar-catalog-vectors").unwrap();
         let fake = CountingEmbedder(std::sync::Mutex::new(0));
         let scope =
@@ -1198,7 +1198,7 @@ orbital NoteOrbital {
 
     #[test]
     fn texts_answers_what_behaviors_texts_prints_in_embed_order() {
-        orbital_compiler::loader::register_source_lowerer(crate::lower_lolo_file);
+        orbital_compiler::loader::register_source_lowerer(|path, _, _| crate::lower_lolo_file(path));
         let paths = vec!["almadar-std/ml/organisms".to_string()];
         let scope = from_json(serde_json::json!({ "paths": paths })).unwrap();
         let all = json(&ProgramHost::texts(Some(&scope)).expect("texts"));
@@ -1273,7 +1273,7 @@ orbital NoteOrbital {
 
     #[test]
     fn program_compose_assembles_an_orbital_value_into_an_app_carrying_its_hooks() {
-        orbital_compiler::loader::register_source_lowerer(crate::lower_lolo_file);
+        orbital_compiler::loader::register_source_lowerer(|path, _, _| crate::lower_lolo_file(path));
         let host = ProgramHost;
         let program = from_json(serde_json::json!({ "name": "Drop", "orbitals": [{ "behavior": "almadar-std/std-file-drop", "orbital": "FileDropOrbital" }] })).unwrap();
         let options =
@@ -1309,7 +1309,7 @@ orbital NoteOrbital {
 
     #[test]
     fn eval_writes_a_valid_program_into_the_project_and_refuses_an_invalid_one() {
-        orbital_compiler::loader::register_source_lowerer(crate::lower_lolo_file);
+        orbital_compiler::loader::register_source_lowerer(|path, _, _| crate::lower_lolo_file(path));
         let host = ProgramHost;
         let program = json(
             &host
@@ -1345,7 +1345,7 @@ orbital NoteOrbital {
 
     #[test]
     fn step_plays_a_transition_and_dependencies_list_what_the_program_imports() {
-        orbital_compiler::loader::register_source_lowerer(crate::lower_lolo_file);
+        orbital_compiler::loader::register_source_lowerer(|path, _, _| crate::lower_lolo_file(path));
         let host = ProgramHost;
         let program = host
             .run("program/read", &[Value::String(NOTE.to_string())])

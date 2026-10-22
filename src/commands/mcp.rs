@@ -1036,7 +1036,7 @@ mod tests {
     }
 
     fn echo_program() -> super::ProgramTools {
-        orbital_compiler::loader::register_source_lowerer(crate::lower_lolo_file);
+        orbital_compiler::loader::register_source_lowerer(|path, _, _| crate::lower_lolo_file(path));
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/mcp-echo-hook.lolo");
         super::ProgramTools::boot(&fixture).expect("the echo fixture boots")

@@ -32,7 +32,7 @@ pub(crate) fn inspect(source: &str, options: &Value) -> Result<Value, SubstrateF
     }
     let (schema, map) = orbital_lolo::parse_and_lower_str_with_map(source, path)
         .map_err(|e| failure(format!("program/read inspect: {}", e.render_with_hint())))?;
-    orbital_compiler::loader::register_source_lowerer(crate::lower_lolo_file);
+    orbital_compiler::loader::register_source_lowerer(|path, _, _| crate::lower_lolo_file(path));
     let mut compiler = orbital_compiler::CompilerOptions::from_env();
     let session = InlineSession::default();
     compiler.inline.session = Some(session.clone());

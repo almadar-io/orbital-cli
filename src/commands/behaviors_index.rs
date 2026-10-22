@@ -644,7 +644,7 @@ mod tests {
             eprintln!("skipped: the workspace std is ahead of this orb: {message}");
             return;
         }
-        orbital_compiler::loader::register_source_lowerer(crate::lower_lolo_file);
+        orbital_compiler::loader::register_source_lowerer(|path, _, _| crate::lower_lolo_file(path));
         let golden: Value = serde_json::from_str(GOLDEN).unwrap();
         let mut checked = 0;
         let mut unloadable = 0;

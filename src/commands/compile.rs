@@ -495,7 +495,7 @@ mod tests {
             eprintln!("skipping: {} is a monorepo fixture", path.display());
             return;
         }
-        orbital_compiler::loader::register_source_lowerer(crate::lower_lolo_file);
+        orbital_compiler::loader::register_source_lowerer(|path, _, _| crate::lower_lolo_file(path));
         let lowered = orbital_lolo::parse_and_lower(&path).expect("lower the fixture");
         let dir = std::env::temp_dir().join(format!("native-lazy-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();

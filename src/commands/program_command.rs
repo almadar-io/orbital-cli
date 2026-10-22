@@ -272,7 +272,7 @@ orbital EchoOrbital {
 "#;
 
     fn project(name: &str, topic: &str) -> (PathBuf, PathBuf) {
-        orbital_compiler::loader::register_source_lowerer(crate::lower_lolo_file);
+        orbital_compiler::loader::register_source_lowerer(|path, _, _| crate::lower_lolo_file(path));
         let root = std::env::temp_dir().join(format!("orb-program-command-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let package = root.join("project/node_modules/@fake/cli");
@@ -565,7 +565,7 @@ orbital ListenerOrbital {
 "#;
 
     fn run_fixture(name: &str, source: &str) -> PathBuf {
-        orbital_compiler::loader::register_source_lowerer(crate::lower_lolo_file);
+        orbital_compiler::loader::register_source_lowerer(|path, _, _| crate::lower_lolo_file(path));
         let dir = std::env::temp_dir().join(format!("orb-run-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
