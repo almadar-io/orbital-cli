@@ -310,13 +310,14 @@ fn outcome_report(
         "firedArm": r.fired_arm,
         "guards": guards,
         "effects": effects,
+        "failure": r.failure,
     })
 }
 
-/// The program with each step's `config` knob values written over its trait's declared defaults, in a file of its
-/// own; `None` when no step overrides a knob. The compiler folds `@config` into the program at resolve time, so an
+/// The program text with each step's `config` knob values written over its trait's declared defaults; `None` when
+/// no step overrides a knob. The compiler folds `@config` into the program at resolve time, so an
 /// override is the program's for the whole call: two steps giving one trait's knob different values are refused.
-fn with_step_config(path: &Path, steps: &[serde_json::Value]) -> anyhow::Result<Option<StepConfigFile>> {
+fn with_step_config(path: &Path, steps: &[serde_json::Value]) -> anyhow::Result<Option<String>> {
     let mut knobs: std::collections::BTreeMap<(String, String), serde_json::Value> = Default::default();
     for (i, step) in steps.iter().enumerate() {
         match &step["config"] {
@@ -356,26 +357,17 @@ fn with_step_config(path: &Path, steps: &[serde_json::Value]) -> anyhow::Result<
             .ok_or_else(|| anyhow::anyhow!("step config: {trait_name} declares no knob `{knob}`"))?;
         declared.insert("default".to_string(), value);
     }
-    // Beside the program, so its relative imports resolve as they do from the program itself.
-    let file = path.with_file_name(format!(
-        ".orb-step-config-{}-{}.orb",
-        std::process::id(),
-        STEP_CONFIG_FILES.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-    ));
-    std::fs::write(&file, serde_json::to_string(&program)?)?;
-    Ok(Some(StepConfigFile(file)))
+    Ok(Some(serde_json::to_string(&program)?))
 }
 
-/// The configured program's file, removed when the call ends.
-struct StepConfigFile(std::path::PathBuf);
+/// The temp directory a live call's resolved program was written to, removed when the call ends.
+struct ResolvedTempDir(std::path::PathBuf);
 
-impl Drop for StepConfigFile {
+impl Drop for ResolvedTempDir {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
+        let _ = std::fs::remove_dir_all(&self.0);
     }
 }
-
-static STEP_CONFIG_FILES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// A live step waits for its open keyed calls (a spawned process, a stream) to end. With the request's `settleMs`,
 /// a call still open after it is cancelled through `cancel-call`; without it the step waits, never cutting one off.
@@ -413,11 +405,19 @@ fn step_answer(
 
 /// The program at `path`, parsed and resolved the way a cascade runs it.
 pub(crate) fn resolve_program(path: &Path) -> anyhow::Result<orbital_core::OrbitalSchema> {
-    use orbital_compiler::{phases::lazy::resolve_program_with_path, CompilerOptions};
     let content = std::fs::read_to_string(path)
         .map_err(|e| anyhow::anyhow!("Failed to read {}: {}", path.display(), e))?;
-    let schema = parse_schema_auto(&content, &path.display().to_string())
-        .map_err(|e| anyhow::anyhow!("Failed to parse {}: {}", path.display(), e))?;
+    resolve_parsed(parse_program_text(&content, path)?, path)
+}
+
+fn parse_program_text(content: &str, path: &Path) -> anyhow::Result<orbital_core::OrbitalSchema> {
+    parse_schema_auto(content, &path.display().to_string())
+        .map_err(|e| anyhow::anyhow!("Failed to parse {}: {}", path.display(), e))
+}
+
+/// `schema`, read from `path`, resolved the way a cascade runs it.
+fn resolve_parsed(schema: orbital_core::OrbitalSchema, path: &Path) -> anyhow::Result<orbital_core::OrbitalSchema> {
+    use orbital_compiler::{phases::lazy::resolve_program_with_path, CompilerOptions};
     let (resolved, _lazy) =
         resolve_program_with_path(schema, &CompilerOptions::from_env(), Some(path))
             .map_err(|e| anyhow::anyhow!("Failed to resolve {}: {}", path.display(), e))?;
@@ -436,9 +436,14 @@ pub(crate) fn run_cascade_with(path: &Path, steps: &serde_json::Value, live: boo
     let steps = steps
         .as_array()
         .ok_or_else(|| anyhow::anyhow!("--steps must be a JSON array"))?;
-    let configured = with_step_config(path, steps)?;
-    let path = configured.as_ref().map_or(path, |file| file.0.as_path());
-    let resolved = resolve_program(path)?;
+    let program = match with_step_config(path, steps)? {
+        Some(configured) => parse_program_text(&configured, path)?,
+        None => parse_program_text(
+            &std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("Failed to read {}: {e}", path.display()))?,
+            path,
+        )?,
+    };
+    let resolved = resolve_parsed(program.clone(), path)?;
 
     let pinned_now: std::sync::Arc<std::sync::Mutex<Option<f64>>> = Default::default();
     let clock_pin = std::sync::Arc::clone(&pinned_now);
@@ -459,8 +464,9 @@ pub(crate) fn run_cascade_with(path: &Path, steps: &serde_json::Value, live: boo
                 _ => None,
             })
             .collect();
-    let live_host = if live {
-        let program = crate::commands::dev::resolve_to_temp(path)?;
+    let (live_host, _live_files) = if live {
+        let program = crate::commands::dev::resolve_schema_to_temp(program, path)?;
+        let files = program.parent().map(|dir| ResolvedTempDir(dir.to_path_buf()));
         let config = orbital_shell_rust::host::HostConfig {
             substrate: Some(orbital_shell_rust::host::SubstratePort(std::sync::Arc::new(
                 crate::commands::program_host::ProgramHost,
@@ -468,9 +474,10 @@ pub(crate) fn run_cascade_with(path: &Path, steps: &serde_json::Value, live: boo
             clock: Some(clock.clone()),
             ..orbital_shell_rust::host::HostConfig::default()
         };
-        Some(orbital_shell_rust::host::boot::boot_file_with(&program, false, &std::env::vars().collect(), false, config)?)
+        let host = orbital_shell_rust::host::boot::boot_file_with(&program, false, &std::env::vars().collect(), false, config)?;
+        (Some(host), files)
     } else {
-        None
+        (None, None)
     };
     let replay_kernel;
     let kernel: &RuntimeKernel = match &live_host {
@@ -883,6 +890,29 @@ mod cascade_from_tests {
     fn control_a_step_that_moves_nothing_reports_no_rows() {
         let report = run(serde_json::json!([{ "trait": "Modes", "event": "KEY", "payload": { "key": "x" } }]));
         assert_eq!(report["steps"][0]["entities"], serde_json::json!({}), "{report}");
+    }
+
+    /// G-ORB-477: one `Answer` trait whose `GO` emits `RESPOND` with the given payload.
+    fn answer(payload: serde_json::Value) -> serde_json::Value {
+        let program_json = serde_json::json!({"name":"AnswerApp","orbitals":[{"name":"Answering","entity":{"name":"Req","persistence":"runtime","fields":[{"name":"id","type":"string"}]},"pages":[],"traits":[{"name":"Answer","linkedEntity":"Req","stateMachine":{"states":[{"name":"ready","isInitial":true}],"transitions":[{"from":"ready","to":"ready","event":"GO","effects":[["emit","RESPOND",payload]]}]}}]}]});
+        run_cascade(&program(&program_json.to_string()), &serde_json::json!([{ "trait": "Answer", "event": "GO" }])).unwrap()
+    }
+
+    #[test]
+    fn an_emit_whose_payload_fails_to_evaluate_fails_the_step_and_emits_nothing() {
+        let report = answer(serde_json::json!({ "headers": ["array/append", ["object/get", null, "h"], { "name": "x" }] }));
+        let outcome = &report["steps"][0]["outcomes"][0];
+        assert_eq!(outcome["emits"], serde_json::json!([]), "{report}");
+        assert!(outcome["failure"].as_str().is_some_and(|f| !f.is_empty()), "{report}");
+        assert_eq!(outcome["effects"][0]["status"], serde_json::json!("failed"), "{report}");
+    }
+
+    #[test]
+    fn control_an_emit_whose_payload_evaluates_is_reported_resolved() {
+        let report = answer(serde_json::json!({ "status": ["if", true, 403, 200] }));
+        let outcome = &report["steps"][0]["outcomes"][0];
+        assert_eq!(outcome["emits"][0]["payload"], serde_json::json!({ "status": 403.0 }), "{report}");
+        assert_eq!(outcome["failure"], serde_json::Value::Null, "{report}");
     }
 
     #[test]

@@ -5,8 +5,8 @@
 //! snapshot it declares (`orb.vectors`) and shapes them to the `@almadar/core`
 //! `CatalogEntrySchema` / `TraitDescriptionSchema` contracts.
 
-use orbital_compiler::loader::{ExternalOrbitalLoader, LoaderConfig};
-use orbital_core::behavior_index::EXPOSURES;
+use orbital_compiler::loader::{ExternalOrbitalLoader, ImportChain, LoaderConfig, LoaderError};
+use orbital_core::behavior_index::{header_tags, indexed_file_at, lolo_path_of, EXPOSURES};
 use orbital_core::behavior_packages::{BehaviorPackage, STD_PACKAGE};
 use serde::Serialize;
 use serde_json::Value;
@@ -382,6 +382,63 @@ pub(crate) fn resolve_with_loader(
         package,
         schema,
     })
+}
+
+/// A behavior one `uses` names, as the loader resolved it: its package (absent for a local file), its `@pattern`
+/// header tag, the file it was read from and its program.
+pub(crate) struct ImportedBehavior {
+    pub(crate) package: Option<BehaviorPackage>,
+    pub(crate) pattern: Option<String>,
+    pub(crate) path: PathBuf,
+    pub(crate) program: Value,
+}
+
+/// Resolve one `uses` specifier through `loader`, from the importing file `from`, reading that behavior alone;
+/// `None` when no file answers the specifier.
+pub(crate) fn resolve_import(
+    loader: &mut ExternalOrbitalLoader,
+    packages: &[BehaviorPackage],
+    spec: &str,
+    from: Option<&Path>,
+) -> anyhow::Result<Option<ImportedBehavior>> {
+    let mut chain = ImportChain::new();
+    let loaded = match loader.load(spec, from, &mut chain) {
+        Ok(loaded) => loaded,
+        Err(LoaderError::FileNotFound(_)) => return Ok(None),
+        Err(e) => anyhow::bail!("cannot resolve `{spec}`: {e}"),
+    };
+    let resolved = Resolved {
+        path: loaded.source_path.clone(),
+        package: packages
+            .iter()
+            .find(|p| loaded.source_path.starts_with(p.registry.root()))
+            .cloned(),
+        schema: loaded.schema.clone(),
+    };
+    let pattern = match &resolved.package {
+        Some(pkg) => {
+            let name = resolved
+                .path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default()
+                .to_string();
+            let file = indexed_file_at(pkg, name, resolved.path.clone());
+            match lolo_path_of(pkg, &file).map(|p| (std::fs::read_to_string(&p), p)) {
+                Some((Ok(text), _)) => header_tags(&text).map_err(|e| anyhow::anyhow!(e))?.pattern,
+                Some((Err(e), _)) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Some((Err(e), p)) => anyhow::bail!("failed to read {}: {e}", p.display()),
+                None => None,
+            }
+        }
+        None => None,
+    };
+    Ok(Some(ImportedBehavior {
+        program: source_value(&resolved)?,
+        package: resolved.package,
+        pattern,
+        path: resolved.path,
+    }))
 }
 
 /// The capabilities the traits of the behavior `spec` resolves to (composed traits included), sorted and unique.

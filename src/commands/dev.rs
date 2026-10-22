@@ -71,6 +71,11 @@ pub(crate) fn run_dev_mode(path: &PathBuf, port: u16, force_headless: bool) -> a
 pub(crate) fn resolve_to_temp(path: &std::path::Path) -> anyhow::Result<PathBuf> {
     let schema = orbital_compiler::parse_file(path)
         .map_err(|e| anyhow::anyhow!("parse {}: {e}", path.display()))?;
+    resolve_schema_to_temp(schema, path)
+}
+
+/// [`resolve_to_temp`] for a program already parsed: `path` is where it was read from, so its relative imports resolve.
+pub(crate) fn resolve_schema_to_temp(schema: orbital_core::OrbitalSchema, path: &std::path::Path) -> anyhow::Result<PathBuf> {
     let options = orbital_compiler::CompilerOptions::from_env();
     let (resolved, lazy) =
         orbital_compiler::phases::lazy::resolve_program_with_path(schema, &options, Some(path))

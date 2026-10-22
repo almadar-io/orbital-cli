@@ -184,9 +184,26 @@ impl CommandAnswer {
 
 /// Run `program` as `orb <command> <argv…>`: its answer, with the exit code of its status.
 pub(crate) fn run_command_program(program: &Path, command: &str, argv: &[String], cwd: &Path) -> anyhow::Result<CommandAnswer> {
+    run_command_program_anchored(program, command, argv, cwd, None)
+}
+
+/// [`run_command_program`] with the program's grants and paths anchored at `anchors` instead of this process's.
+pub(crate) fn run_command_program_anchored(
+    program: &Path,
+    command: &str,
+    argv: &[String],
+    cwd: &Path,
+    anchors: Option<orbital_core::runtime::os_host::OsAnchors>,
+) -> anyhow::Result<CommandAnswer> {
     let resolved = crate::commands::dev::resolve_to_temp(program)?;
     let host = orbital_shell_rust::host::SubstratePort(std::sync::Arc::new(crate::commands::program_host::ProgramHost));
-    let runtime = orbital_shell_rust::host::boot::boot_file(&resolved, false, &std::env::vars().collect(), false, Some(host))?;
+    let config = orbital_shell_rust::host::HostConfig {
+        substrate: Some(host),
+        anchors,
+        ..orbital_shell_rust::host::HostConfig::default()
+    };
+    let runtime =
+        orbital_shell_rust::host::boot::boot_file_with(&resolved, false, &std::env::vars().collect(), false, config)?;
     let body = serde_json::json!({ "argv": argv, "cwd": cwd.display().to_string() }).to_string();
     let answer = runtime.deliver_inbound_awaiting(&hook_name(command), [("content-type", "application/json")], &body, None);
     Ok(CommandAnswer { code: exit_code(answer.status), body: answer.body, stderr: answer.stderr })

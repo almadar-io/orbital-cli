@@ -406,10 +406,10 @@ impl ProgramHost {
     }
 }
 
-/// `importsOf`: each `uses` of the program's orbitals as `(behavior, traits composed from it)`, the behavior being
-/// the path's trailing name (the loader's rule).
-fn imported_behaviors(program: &serde_json::Value) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
+/// `importsOf`: each `uses` of the program's orbitals as `(behavior, specifier)`, once per behavior, the behavior
+/// being the specifier's trailing name (the loader's rule).
+fn imported_behaviors(program: &serde_json::Value) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
     for orbital in program
         .get("orbitals")
         .and_then(serde_json::Value::as_array)
@@ -426,65 +426,37 @@ fn imported_behaviors(program: &serde_json::Value) -> Vec<String> {
                 continue;
             };
             let behavior = from.rsplit('/').next().unwrap_or(from).to_string();
-            if !out.contains(&behavior) {
-                out.push(behavior);
+            if !out.iter().any(|(b, _)| *b == behavior) {
+                out.push((behavior, from.to_string()));
             }
         }
     }
     out
 }
 
-/// `(tier, prefix, pattern)` of every installed behavior, by name: the first package that ships it.
-fn installed_behavior_index(
-) -> Result<std::collections::HashMap<String, (String, String, Option<String>)>, SubstrateFailure> {
-    let cwd = std::env::current_dir().map_err(|e| failure(e.to_string()))?;
-    let packages = super::npm_project::discover_from(&cwd)
-        .map_err(|e| failure(format!("behavior/dependencies: {e}")))?;
-    let mut out = std::collections::HashMap::new();
-    for pkg in packages {
-        let tier = match pkg.name.as_str() {
-            "@almadar/std" => "std",
-            "@almadar-io/behaviors" => "io",
-            _ => "unknown",
-        };
-        let entries = crate::commands::behaviors_catalog::catalog_with(
-            &[pkg.prefix.clone()],
-            &[],
-            crate::commands::behaviors_catalog::Vectors::Omit,
-            None,
-        )
-        .map_err(|e| failure(format!("behavior/dependencies: {e}")))?;
-        for entry in serde_json::to_value(entries)
-            .map_err(|e| failure(e.to_string()))?
-            .as_array()
-            .into_iter()
-            .flatten()
-        {
-            let Some(behavior) = entry.get("behavior").and_then(serde_json::Value::as_str) else {
-                continue;
-            };
-            let name = behavior
-                .strip_prefix(&format!("{}/", pkg.prefix))
-                .unwrap_or(behavior)
-                .to_string();
-            let pattern = entry
-                .get("pattern")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string);
-            out.entry(name)
-                .or_insert((tier.to_string(), pkg.prefix.clone(), pattern));
-        }
-    }
-    Ok(out)
+fn behavior_names(imports: &[(String, String)]) -> Vec<String> {
+    imports.iter().map(|(b, _)| b.clone()).collect()
 }
 
 impl ProgramHost {
     /// `behavior/dependencies`: each orbital's direct imports, then every behavior they reach, once, with its layer
-    /// (`primitive` for a UI pattern factory, else its package's tier) and its own imports.
+    /// (`primitive` for a UI pattern factory, else its package's tier) and its own imports. Each import is resolved
+    /// by the loader the program's `uses` go through, so only the behaviors reached are read.
     fn dependencies(&self, program: serde_json::Value) -> Result<Value, SubstrateFailure> {
-        let index = installed_behavior_index()?;
+        let op = "behavior/dependencies";
+        let cwd = std::env::current_dir().map_err(|e| failure(e.to_string()))?;
+        let packages = super::npm_project::discover_from(&cwd)
+            .map_err(|e| failure(format!("{op}: {e}")))?;
+        let mut loader = orbital_compiler::loader::ExternalOrbitalLoader::new(
+            orbital_compiler::loader::LoaderConfig {
+                base_path: cwd,
+                packages: packages.clone(),
+                ..Default::default()
+            },
+        );
         let mut orbitals = serde_json::Map::new();
-        let mut queue: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+        let mut queue: std::collections::VecDeque<(String, String, Option<PathBuf>)> =
+            std::collections::VecDeque::new();
         for orbital in program
             .get("orbitals")
             .and_then(serde_json::Value::as_array)
@@ -497,28 +469,35 @@ impl ProgramHost {
                 .unwrap_or_default()
                 .to_string();
             let own = imported_behaviors(&serde_json::json!({ "orbitals": [orbital] }));
-            queue.extend(own.iter().cloned());
-            orbitals.insert(name, serde_json::json!(own));
+            queue.extend(own.iter().map(|(b, spec)| (b.clone(), spec.clone(), None)));
+            orbitals.insert(name, serde_json::json!(behavior_names(&own)));
         }
         let mut behaviors = serde_json::Map::new();
-        while let Some(name) = queue.pop_front() {
+        while let Some((name, spec, from)) = queue.pop_front() {
             if behaviors.contains_key(&name) {
                 continue;
             }
-            let entry = index.get(&name);
-            let imports = match entry {
-                Some((_, prefix, _)) => imported_behaviors(
-                    &crate::commands::behaviors_catalog::source(&format!("{prefix}/{name}"))
-                        .map_err(|e| failure(format!("behavior/source: {e}")))?,
-                ),
-                None => Vec::new(),
+            let imported = crate::commands::behaviors_catalog::resolve_import(
+                &mut loader,
+                &packages,
+                &spec,
+                from.as_deref(),
+            )
+            .map_err(|e| failure(format!("{op}: {e}")))?;
+            let (layer, imports) = match imported {
+                Some(b) => {
+                    let layer = match (&b.pattern, b.package.as_ref().map(|p| p.name.as_str())) {
+                        (Some(_), _) => "primitive",
+                        (None, Some("@almadar/std")) => "std",
+                        (None, Some("@almadar-io/behaviors")) => "io",
+                        (None, _) => "unknown",
+                    };
+                    let imports = imported_behaviors(&b.program);
+                    queue.extend(imports.iter().map(|(n, s)| (n.clone(), s.clone(), Some(b.path.clone()))));
+                    (layer, behavior_names(&imports))
+                }
+                None => ("unknown", Vec::new()),
             };
-            let layer = match entry {
-                Some((_, _, Some(_))) => "primitive".to_string(),
-                Some((tier, _, None)) => tier.clone(),
-                None => "unknown".to_string(),
-            };
-            queue.extend(imports.iter().cloned());
             behaviors.insert(
                 name,
                 serde_json::json!({ "layer": layer, "imports": imports }),
@@ -787,6 +766,7 @@ impl ProgramHost {
                 "guard": guard,
                 "state": { "before": outcome["previousState"], "after": outcome["newState"] },
                 "effects": outcome.get("effects").cloned().unwrap_or(serde_json::json!([])),
+                "failure": outcome.get("failure").cloned().unwrap_or(serde_json::Value::Null),
                 "emitted": emitted_of(&outcome, i),
                 "guards": guards.iter().map(|g| {
                     let mut out = serde_json::json!({ "arm": g["arm"], "guard": g["guard"], "passed": g["passed"], "trace": [] });
@@ -803,6 +783,7 @@ impl ProgramHost {
                     "to": o["newState"],
                     "arm": o["firedArm"],
                     "fired": o["executed"],
+                    "effects": o.get("effects").cloned().unwrap_or(serde_json::json!([])),
                     "emitted": emitted_of(o, i),
                 })).collect::<Vec<_>>(),
             });
@@ -1392,6 +1373,13 @@ orbital NoteOrbital {
         );
         assert_eq!(graph["orbitals"]["R"], serde_json::json!(["std-retry"]));
         assert_eq!(graph["behaviors"]["std-retry"]["layer"], "std");
+        let alone = from_json(serde_json::json!({ "name": "Alone", "orbitals": [{ "name": "A", "traits": [], "pages": [] }] })).unwrap();
+        let graph = json(&host.run("behavior/dependencies", &[alone]).expect("graph"));
+        assert_eq!(
+            graph,
+            serde_json::json!({ "orbitals": { "A": [] }, "behaviors": {} }),
+            "control: a program with no uses lists none"
+        );
     }
 
     #[test]
@@ -1524,6 +1512,36 @@ orbital NoteOrbital {
     }
 
     #[test]
+    fn step_reports_each_cascaded_arm_with_its_own_effects() {
+        let host = ProgramHost;
+        let program = from_json(serde_json::json!({ "name": "RelayApp",
+            "osGrants": { "fs": [], "exec": [], "net": [], "env": ["HOME"], "stdio": [], "sys": [], "desktop": [] },
+            "orbitals": [{ "name": "Auth",
+            "entity": { "name": "Key", "persistence": "runtime", "fields": [{ "name": "id", "type": "string" }] },
+            "pages": [],
+            "traits": [
+                { "name": "ApiKeys", "linkedEntity": "Key", "stateMachine": {
+                    "states": [{ "name": "idle", "isInitial": true }],
+                    "transitions": [{ "from": "idle", "to": "idle", "event": "ISSUE", "effects": [["emit", "ISSUED", {}]] }] } },
+                { "name": "ServerBearer", "linkedEntity": "Key",
+                  "listens": [{ "event": "ISSUED", "triggers": "ARM", "source": { "kind": "trait", "trait": "ApiKeys" } }],
+                  "stateMachine": {
+                    "states": [{ "name": "idle", "isInitial": true }, { "name": "armed" }],
+                    "transitions": [
+                        { "from": "idle", "to": "armed", "event": "ARM", "effects": [["os/getenv", "HOME", { "key": "home", "emit": { "success": "GOT", "failure": "NOGO" } }]] },
+                        { "from": "armed", "to": "armed", "event": "GOT" }, { "from": "armed", "to": "idle", "event": "NOGO" }
+                    ] } }
+            ] }] }))
+        .unwrap();
+        let requests = from_json(serde_json::json!([{ "orbital": "Auth", "trait": "ApiKeys", "from": "idle", "event": "ISSUE", "payload": {} }])).unwrap();
+        let played = json(&host.run("program/step", &[program, requests]).expect("steps"));
+        let r = &played[0]["result"];
+        assert_eq!(r["outcomes"][1]["effects"][0]["type"], "os/getenv", "the cascaded arm reports its own effect: {r}");
+        assert_eq!(r["outcomes"][0]["effects"], r["effects"], "control: the requested trait's entry carries the top-level effects");
+        assert_eq!(r["effects"].as_array().map(Vec::len), Some(1), "the top-level effects stay the requested arm's only: {r}");
+    }
+
+    #[test]
     fn step_lists_every_trait_the_dispatch_cascade_moved_in_order() {
         let host = ProgramHost;
         let program = from_json(serde_json::json!({ "name": "RelayApp", "orbitals": [{ "name": "Auth",
@@ -1585,7 +1603,7 @@ orbital NoteOrbital {
         let r = &played[0]["result"];
         assert_eq!(
             r["outcomes"],
-            serde_json::json!([{ "orbital": "Editor", "trait": r["trait"], "event": r["event"], "from": r["state"]["before"], "to": r["state"]["after"], "arm": r["firedArm"], "fired": r["transitionFired"], "emitted": r["emitted"] }])
+            serde_json::json!([{ "orbital": "Editor", "trait": r["trait"], "event": r["event"], "from": r["state"]["before"], "to": r["state"]["after"], "arm": r["firedArm"], "fired": r["transitionFired"], "effects": r["effects"], "emitted": r["emitted"] }])
         );
     }
 

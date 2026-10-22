@@ -889,13 +889,48 @@ pub(crate) fn lint_findings(path: &std::path::Path) -> LintFindings {
         else {
             return Ok(None);
         };
-        let file = std::fs::canonicalize(path)?.display().to_string();
+        // The lints read the file through the `cwd` anchor, which takes only a path relative to it. A file outside
+        // the working directory (a scratch program) is linted with that anchor at the file's own directory.
+        let absolute = std::fs::canonicalize(path)?;
+        let (file, lint_cwd, anchors) = match absolute.strip_prefix(std::fs::canonicalize(&cwd)?) {
+            Ok(relative) => (relative.display().to_string(), cwd.clone(), None),
+            Err(_) => {
+                let parent = absolute
+                    .parent()
+                    .ok_or_else(|| anyhow::anyhow!("{} has no directory", absolute.display()))?
+                    .to_path_buf();
+                let name = absolute
+                    .file_name()
+                    .ok_or_else(|| anyhow::anyhow!("{} names no file", absolute.display()))?
+                    .to_string_lossy()
+                    .into_owned();
+                let anchors = orbital_core::runtime::os_host::OsAnchors {
+                    start: Some(parent.clone()),
+                    ..orbital_core::runtime::os_host::OsAnchors::of_process()
+                };
+                (name, parent, Some(anchors))
+            }
+        };
         let argv = [file, "--json".to_string()];
-        Ok(Some(crate::commands::program_command::run_command_program(
-            &program, "lint-all", &argv, &cwd,
-        )?))
+        Ok(Some(
+            crate::commands::program_command::run_command_program_anchored(
+                &program, "lint-all", &argv, &lint_cwd, anchors,
+            )?,
+        ))
     };
-    let answer = match run() {
+    // The kernel boot needs more stack than a caller's thread may have (a test thread has 2 MiB).
+    let ran = std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .stack_size(crate::commands::behaviors_index::WORKER_STACK)
+            .spawn_scoped(scope, run)
+            .map_err(anyhow::Error::from)
+            .and_then(|worker| {
+                worker
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            })
+    });
+    let answer = match ran {
         Ok(Some(answer)) => answer,
         Ok(None) => {
             return failure(
@@ -1575,6 +1610,7 @@ mod lint_seam_tests {
     fn trait_rendering_main(name: &str) -> serde_json::Value {
         serde_json::json!({
             "name": name,
+            "linkedEntity": "E",
             "stateMachine": {
                 "states": [{ "name": "idle", "isInitial": true }],
                 "transitions": [{ "from": "idle", "to": "idle", "event": "INIT",
@@ -1588,15 +1624,18 @@ mod lint_seam_tests {
             "name": "app",
             "orbitals": [{
                 "name": "A",
+                "entity": { "name": "E", "persistence": "runtime", "fields": [{ "name": "id", "type": "string" }] },
                 "traits": [trait_rendering_main("T1"), trait_rendering_main("T2")],
-                "pages": [{ "path": "/x", "traits": mounted.iter().map(|r| serde_json::json!({ "ref": r })).collect::<Vec<_>>() }]
+                "pages": [{ "name": "P", "path": "/x", "traits": mounted.iter().map(|r| serde_json::json!({ "ref": r })).collect::<Vec<_>>() }]
             }]
         });
-        let dir = tempfile::tempdir().expect("temp dir");
+        // Under the working directory: the lints read through the `cwd` anchor.
+        let dir = tempfile::tempdir_in(".").expect("temp dir");
         let path = dir.path().join("app.orb");
         std::fs::write(&path, program.to_string()).expect("write program");
         let registry = crate::utils::load_services_registry(None).expect("services registry");
-        let diags = run_full_validation(&path, None, registry, false).expect("validation runs");
+        let diags = run_full_validation(&path, None, registry, false)
+            .unwrap_or_else(|e| panic!("validation runs: {e:#}"));
         diags.errors.into_iter().chain(diags.warnings).collect()
     }
 
