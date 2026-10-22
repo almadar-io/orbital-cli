@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 /// working directory, as the `orb` commands resolve them.
 pub(crate) struct ProgramHost;
 
-fn failure(message: impl Into<String>) -> SubstrateFailure {
+pub(super) fn failure(message: impl Into<String>) -> SubstrateFailure {
     SubstrateFailure {
         message: message.into(),
         errors: Vec::new(),
@@ -885,6 +885,10 @@ impl SubstrateHandler for ProgramHost {
     fn run(&self, op: &str, args: &[Value]) -> Result<Value, SubstrateFailure> {
         match op {
             "program/read" => match args.first() {
+                Some(Value::String(text)) if option_flag(args.get(1), "inspect") == Some(true) => {
+                    let options = to_json(&args[1]);
+                    super::program_inspect::inspect(text, &options).and_then(from_json)
+                }
                 Some(Value::String(text)) => self.read(text),
                 _ => Err(failure("program/read: expected .lolo text")),
             },

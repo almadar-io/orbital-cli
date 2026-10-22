@@ -784,6 +784,9 @@ mod outcome_report_tests {
             payload: Value::Null,
             entry: None,
             fired_arm,
+            transition_index: None,
+            entity_id: "singleton".into(),
+            state_entity_id: "singleton".into(),
             guards: vec![ArmGuard {
                 arm: 1,
                 guard: GuardResult::passed(guard, Value::Bool(true)),

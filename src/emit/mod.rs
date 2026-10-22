@@ -80,6 +80,8 @@ pub struct EmitOptions {
     /// with an inline base64-encoded map). Ignored for `target = orb` and
     /// for `format = json | raw`.
     pub map: bool,
+    pub inspect_source: Option<PathBuf>,
+    pub document_version: Option<u64>,
     /// `target = manifest`: the one deployment unit to emit; absent = every unit of the program.
     pub unit: Option<String>,
     /// `target = manifest`: the directory receiving `<unit>.manifest.json`; absent = stdout (one unit only).
@@ -99,6 +101,15 @@ pub fn run(opts: EmitOptions) -> Result<()> {
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| "<stdin>".to_string());
 
+    if let Some(original_path) = opts.inspect_source.as_ref() {
+        if opts.target != EmitTarget::Orb {
+            return Err(anyhow!("--inspect-source requires the orb target"));
+        }
+        let envelope = crate::commands::program_inspect::inspect(&source, &serde_json::json!({
+            "path": original_path, "version": opts.document_version,
+        })).map_err(|e| anyhow!("{}", e.message))?;
+        return write_output(&serde_json::to_string(&envelope)?, opts.output.as_deref());
+    }
     match opts.target {
         EmitTarget::Orb => emit_orb(&source, opts.output.as_deref(), &source_path),
         EmitTarget::Lolo => emit_lolo(&source, opts.output.as_deref(), &source_path),

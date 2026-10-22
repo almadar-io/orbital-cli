@@ -21,6 +21,7 @@ pub(crate) mod npm_project;
 pub(crate) mod parse;
 pub(crate) mod program_command;
 pub(crate) mod program_host;
+pub(crate) mod program_inspect;
 pub(crate) mod sidecar_fetch;
 pub(crate) mod stamp;
 pub(crate) mod test;

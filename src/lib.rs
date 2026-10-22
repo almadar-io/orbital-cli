@@ -554,6 +554,13 @@ enum Commands {
         #[arg(long)]
         map: bool,
 
+        /// `orb` only: return a source inspection envelope using this original absolute .lolo path.
+        #[arg(long, value_name = "PATH")]
+        inspect_source: Option<PathBuf>,
+
+        #[arg(long, requires = "inspect_source")]
+        document_version: Option<u64>,
+
         /// `manifest` only: the deployment unit to emit (default: every unit of the program).
         #[arg(long, value_name = "NAME")]
         unit: Option<String>,
@@ -1178,6 +1185,8 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
             only,
             server,
             map,
+            inspect_source,
+            document_version,
             unit,
             out,
             sign_key,
@@ -1191,6 +1200,8 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
             only,
             server,
             map,
+            inspect_source,
+            document_version,
             unit,
             out,
             sign_key,
