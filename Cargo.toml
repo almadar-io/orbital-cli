@@ -21,7 +21,6 @@ path = "src/bin/orb.rs"
 orbital-core = { path = "../orbital-core", features = ["client-http", "native-transport"] }
 orbital-compiler = { path = "../orbital-compiler" }
 orbital-lolo = { path = "../orbital-lolo" }
-orbital-server = { path = "../orbital-server" }
 orbital-shell-rust = { path = "../orbital-shell-rust" }
 # The sandbox manifest `orb emit manifest` builds and signs.
 io-gate = { path = "../io-gate" }
@@ -43,7 +42,7 @@ semver = "1"
 sha2 = "0.10"
 
 [dev-dependencies]
-orbital-test-support = { path = "../orbital-test-support" }
+orbital-test-support = { package = "orbital-integration-tests", path = "../orbital-integration-tests" }
 pretty_assertions.workspace = true
 syn = { version = "2", features = ["full"] }
 tempfile = "3.10"
