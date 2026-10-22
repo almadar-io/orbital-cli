@@ -16,7 +16,7 @@ use std::time::Instant;
 use orbital_core::{
     BindingContext, EventPayload, SExpression, StateMachineCore, TraitDefinition, Value,
 };
-use orbital_verify::planner::{initial_state, inline_traits};
+use orbital_core::planner::{initial_state, inline_traits};
 use serde::Serialize;
 
 use crate::utils::parse_schema_auto;

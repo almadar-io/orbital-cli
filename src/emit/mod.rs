@@ -231,8 +231,12 @@ fn emit_manifest(opts: &EmitOptions, source: &str, source_path: &str) -> Result<
     crate::utils::require_language_data()?;
     let schema = parse_any_syntax(source, source_path)?;
     let digest = io_gate::manifest::sha256_hex(canonical_orb_json(&schema)?.as_bytes());
-    let resolved =
-        orbital_verify::resolve_schema_with_source(schema, Some(Path::new(source_path)))?;
+    let (resolved, _) = orbital_compiler::phases::lazy::resolve_program_with_path(
+        schema,
+        &CompilerOptions::from_env(),
+        Some(Path::new(source_path)),
+    )
+    .map_err(|e| anyhow!("resolve orb schema: {e}"))?;
     let units = match &opts.unit {
         Some(unit) => vec![unit.clone()],
         None => io_gate::unit_names(&resolved),
@@ -336,13 +340,16 @@ fn emit_code(opts: EmitOptions, source: &str, source_path: &str) -> Result<()> {
     let unresolved = schema.clone();
     let module = compile_schema(schema, &compiler_options)
         .map_err(|e| anyhow!("Schema compilation failed: {}", e))?;
-    crate::commands::validate::lint_gate_source(source, source_path)?;
 
     let generate_options = orbital_compiler::GenerateOptions { compiler: compiler_options, ..Default::default() };
     let program_path = Path::new(source_path);
     let output: GeneratedOutput = match opts.target {
         EmitTarget::Ts => {
-            let resolved = orbital_verify::resolve_schema_with_source(unresolved, Some(program_path))
+            let (resolved, _) = orbital_compiler::phases::lazy::resolve_program_with_path(
+                unresolved,
+                &CompilerOptions::from_env(),
+                Some(program_path),
+            )
                 .map_err(|e| anyhow!("Failed to resolve schema for the browser store: {}", e))?;
             let framework = match opts.server {
                 EmitServer::Express => "express",

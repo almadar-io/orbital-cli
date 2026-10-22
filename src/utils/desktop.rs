@@ -1,15 +1,12 @@
 //! `orb` runs the native GUI (window, Layer 2 render probe, screenshots) as the
 //! `orb-desktop` program (`orbital_core::desktop_protocol`); it links no GUI.
 
-use orbital_core::client::bridge::ServerBridge;
-use orbital_core::client::http::{BridgeError, SyncServerBridge};
 use orbital_core::client::render_probe::{self, GameCanvasOutcome, RenderTarget};
 use orbital_core::desktop_protocol::{self, DesktopReply, DesktopRequest};
 use orbital_core::render_report::RenderReport;
 use orbital_core::OrbitalSchema;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 fn failure(f: orbital_core::shell_protocol::ShellFailure) -> anyhow::Error {
     anyhow::anyhow!("{f}")
@@ -76,42 +73,14 @@ pub(crate) fn target() -> anyhow::Result<RemoteTarget> {
     }
 }
 
-/// A `ServerBridge` over a live seeded server it owns; the server stops when the bridge drops.
-struct HttpServerBridge {
-    inner: SyncServerBridge,
-    _server: orbital_server::BackgroundServer,
-}
-
-impl ServerBridge for HttpServerBridge {
-    fn send_event_with_options(
-        &self,
-        orbital: &str,
-        event: &str,
-        entity_id: Option<&str>,
-        trait_name: Option<&str>,
-        payload: orbital_core::Value,
-    ) -> Result<orbital_core::EventResponse, BridgeError> {
-        self.inner.send_event_with_options(orbital, event, entity_id, trait_name, payload)
-    }
-
-    fn resolve_rows(&self, reference: &orbital_core::runtime::row_query::RowSetRef) -> Result<orbital_core::runtime::row_query::RowPage, BridgeError> {
-        self.inner.resolve_rows(reference)
-    }
-}
-
 /// Layer 2: the client render contract (`orbital_core::client::render_probe`)
-/// against the desktop renderer's coverage — through the in-process kernel, or
-/// over HTTP against a fresh seeded `orbital-server` per orbital.
+/// against the desktop renderer's coverage through the in-process kernel.
 pub(crate) fn probe(item: &str, schema: OrbitalSchema, traits: Option<&[String]>, over_http: bool) -> anyhow::Result<RenderReport> {
+    if over_http {
+        anyhow::bail!("the HTTP desktop probe is temporarily unavailable: the legacy server is archived; the native std-http-server probe integration remains to be completed");
+    }
     let target = target()?;
-    let report = if over_http {
-        render_probe::probe_with(item, schema, traits, &target, |s, _idx| {
-            let server = orbital_server::serve_seeded(s).map_err(|e| format!("{e:#}"))?;
-            Ok(Arc::new(HttpServerBridge { inner: SyncServerBridge::new(server.base_url()), _server: server }) as Arc<dyn ServerBridge>)
-        })
-    } else {
-        render_probe::probe(item, schema, traits, &target)
-    };
+    let report = render_probe::probe(item, schema, traits, &target);
     report.map_err(|e| anyhow::anyhow!(e))
 }
 

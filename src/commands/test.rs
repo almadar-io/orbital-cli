@@ -22,7 +22,6 @@ pub(crate) fn run_tests(
     let options = CompilerOptions::from_env();
     let module =
         compile_file(path, &options).map_err(|e| anyhow::anyhow!("Compilation failed: {}", e))?;
-    crate::commands::validate::lint_gate(path)?;
 
     if verbose {
         println!("Compiled module: {}", module.name);
@@ -249,7 +248,6 @@ pub(crate) fn exhaustive_test_report(path: &std::path::Path) -> anyhow::Result<s
 
     let module = compile_file(path, &CompilerOptions::from_env())
         .map_err(|e| anyhow::anyhow!("Compilation failed: {}", e))?;
-    crate::commands::validate::lint_gate(path)?;
     let mut results = ExhaustiveTestGenerator::new(&module).generate_all_tests();
     let outcomes = walk_tests(&module, &mut results);
     let count = |status: &str| {

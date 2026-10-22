@@ -16,9 +16,9 @@ mod utils;
 
 use commands::{
     compile_schema, execute_cascade_cli, execute_cascade_steps_cli, execute_schema_cli,
-    format_schema, parse_schema, resolve_schema_cli, run_convert, run_dev_mode,
-    run_engines_install, run_engines_list, run_engines_remove, run_engines_update, run_i18n_check,
-    run_i18n_vocab, run_serve, run_tests, run_which, stamp_schema_cli, validate_schema,
+    format_schema, parse_schema, resolve_schema_cli, run_convert,
+    run_i18n_check,
+    run_i18n_vocab, run_tests, run_which, stamp_schema_cli, validate_schema,
 };
 use utils::evaluate_sexpr;
 
@@ -296,135 +296,6 @@ enum Commands {
         /// sibling is still unset. Omit to keep stamping in-file only.
         #[arg(long, value_name = "DIR")]
         imports: Option<PathBuf>,
-    },
-
-    /// Verify an app across up to three engines that play the SAME circuit:
-    /// `--rust` in-process (default when no engine flag is given, preserving
-    /// today's behavior exactly), `--runtime` (JS interpreter via playground),
-    /// `--compiled` (codegen'd TS app), or `--all` for all three. Pass a FILE, a
-    /// bare behavior NAME (resolved against the live registry), or `--registry
-    /// [--topic <t>]` to sweep the std/behaviors corpus.
-    Verify {
-        /// Path to a single .orb/.lolo schema file, or a bare behavior name
-        /// resolved against the registry corpus (omit to use --registry).
-        #[arg(value_name = "TARGET")]
-        path: Option<PathBuf>,
-
-        /// Verify across the almadar-std + almadar-behaviors registry corpus.
-        #[arg(long)]
-        registry: bool,
-
-        /// Restrict the corpus sweep to one topic (e.g. `app`, `game`).
-        #[arg(long, value_name = "TOPIC")]
-        topic: Option<String>,
-
-        /// Write per-organism verify-report.json into this directory.
-        #[arg(long, value_name = "DIR")]
-        report_dir: Option<PathBuf>,
-
-        /// Layer 3: render each organism's desktop UI to a PNG in this directory
-        /// (requires `orb` built with `--features screenshot`).
-        #[arg(long, value_name = "DIR")]
-        screenshot: Option<PathBuf>,
-
-        /// Layer 3 (per-frame): drive each state transition and capture a PNG per
-        /// frame + a frames.json manifest for the vision-review workflow. With
-        /// `--compiled`, capture each `poster`-declaring trait's WebP poster into DIR instead; with `--web`, the page
-        /// after each walked step.
-        #[arg(long, value_name = "DIR")]
-        screenshot_frames: Option<PathBuf>,
-
-        /// Also run Layer 2 over real HTTP against an in-process `orbital-server`
-        /// (server↔client render parity, not just the fused in-process kernel).
-        #[arg(long)]
-        server: bool,
-
-        /// Additionally emit a native shell to a temp dir and run its compile
-        /// gate: `python` (real `py_compile` syntax gate) | `android`
-        /// (Kotlin structural gate) | `ios` (Swift structural gate). With
-        /// `--compiled`, `android`/`ios` also walk the app on the emulator /
-        /// Simulator (engine `compiled:android` / `compiled:ios`).
-        #[arg(long, value_name = "SHELL")]
-        shell: Option<String>,
-
-        /// Tier: seconds, no browser/node — parse + validate + Rust kernel
-        /// circuit walk only. Mutually exclusive with --deep.
-        #[arg(long, conflicts_with = "deep")]
-        smoke: bool,
-
-        /// Tier: everything the selected engines offer, including browser
-        /// layers (forces --server and a TypeScript --shell gate unless one was
-        /// already given). Mutually exclusive with --smoke.
-        #[arg(long, conflicts_with = "smoke")]
-        deep: bool,
-
-        /// Engine: orbital-rust in-process server+client (default when no
-        /// engine flag is given).
-        #[arg(long)]
-        rust: bool,
-
-        /// Engine: JS interpreter via playground — shells out to
-        /// tools/runtime-verify.
-        #[arg(long)]
-        runtime: bool,
-
-        /// Engine: emitted TS app, 4-phase pipeline — shells out to
-        /// runtime-verify --compiled. With `--shell ios|android` it walks the
-        /// native app on the Simulator/emulator instead of the web client.
-        #[arg(long)]
-        compiled: bool,
-
-        /// Walk the program's web client natively: serve it in-process on the native server with the prebuilt web
-        /// client, drive Chrome over the DevTools protocol (`ORB_CHROME` names the binary), and judge every planned step
-        /// with the kernel's verdicts. No Node process, no Playwright.
-        #[arg(long)]
-        web: bool,
-
-        /// Engine: run all three (rust + runtime + compiled).
-        #[arg(long)]
-        all: bool,
-
-        /// Print one unified report (circuit vocabulary, engine-tagged rows) to
-        /// stdout; all human-readable lines move to stderr.
-        #[arg(long)]
-        json: bool,
-
-        /// Base port for spawned node engines (runtime/compiled); each target
-        /// gets an offset so a multi-target sweep never collides.
-        #[arg(long, default_value = "4100")]
-        port: u16,
-
-        /// Minimum transition coverage ratio, forwarded to engines that
-        /// support it (today: --runtime).
-        #[arg(long, value_name = "RATIO")]
-        min_coverage: Option<f64>,
-
-        /// Watchdog budget in seconds for each spawned node engine
-        /// (runtime/compiled), overriding the tier default (120 smoke /
-        /// 600 standard / 1800 deep).
-        #[arg(long, value_name = "SECS")]
-        engine_timeout: Option<u64>,
-
-        /// Walk the target's declared `[identity]` roster (task #129):
-        /// re-runs the L1 kernel circuit once per persona, binding `@user` to
-        /// each in turn, and reports a per-persona pass/fail with declared
-        /// access-policy denials bucketed separately from genuine failures —
-        /// no more manually re-running with one ALMADAR_PERSONA at a time and
-        /// eyeballing which denial was expected. Targets with no `[identity]`
-        /// entity fall back to today's single env-driven run. Only supported
-        /// with the default engine/tier (no --runtime/--compiled/--all/
-        /// --smoke/--deep/--json).
-        #[arg(long)]
-        all_personas: bool,
-
-        /// Verify only this trait's `(from, event)` pairs (repeatable or
-        /// comma-separated: `--trait A --trait B` / `--trait A,B`) instead of the
-        /// target's full walk. Matches both the compiled, possibly orbital-prefixed
-        /// name and the bare `.lolo`/import name a trait carries post-resolve.
-        /// Composes with --smoke/--deep/--server/--report-dir. A name matching no
-        /// trait in the target is an error listing every available trait name.
-        #[arg(long = "trait", value_name = "NAME", value_delimiter = ',')]
-        traits: Vec<String>,
     },
 
     /// Compile an Orbital schema to generated code
@@ -799,12 +670,6 @@ enum Commands {
         command: BehaviorsCommand,
     },
 
-    /// The two `orb verify` node engines (`--runtime`/`--compiled`) — ordinary
-    /// npm packages resolved node-style, same mechanism as `orb behaviors`.
-    Engines {
-        #[command(subcommand)]
-        command: EnginesCommand,
-    },
 
 
 }
@@ -910,65 +775,6 @@ enum BehaviorsCommand {
         /// Print as JSON.
         #[arg(long)]
         json: bool,
-    },
-}
-
-#[derive(Subcommand)]
-enum EnginesCommand {
-    /// Install the `orb verify` node engines (`bun add -d <pkg>@<pin>`),
-    /// pinned to the versions this `orb` was baked against. Neither
-    /// `--runtime` nor `--compiled` given installs both. Verifies the
-    /// installed package's version + declared `bin` entry, removing what bun
-    /// added on a failed check, then installs the Chromium browser bun
-    /// engines need (skip with `--no-browsers`).
-    Install {
-        /// Target the user store (`~/.orb`) instead of the nearest project.
-        #[arg(long)]
-        global: bool,
-        /// Install only the runtime engine (`@almadar-io/runtime-verify-tool`).
-        #[arg(long)]
-        runtime: bool,
-        /// Install only the compiled engine (the `orbital-verify` bin of `@almadar-io/runtime-verify-tool`).
-        #[arg(long)]
-        compiled: bool,
-        /// Skip the Chromium browser install step.
-        #[arg(long)]
-        no_browsers: bool,
-    },
-    /// List the resolved engines: package, version, bin entry, path, link.
-    List {
-        /// Print as a JSON array instead of a table.
-        #[arg(long)]
-        json: bool,
-        /// List the user store (`~/.orb`) instead of the working directory's walk.
-        #[arg(long)]
-        global: bool,
-    },
-    /// Re-install the engines at the versions this `orb` was baked against.
-    /// Neither `--runtime` nor `--compiled` given updates both.
-    Update {
-        /// Target the user store (`~/.orb`) instead of the nearest project.
-        #[arg(long)]
-        global: bool,
-        /// Update only the runtime engine.
-        #[arg(long)]
-        runtime: bool,
-        /// Update only the compiled engine.
-        #[arg(long)]
-        compiled: bool,
-    },
-    /// Remove an installed engine (`bun remove <pkg>`). Neither `--runtime`
-    /// nor `--compiled` given removes both.
-    Remove {
-        /// Target the user store (`~/.orb`) instead of the nearest project.
-        #[arg(long)]
-        global: bool,
-        /// Remove only the runtime engine.
-        #[arg(long)]
-        runtime: bool,
-        /// Remove only the compiled engine.
-        #[arg(long)]
-        compiled: bool,
     },
 }
 
@@ -1099,7 +905,6 @@ pub fn run() -> anyhow::Result<()> {
         &cli.command,
         None | Some(Commands::Validate { .. })
             | Some(Commands::I18n { .. })
-            | Some(Commands::Engines { .. })
             | Some(Commands::Update { .. })
             | Some(Commands::Add { .. })
             | Some(Commands::Remove { .. })
@@ -1237,51 +1042,6 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
             output.as_deref(),
             imports.as_deref(),
         ),
-        Some(Commands::Verify {
-            path,
-            registry,
-            topic,
-            report_dir,
-            screenshot,
-            screenshot_frames,
-            server,
-            shell,
-            smoke,
-            deep,
-            rust,
-            runtime,
-            compiled,
-            web,
-            all,
-            json,
-            port,
-            min_coverage,
-            engine_timeout,
-            all_personas,
-            traits,
-        }) => commands::verify::run_verify(commands::verify::VerifyCliArgs {
-            path,
-            registry,
-            topic,
-            report_dir,
-            screenshot_dir: screenshot,
-            frames_dir: screenshot_frames,
-            server,
-            shell,
-            smoke,
-            deep,
-            rust,
-            runtime,
-            compiled,
-            web,
-            all,
-            json,
-            port,
-            min_coverage,
-            engine_timeout,
-            all_personas,
-            traits,
-        }),
         Some(Commands::Format { path, write }) => format_schema(&path, write),
         Some(Commands::Compile {
             path,
@@ -1320,16 +1080,9 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
             execute,
             verbose,
         }) => run_tests(&path, orbital, trait_name, &report, execute, verbose),
-        Some(Commands::Serve { path, port, host, open, no_mock, no_emulators, client_dir }) => run_serve(
-            &path,
-            &commands::serve::ServeOptions { host, port, open, mock: !no_mock, emulators: !no_emulators, client_dir },
-        ),
+        Some(Commands::Serve { .. }) => anyhow::bail!("orb serve is temporarily unavailable: the legacy server is archived; the native std-http-server caller integration remains to be completed"),
         Some(Commands::Gui { path, server, renderer }) => utils::desktop::window(&renderer, &path, Some(&server)),
-        Some(Commands::Dev {
-            path,
-            port,
-            headless,
-        }) => run_dev_mode(&path, port, headless),
+        Some(Commands::Dev { .. }) => anyhow::bail!("orb dev is temporarily unavailable: the legacy server is archived; the native server and desktop lifecycle integration remains to be completed"),
         Some(Commands::Convert {
             path,
             output,
@@ -1392,25 +1145,6 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
             },
             BehaviorsCommand::Source { spec, json } => commands::run_source(spec, json),
             BehaviorsCommand::Expects { spec, json } => commands::run_expects(spec, json),
-        },
-        Some(Commands::Engines { command }) => match command {
-            EnginesCommand::Install {
-                global,
-                runtime,
-                compiled,
-                no_browsers,
-            } => run_engines_install(global, runtime, compiled, no_browsers),
-            EnginesCommand::List { json, global } => run_engines_list(json, global),
-            EnginesCommand::Update {
-                global,
-                runtime,
-                compiled,
-            } => run_engines_update(global, runtime, compiled),
-            EnginesCommand::Remove {
-                global,
-                runtime,
-                compiled,
-            } => run_engines_remove(global, runtime, compiled),
         },
         Some(Commands::Run { program }) => commands::program_command::run_program(&program),
         Some(Commands::Update { global }) => commands::packages::run_update(global),

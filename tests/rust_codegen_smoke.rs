@@ -140,19 +140,3 @@ fn emitted_rust_is_syntactically_valid() {
     }
 }
 
-#[test]
-fn orbital_verify_passes_on_emitted_schema() {
-    // The emitted app runs `run_desktop("schema.orb")` — verifying that bundled schema
-    // through the SAME L1+L2 verifier confirms the emission is runtime-correct, not just
-    // well-formed. This is the emit→verify loop for the Rust shell.
-    let out = out_dir("rs_verify");
-    let (_o, stderr, ok) = compile_rust(&out);
-    assert!(ok, "compile failed: {stderr}");
-
-    let schema = out.join("schema.orb");
-    let (stdout, vstderr, vok) = run_orb(&["verify", schema.to_str().unwrap()]);
-    assert!(
-        vok && stdout.contains("passed"),
-        "orb verify on emitted schema failed.\nstdout:\n{stdout}\nstderr:\n{vstderr}"
-    );
-}

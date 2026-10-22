@@ -549,40 +549,6 @@ fn validate_schema_json(
         });
     }
 
-    let lint = unreported_lint_findings(
-        lint_findings(path),
-        all_errors
-            .iter()
-            .map(|e| (e.code.as_str(), e.path.as_str()))
-            .chain(
-                all_warnings
-                    .iter()
-                    .map(|w| (w.code.as_str(), w.path.as_str())),
-            ),
-    );
-    let position_of = |path: &str| {
-        source_map
-            .as_ref()
-            .and_then(|m| m.lookup_detailed(path))
-            .map(|(span, exact)| SourcePosition::of(span, exact))
-    };
-    for f in lint.errors {
-        let position = position_of(&f.path);
-        all_errors.push(ValidationJsonError {
-            position,
-            ..finding_json_error(f)
-        });
-    }
-    for f in lint.warnings {
-        all_warnings.push(ValidationJsonWarning {
-            position: position_of(&f.path),
-            code: f.code,
-            path: f.path,
-            message: f.message,
-            suggestion: f.suggestion,
-        });
-    }
-
     // Step 3: Try to compile to OIR for additional validation.
     // The `Err` arm must surface — the plain-text path (`run_full_validation`)
     // pushes `Compilation error: {e}` into its errors, so an `if let Ok`
@@ -840,210 +806,6 @@ pub(crate) struct Finding {
     pub text: String,
 }
 
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum LintSeverity {
-    Warning,
-    Error,
-}
-
-#[derive(serde::Deserialize)]
-struct LintFinding {
-    code: String,
-    path: String,
-    message: String,
-    suggestion: String,
-    severity: LintSeverity,
-}
-
-#[derive(serde::Deserialize)]
-struct LintReport {
-    findings: Vec<LintFinding>,
-}
-
-/// What the installed `std-orb-lint-all` program reports for a lowerable program file.
-pub(crate) struct LintFindings {
-    pub errors: Vec<Finding>,
-    pub warnings: Vec<Finding>,
-}
-
-/// The std policy lints over `path`, run by booting the installed `orb lint all` program. A missing or failing
-/// lint program is one error finding (`ORB_LINT_PROGRAM_NOT_INSTALLED` / `ORB_LINT_PROGRAM_FAILED`), never a skip.
-pub(crate) fn lint_findings(path: &std::path::Path) -> LintFindings {
-    let failure = |code: &str, message: String, suggestion: &str| LintFindings {
-        errors: vec![Finding {
-            text: format!("[{code}] {message}"),
-            code: code.to_string(),
-            path: String::new(),
-            message,
-            suggestion: Some(suggestion.to_string()),
-        }],
-        warnings: Vec::new(),
-    };
-    let run = || -> anyhow::Result<Option<crate::commands::program_command::CommandAnswer>> {
-        let cwd = std::env::current_dir()?;
-        let store =
-            orbital_core::behavior_packages::user_store_dir().unwrap_or_else(|| cwd.clone());
-        let Some(program) =
-            crate::commands::program_command::find_command_program("lint-all", &cwd, &store)?
-        else {
-            return Ok(None);
-        };
-        // The lints read the file through the `cwd` anchor, which takes only a path relative to it. A file outside
-        // the working directory (a scratch program) is linted with that anchor at the file's own directory.
-        let absolute = std::fs::canonicalize(path)?;
-        let (file, lint_cwd, anchors) = match absolute.strip_prefix(std::fs::canonicalize(&cwd)?) {
-            Ok(relative) => (relative.display().to_string(), cwd.clone(), None),
-            Err(_) => {
-                let parent = absolute
-                    .parent()
-                    .ok_or_else(|| anyhow::anyhow!("{} has no directory", absolute.display()))?
-                    .to_path_buf();
-                let name = absolute
-                    .file_name()
-                    .ok_or_else(|| anyhow::anyhow!("{} names no file", absolute.display()))?
-                    .to_string_lossy()
-                    .into_owned();
-                let anchors = orbital_core::runtime::os_host::OsAnchors {
-                    start: Some(parent.clone()),
-                    ..orbital_core::runtime::os_host::OsAnchors::of_process()
-                };
-                (name, parent, Some(anchors))
-            }
-        };
-        let argv = [file, "--json".to_string()];
-        Ok(Some(
-            crate::commands::program_command::run_command_program_anchored(
-                &program, "lint-all", &argv, &lint_cwd, anchors,
-            )?,
-        ))
-    };
-    // The kernel boot needs more stack than a caller's thread may have (a test thread has 2 MiB).
-    let ran = std::thread::scope(|scope| {
-        std::thread::Builder::new()
-            .stack_size(crate::commands::behaviors_index::WORKER_STACK)
-            .spawn_scoped(scope, run)
-            .map_err(anyhow::Error::from)
-            .and_then(|worker| {
-                worker
-                    .join()
-                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
-            })
-    });
-    let answer = match ran {
-        Ok(Some(answer)) => answer,
-        Ok(None) => {
-            return failure(
-                "ORB_LINT_PROGRAM_NOT_INSTALLED",
-                "no installed program provides `orb lint all` (@almadar/std `cli/` std-orb-lint-all); the program was NOT linted".to_string(),
-                "Run `orb update`, then retry — the schema was NOT evaluated.",
-            )
-        }
-        Err(e) => {
-            return failure(
-                "ORB_LINT_PROGRAM_FAILED",
-                format!("`orb lint all` did not run: {e}"),
-                "Validator environment error — retry, do not edit the schema.",
-            )
-        }
-    };
-    let report = match (
-        answer.code,
-        serde_json::from_str::<LintReport>(&answer.body),
-    ) {
-        (0 | 1, Ok(report)) => report,
-        _ => {
-            return failure(
-                "ORB_LINT_PROGRAM_FAILED",
-                format!(
-                    "`orb lint all` answered exit {}: {}{}",
-                    answer.code,
-                    answer.body,
-                    answer
-                        .stderr
-                        .as_deref()
-                        .map(|s| format!(" {s}"))
-                        .unwrap_or_default()
-                ),
-                "Validator environment error — retry, do not edit the schema.",
-            )
-        }
-    };
-    let mut found = LintFindings {
-        errors: Vec::new(),
-        warnings: Vec::new(),
-    };
-    for f in report.findings {
-        let finding = Finding {
-            text: format!(
-                "[{}] {}: {} \u{1f4a1} {}",
-                f.code, f.path, f.message, f.suggestion
-            ),
-            code: f.code,
-            path: f.path,
-            message: f.message,
-            suggestion: Some(f.suggestion),
-        };
-        match f.severity {
-            LintSeverity::Error => found.errors.push(finding),
-            LintSeverity::Warning => found.warnings.push(finding),
-        }
-    }
-    found
-}
-
-/// The lint findings no Rust check already reported: an issue with the same `(code, path)` is kept as Rust wrote it.
-pub(crate) fn unreported_lint_findings<'a>(
-    lint: LintFindings,
-    reported: impl Iterator<Item = (&'a str, &'a str)>,
-) -> LintFindings {
-    let seen: std::collections::BTreeSet<(&str, &str)> = reported.collect();
-    let fresh = |findings: Vec<Finding>| -> Vec<Finding> {
-        findings
-            .into_iter()
-            .filter(|f| !seen.contains(&(f.code.as_str(), f.path.as_str())))
-            .collect()
-    };
-    LintFindings {
-        errors: fresh(lint.errors),
-        warnings: fresh(lint.warnings),
-    }
-}
-
-/// The compile gate: the program's lint errors fail the compile, its lint warnings are printed.
-pub(crate) fn lint_gate(path: &std::path::Path) -> anyhow::Result<()> {
-    let lint = lint_findings(path);
-    for w in &lint.warnings {
-        eprintln!("  \u{26a0}\u{fe0f}  {}", w.text);
-    }
-    if lint.errors.is_empty() {
-        return Ok(());
-    }
-    for e in &lint.errors {
-        eprintln!("  \u{274c} {}", e.text);
-    }
-    anyhow::bail!("Schema lint failed with {} error(s)", lint.errors.len())
-}
-
-/// [`lint_gate`] for a program read from `source_path`, or from stdin when that names no file.
-pub(crate) fn lint_gate_source(source: &str, source_path: &str) -> anyhow::Result<()> {
-    let named = std::path::Path::new(source_path);
-    if named.is_file() {
-        return lint_gate(named);
-    }
-    let extension = match detect_syntax(source) {
-        crate::utils::InputSyntax::Lolo => "lolo",
-        crate::utils::InputSyntax::OrbJson => "orb",
-    };
-    let dir = std::env::temp_dir().join(format!("orb-lint-{}", std::process::id()));
-    std::fs::create_dir_all(&dir)?;
-    let file = dir.join(format!("stdin.{extension}"));
-    std::fs::write(&file, source)?;
-    let gated = lint_gate(&file);
-    let _ = std::fs::remove_dir_all(&dir);
-    gated
-}
-
 /// What [`validate_schema_core`] found, plus the inlined schema when the
 /// inline phase succeeded (a lazy child's resolved pages come from it).
 pub(crate) struct CoreValidation {
@@ -1113,17 +875,6 @@ pub(crate) fn run_full_validation(
             suggestion: w.suggestion,
         }),
     );
-    if core.inlined.is_some() {
-        let lint = unreported_lint_findings(
-            lint_findings(path),
-            core.errors
-                .iter()
-                .chain(&core.warnings)
-                .map(|f| (f.code.as_str(), f.path.as_str())),
-        );
-        core.errors.extend(lint.errors);
-        core.warnings.extend(lint.warnings);
-    }
     Ok(ValidationDiagnostics {
         errors: core.errors.into_iter().map(|f| f.text).collect(),
         warnings: source_findings(&content_raw)
@@ -1604,8 +1355,8 @@ mod program_findings_tests {
 }
 
 #[cfg(test)]
-mod lint_seam_tests {
-    use super::{run_full_validation, unreported_lint_findings, Finding, LintFindings};
+mod native_validation_tests {
+    use super::run_full_validation;
 
     fn trait_rendering_main(name: &str) -> serde_json::Value {
         serde_json::json!({
@@ -1619,18 +1370,17 @@ mod lint_seam_tests {
         })
     }
 
-    fn diagnostics(mounted: &[&str]) -> Vec<String> {
+    fn diagnostics(mounted: &[&str], page_path: &str) -> Vec<String> {
         let program = serde_json::json!({
             "name": "app",
             "orbitals": [{
                 "name": "A",
                 "entity": { "name": "E", "persistence": "runtime", "fields": [{ "name": "id", "type": "string" }] },
                 "traits": [trait_rendering_main("T1"), trait_rendering_main("T2")],
-                "pages": [{ "name": "P", "path": "/x", "traits": mounted.iter().map(|r| serde_json::json!({ "ref": r })).collect::<Vec<_>>() }]
+                "pages": [{ "name": "P", "path": page_path, "traits": mounted.iter().map(|r| serde_json::json!({ "ref": r })).collect::<Vec<_>>() }]
             }]
         });
-        // Under the working directory: the lints read through the `cwd` anchor.
-        let dir = tempfile::tempdir_in(".").expect("temp dir");
+        let dir = tempfile::tempdir().expect("temp dir");
         let path = dir.path().join("app.orb");
         std::fs::write(&path, program.to_string()).expect("write program");
         let registry = crate::utils::load_services_registry(None).expect("services registry");
@@ -1639,30 +1389,20 @@ mod lint_seam_tests {
         diags.errors.into_iter().chain(diags.warnings).collect()
     }
 
-    fn finding(code: &str, path: &str) -> Finding {
-        Finding {
-            code: code.to_string(),
-            path: path.to_string(),
-            message: String::new(),
-            suggestion: None,
-            text: format!("[{code}] {path}"),
-        }
-    }
-
     #[test]
-    fn a_lint_only_by_ref_slot_contention_surfaces_through_validation() {
-        let found = diagnostics(&["T1", "T2"]);
+    fn native_validation_does_not_run_behavior_slot_lints() {
+        let found = diagnostics(&["T1", "T2"], "/x");
         assert!(
             found
                 .iter()
-                .any(|d| d.starts_with("[ORB_SLOT_CONTENTION] orbitals[0].pages[0]")),
+                .all(|d| !d.starts_with("[ORB_SLOT_CONTENTION]")),
             "{found:#?}"
         );
     }
 
     #[test]
-    fn control_one_mounted_trait_has_no_slot_contention_and_the_lints_ran() {
-        let found = diagnostics(&["T1"]);
+    fn control_native_validation_accepts_one_mounted_trait() {
+        let found = diagnostics(&["T1"], "/x");
         assert!(
             !found.iter().any(|d| d.starts_with("[ORB_SLOT_CONTENTION]")),
             "{found:#?}"
@@ -1674,40 +1414,11 @@ mod lint_seam_tests {
     }
 
     #[test]
-    fn a_lint_finding_with_a_rust_twin_at_the_same_path_is_dropped() {
-        let rust = [finding("ORB_P_DUPLICATE_PATH", "orbitals[0].pages[1]")];
-        let lint = LintFindings {
-            errors: vec![
-                finding("ORB_P_DUPLICATE_PATH", "orbitals[0].pages[1]"),
-                finding("ORB_P_DUPLICATE_PATH", "orbitals[1].pages[0]"),
-            ],
-            warnings: vec![finding("ORB_P_DUPLICATE_PATH", "orbitals[0].pages[1]")],
-        };
-        let kept = unreported_lint_findings(
-            lint,
-            rust.iter().map(|f| (f.code.as_str(), f.path.as_str())),
+    fn native_validation_still_rejects_an_invalid_page_path() {
+        let found = diagnostics(&["T1"], "relative");
+        assert!(
+            found.iter().any(|d| d.contains("ORB_P_INVALID_PATH")),
+            "{found:#?}"
         );
-        assert_eq!(
-            kept.errors
-                .iter()
-                .map(|f| f.path.as_str())
-                .collect::<Vec<_>>(),
-            vec!["orbitals[1].pages[0]"]
-        );
-        assert!(kept.warnings.is_empty());
-    }
-
-    #[test]
-    fn control_a_lint_finding_with_another_code_at_the_same_path_is_kept() {
-        let rust = [finding("ORB_P_INVALID_PATH", "orbitals[0].pages[0]")];
-        let lint = LintFindings {
-            errors: vec![finding("ORB_SLOT_CONTENTION", "orbitals[0].pages[0]")],
-            warnings: Vec::new(),
-        };
-        let kept = unreported_lint_findings(
-            lint,
-            rust.iter().map(|f| (f.code.as_str(), f.path.as_str())),
-        );
-        assert_eq!(kept.errors.len(), 1);
     }
 }
