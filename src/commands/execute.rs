@@ -398,7 +398,8 @@ fn step_answer(
     match request {
         IoRequest::Os { key: Some(_), .. }
         | IoRequest::Http { key: Some(_), .. }
-        | IoRequest::HttpStream { key: Some(_), .. } => IoAnswer::ServiceDeferred,
+        | IoRequest::HttpStream { key: Some(_), .. }
+        | IoRequest::Substrate { key: Some(_), site: Some(_), .. } => IoAnswer::ServiceDeferred,
         other => BlockingHost { source: kernel.entity_source().as_ref(), service: None, substrate: None }.answer(other),
     }
 }
@@ -916,6 +917,23 @@ mod cascade_from_tests {
         let outcome = &report["steps"][0]["outcomes"][0];
         assert_eq!(outcome["emits"][0]["payload"], serde_json::json!({ "status": 403.0 }), "{report}");
         assert_eq!(outcome["failure"], serde_json::Value::Null, "{report}");
+    }
+
+    fn dispatching(options: serde_json::Value) -> serde_json::Value {
+        let program_json = serde_json::json!({"name":"AskApp","orbitals":[{"name":"Asking","entity":{"name":"Req","persistence":"runtime","fields":[{"name":"id","type":"string"}]},"pages":[],"traits":[{"name":"Ask","linkedEntity":"Req","stateMachine":{"states":[{"name":"ready","isInitial":true}],"transitions":[{"from":"ready","to":"ready","event":"GO","effects":[["program/dispatch","INNER",{},{"viewer":null},options]]}]}}]}]});
+        run_cascade(&program(&program_json.to_string()), &serde_json::json!([{ "trait": "Ask", "event": "GO" }])).unwrap()
+    }
+
+    /// A replayed step leaves a keyed program op pending as it leaves keyed os and http asks: its completion is the
+    /// next step the caller feeds, so no route fires in this one.
+    #[test]
+    fn a_keyed_program_ask_is_left_pending_in_a_replayed_step() {
+        let report = dispatching(serde_json::json!({ "key": "k1", "emit": { "success": "GOT", "failure": "LOST" } }));
+        let outcome = &report["steps"][0]["outcomes"][0];
+        assert_eq!(outcome["emits"], serde_json::json!([]), "{report}");
+        let control = dispatching(serde_json::json!({ "emit": { "success": "GOT", "failure": "LOST" } }));
+        let fired: Vec<&str> = control["steps"][0]["outcomes"][0]["emits"].as_array().unwrap().iter().filter_map(|e| e["event"].as_str()).collect();
+        assert_eq!(fired, vec!["LOST"], "control: an unkeyed program op is still answered in place: {control}");
     }
 
     #[test]

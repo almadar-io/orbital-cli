@@ -47,6 +47,7 @@ pub(crate) fn locate(name: &str) -> anyhow::Result<ShellProgram> {
 fn request(
     module: &OirModule,
     resolved: Option<orbital_core::OrbitalSchema>,
+    served: Option<orbital_core::OrbitalSchema>,
     source_path: &Path,
     options: &GenerateOptions,
     shell_options: BTreeMap<String, Value>,
@@ -55,10 +56,20 @@ fn request(
         ir_version: IR_VERSION,
         module: module.clone(),
         resolved,
+        served,
         source_path: Some(source_path.to_path_buf()),
         write: options.write_options(),
         options: shell_options,
     }
+}
+
+/// The client a compiled server serves, relative to the project root the server runs from.
+const SERVED_CLIENT_DIR: &str = "packages/client/dist";
+
+/// Where a compiled server listens: the `std-http1` host and port knobs; `PORT` in its environment replaces the port.
+pub(crate) struct ServedAddress<'a> {
+    pub host: &'a str,
+    pub port: u16,
 }
 
 /// Compile `compile_path` (lowered from `source_path`) and have the `name` shell write the project.
@@ -69,15 +80,24 @@ pub(crate) fn generate(
     output: &Path,
     options: &GenerateOptions,
     shell_options: BTreeMap<String, Value>,
+    address: &ServedAddress,
 ) -> anyhow::Result<GenerateResponse> {
     let shell = locate(name)?;
-    let resolved = if shell.description.needs_resolved {
+    let resolved = if shell.description.needs_resolved || shell.description.needs_served {
         Some(crate::commands::compile::resolve_compiled_schema(compile_path, source_path)?)
     } else {
         None
     };
+    let served = match (&resolved, shell.description.needs_served && options.mode != orbital_compiler::ShellMode::Client) {
+        (Some(app), true) => Some(crate::commands::program_command::served_schema(
+            app,
+            &crate::commands::program_command::server_overrides(address.host, address.port, true, Some(SERVED_CLIENT_DIR)),
+        )?),
+        _ => None,
+    };
+    let resolved = resolved.filter(|_| shell.description.needs_resolved);
     let response = generate_from_file_with_source_using(compile_path, source_path, output, options, |module, out| {
-        shell_protocol::invoke(&shell.binary, &request(module, resolved, source_path, options, shell_options), out)
+        shell_protocol::invoke(&shell.binary, &request(module, resolved, served, source_path, options, shell_options), out)
             .map_err(GenerateError::ShellProgram)
     })?;
     Ok(response)
@@ -88,12 +108,13 @@ pub(crate) fn emit(
     name: &str,
     module: &OirModule,
     resolved: Option<orbital_core::OrbitalSchema>,
+    served: Option<orbital_core::OrbitalSchema>,
     source_path: &Path,
     options: &GenerateOptions,
     shell_options: BTreeMap<String, Value>,
 ) -> anyhow::Result<orbital_core::generate::GeneratedOutput> {
     let shell = locate(name)?;
-    shell_protocol::invoke_emit(&shell.binary, &request(module, resolved, source_path, options, shell_options)).map_err(failure)
+    shell_protocol::invoke_emit(&shell.binary, &request(module, resolved, served, source_path, options, shell_options)).map_err(failure)
 }
 
 /// Print a shell's reply the way `orb compile` reports it.

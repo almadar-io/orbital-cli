@@ -5,7 +5,7 @@ use crate::utils::{
     detect_language, detect_syntax, load_project_patterns, shell_programs,
     translate_schema_content, InputSyntax,
 };
-use crate::{HostArg, ServerFrameworkArg, ShellMode, ShellType};
+use crate::{HostArg, ShellMode, ShellType};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -77,13 +77,13 @@ pub(crate) fn compile_schema(
     patterns_path: Option<&std::path::Path>,
     verbose: bool,
     dev_logs: bool,
-    server_framework: ServerFrameworkArg,
     host: HostArg,
+    address: &shell_programs::ServedAddress,
     emit_orb: Option<&std::path::Path>,
 ) -> anyhow::Result<()> {
     // Handle mixed compilation (--frontend + --backend)
     if frontend.is_some() || backend.is_some() {
-        return compile_mixed(path, output, frontend, backend, verbose);
+        return compile_mixed(path, output, frontend, backend, verbose, address);
     }
 
     println!("Compiling schema: {}", path.display());
@@ -183,10 +183,6 @@ pub(crate) fn compile_schema(
 
     let mut shell_options = BTreeMap::new();
     if let ShellType::Typescript = shell {
-        let framework = match server_framework {
-            ServerFrameworkArg::Express => "express",
-        };
-        shell_options.insert("framework".to_string(), Value::from(framework));
         shell_options.insert(
             "schemaLanguage".to_string(),
             Value::from(detect_language(&content_raw).unwrap_or_else(|| "en".to_string())),
@@ -206,7 +202,7 @@ pub(crate) fn compile_schema(
         }
     }
 
-    let response = shell_programs::generate(shell.program(), &compile_path, path, output, &options, shell_options)?;
+    let response = shell_programs::generate(shell.program(), &compile_path, path, output, &options, shell_options, address)?;
     shell_programs::report(&response);
     Ok(())
 }
@@ -218,6 +214,7 @@ fn compile_mixed(
     frontend: Option<ShellType>,
     backend: Option<ShellType>,
     verbose: bool,
+    address: &shell_programs::ServedAddress,
 ) -> anyhow::Result<()> {
     for shell in [frontend, backend].into_iter().flatten() {
         if let ShellType::ChromeExtension = shell {
@@ -281,7 +278,7 @@ fn compile_mixed(
             );
         }
         let options = generate_options(verbose, orbital_compiler::ShellMode::Client)?;
-        let response = shell_programs::generate(frontend_shell.program(), &compile_path, path, &frontend_output, &options, shell_options)?;
+        let response = shell_programs::generate(frontend_shell.program(), &compile_path, path, &frontend_output, &options, shell_options, address)?;
         total_files += response.files.len();
     }
 
@@ -289,7 +286,7 @@ fn compile_mixed(
         let backend_output = output.join("backend");
         println!("  Backend: {:?} -> {}", backend_shell, backend_output.display());
         let options = generate_options(verbose, orbital_compiler::ShellMode::Server)?;
-        let response = shell_programs::generate(backend_shell.program(), &compile_path, path, &backend_output, &options, BTreeMap::new())?;
+        let response = shell_programs::generate(backend_shell.program(), &compile_path, path, &backend_output, &options, BTreeMap::new(), address)?;
         total_files += response.files.len();
     }
 
@@ -304,7 +301,7 @@ fn compile_mixed(
 
         // Generate .env file for frontend with API URL
         let backend_url = match backend {
-            Some(ShellType::Python) => "http://localhost:8000",
+            Some(ShellType::Python) => "http://localhost:3030",
             Some(ShellType::Typescript) => "http://localhost:3030",
             Some(ShellType::Rust) => "http://localhost:3030",
             Some(ShellType::Android) => "http://localhost:8000",
@@ -345,7 +342,7 @@ fn compile_mixed(
         println!("  docker-compose up");
         println!("\nOr run separately:");
         println!("  # Terminal 1: Backend");
-        println!("  cd backend && python -m venv .venv && source .venv/bin/activate && pip install -e . && python -m orbital_app.main");
+        println!("  cd backend && python -m venv .venv && source .venv/bin/activate && pip install -e . && python -m orbital_app");
         println!("  # Terminal 2: Frontend");
         println!("  cd frontend && npm install && npm run dev");
     }
@@ -363,9 +360,7 @@ fn generate_docker_compose(frontend: Option<ShellType>, backend: Option<ShellTyp
                 compose.push_str("  backend:\n");
                 compose.push_str("    build: ./backend\n");
                 compose.push_str("    ports:\n");
-                compose.push_str("      - \"8000:8000\"\n");
-                compose.push_str("    environment:\n");
-                compose.push_str("      - CORS_ORIGINS=http://localhost:3000\n");
+                compose.push_str("      - \"3030:3030\"\n");
                 compose.push_str("\n");
             }
             ShellType::Typescript => {
@@ -374,7 +369,6 @@ fn generate_docker_compose(frontend: Option<ShellType>, backend: Option<ShellTyp
                 compose.push_str("    ports:\n");
                 compose.push_str("      - \"3030:3030\"\n");
                 compose.push_str("    environment:\n");
-                compose.push_str("      - CORS_ORIGINS=http://localhost:3000\n");
                 compose.push_str("\n");
             }
             ShellType::Rust => {
@@ -383,7 +377,6 @@ fn generate_docker_compose(frontend: Option<ShellType>, backend: Option<ShellTyp
                 compose.push_str("    ports:\n");
                 compose.push_str("      - \"3030:3030\"\n");
                 compose.push_str("    environment:\n");
-                compose.push_str("      - CORS_ORIGINS=http://localhost:3000\n");
                 compose.push_str("\n");
             }
             ShellType::Android => {
@@ -401,7 +394,7 @@ fn generate_docker_compose(frontend: Option<ShellType>, backend: Option<ShellTyp
     if let Some(frontend_shell) = frontend {
         // API URL from browser perspective (localhost, not internal docker network)
         let backend_url = match backend {
-            Some(ShellType::Python) => "http://localhost:8000",
+            Some(ShellType::Python) => "http://localhost:3030",
             Some(ShellType::Typescript) => "http://localhost:3030",
             Some(ShellType::Rust) => "http://localhost:3030",
             Some(ShellType::Android) => "http://localhost:8000",

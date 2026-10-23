@@ -56,14 +56,6 @@ pub enum EmitFormat {
     Raw,
 }
 
-/// Server framework choice — used only when `target = Ts`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default)]
-pub enum EmitServer {
-    /// Express (the only server; the Hono one is retired).
-    #[default]
-    Express,
-}
-
 // --- Entry point called from main.rs ---------------------------------------
 
 /// Options for a single `orb emit` invocation.
@@ -74,7 +66,6 @@ pub struct EmitOptions {
     pub output: Option<PathBuf>,
     pub format: Option<EmitFormat>,
     pub only: Option<String>,
-    pub server: EmitServer,
     /// When true, write a Source Map v3 sidecar at `<output>.map` (or,
     /// when emitting to stdout, append a `//# sourceMappingURL=…` comment
     /// with an inline base64-encoded map). Ignored for `target = orb` and
@@ -362,13 +353,9 @@ fn emit_code(opts: EmitOptions, source: &str, source_path: &str) -> Result<()> {
                 Some(program_path),
             )
                 .map_err(|e| anyhow!("Failed to resolve schema for the browser store: {}", e))?;
-            let framework = match opts.server {
-                EmitServer::Express => "express",
-            };
-            let shell_options = std::collections::BTreeMap::from([("framework".to_string(), serde_json::Value::from(framework))]);
-            crate::utils::shell_programs::emit("typescript", &module, Some(resolved), program_path, &generate_options, shell_options)?
+            crate::utils::shell_programs::emit("typescript", &module, Some(resolved), None, program_path, &generate_options, Default::default())?
         }
-        EmitTarget::Py => crate::utils::shell_programs::emit("python", &module, None, program_path, &generate_options, Default::default())?,
+        EmitTarget::Py => crate::utils::shell_programs::emit("python", &module, None, None, program_path, &generate_options, Default::default())?,
         EmitTarget::Orb | EmitTarget::Lolo | EmitTarget::Manifest => {
             unreachable!("orb and lolo targets are routed before code generation")
         }

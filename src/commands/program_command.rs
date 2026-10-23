@@ -226,6 +226,164 @@ pub(crate) fn run_program(program: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The behavior `orb serve` composes beside the app.
+const SERVER_BEHAVIOR: &str = "std/behaviors/std-http-server";
+
+/// What `orb serve` asks of the composed `std-http-server`.
+pub(crate) struct ServeOptions<'a> {
+    pub(crate) host: &'a str,
+    pub(crate) port: u16,
+    pub(crate) no_mock: bool,
+    pub(crate) client_dir: Option<&'a Path>,
+}
+
+/// The compose overrides the options map to: the `std-http1` host and port with the listen grant they are checked
+/// against, and the client directory with its read grant (relative to the working directory, where the server reads it).
+fn serve_overrides(options: &ServeOptions, cwd: &Path) -> anyhow::Result<serde_json::Value> {
+    let client_dir = match options.client_dir {
+        None => None,
+        Some(dir) => {
+            let absolute = if dir.is_absolute() { dir.to_path_buf() } else { cwd.join(dir) };
+            let relative = absolute.strip_prefix(cwd).map_err(|_| {
+                anyhow::anyhow!("--client-dir {} is outside the working directory {}; the server reads its client under it", dir.display(), cwd.display())
+            })?;
+            Some(
+                relative
+                    .to_str()
+                    .ok_or_else(|| anyhow::anyhow!("--client-dir {} is not valid UTF-8", dir.display()))?
+                    .to_string(),
+            )
+        }
+    };
+    Ok(server_overrides(options.host, options.port, false, client_dir.as_deref()))
+}
+
+/// The `std-http1` host and port with their listen grant, whether the `PORT` environment variable replaces the port
+/// (with the `env PORT` listen grant on the host), and a client directory (relative to the server's working directory)
+/// with its read grant.
+pub(crate) fn server_overrides(host: &str, port: u16, port_from_env: bool, client_dir: Option<&str>) -> serde_json::Value {
+    let mut overrides = serde_json::json!({
+        "Http1.host": host,
+        "Http1.port": port,
+        "Http1.portFromEnv": port_from_env,
+        "grants": { "net": [{ "target": format!("{host}:{port}"), "kinds": ["listen"] }], "anchored": {} },
+    });
+    if port_from_env {
+        overrides["grants"]["anchored"]["net"] = serde_json::json!([{
+            "host": { "literal": host },
+            "port": { "anchor": { "env": "PORT" } },
+            "kinds": ["listen"],
+        }]);
+    }
+    if let Some(relative) = client_dir {
+        overrides["ServerStatic.clientDir"] = serde_json::json!(relative);
+        overrides["grants"]["anchored"]["fs"] =
+            serde_json::json!([{ "anchor": "cwd", "glob": format!("{relative}/**"), "modes": ["read"] }]);
+    }
+    overrides
+}
+
+/// `std-http-server` resolved with the serve options' knobs set as call-site config on its traits (`Trait.knob`), so the
+/// resolver substitutes them where the program reads them; a key naming no trait of the server is refused.
+fn resolved_server(overrides: &serde_json::Value) -> anyhow::Result<std::path::PathBuf> {
+    let source_path = crate::commands::behaviors_catalog::behavior_source_path(SERVER_BEHAVIOR)?;
+    let mut source = crate::commands::behaviors_catalog::source(SERVER_BEHAVIOR)?;
+    for (key, value) in overrides.as_object().into_iter().flatten().filter(|(k, _)| k.as_str() != "grants") {
+        let (trait_name, knob) = key
+            .split_once('.')
+            .ok_or_else(|| anyhow::anyhow!("serve override {key} is not <Trait>.<knob>"))?;
+        let found = source
+            .get_mut("orbitals")
+            .and_then(serde_json::Value::as_array_mut)
+            .into_iter()
+            .flatten()
+            .flat_map(|o| o.get_mut("traits").and_then(serde_json::Value::as_array_mut).into_iter().flatten())
+            .find(|t| t.get("name").and_then(serde_json::Value::as_str) == Some(trait_name))
+            .ok_or_else(|| anyhow::anyhow!("serve override {key}: {SERVER_BEHAVIOR} has no trait {trait_name}"))?;
+        let config = found
+            .as_object_mut()
+            .ok_or_else(|| anyhow::anyhow!("serve override {key}: trait {trait_name} is not an object"))?
+            .entry("config")
+            .or_insert_with(|| serde_json::json!({}));
+        let kind = match value {
+            serde_json::Value::String(_) => "string",
+            serde_json::Value::Number(_) => "number",
+            serde_json::Value::Bool(_) => "boolean",
+            _ => return Err(anyhow::anyhow!("serve override {key}: only a text, number or boolean knob can be set")),
+        };
+        config[knob] = serde_json::json!({ "type": kind, "default": value });
+    }
+    let schema: orbital_core::OrbitalSchema =
+        serde_json::from_value(source).map_err(|e| anyhow::anyhow!("{SERVER_BEHAVIOR}: {e}"))?;
+    crate::commands::dev::resolve_schema_to_temp(schema, &source_path)
+}
+
+/// The app and `std-http-server` (its knobs set from `overrides`), the programs `program/compose` joins, with the app's
+/// name.
+fn served_programs(app: serde_json::Value, overrides: &serde_json::Value) -> anyhow::Result<(Vec<orbital_core::Value>, String)> {
+    let app_name = app
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("the program to serve names no app"))?
+        .to_string();
+    let server_path = resolved_server(overrides)?;
+    let server: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&server_path).map_err(|e| anyhow::anyhow!("read {}: {e}", server_path.display()))?,
+    )
+    .map_err(|e| anyhow::anyhow!("{}: {e}", server_path.display()))?;
+    let programs = [app, server]
+        .into_iter()
+        .map(|p| serde_json::from_value(p).map_err(|e| anyhow::anyhow!("the program to compose: {e}")))
+        .collect::<anyhow::Result<Vec<orbital_core::Value>>>()?;
+    Ok((programs, app_name))
+}
+
+fn grants_only(overrides: &serde_json::Value) -> serde_json::Value {
+    serde_json::json!({ "grants": overrides["grants"].clone() })
+}
+
+/// The resolved `app` composed with `std-http-server` as `orb serve` composes it, for a compiled server to run.
+pub(crate) fn served_schema(app: &orbital_core::OrbitalSchema, overrides: &serde_json::Value) -> anyhow::Result<orbital_core::OrbitalSchema> {
+    let app = serde_json::to_value(app).map_err(|e| anyhow::anyhow!("the program to serve: {e}"))?;
+    let (programs, app_name) = served_programs(app, overrides)?;
+    let host = orbital_shell_rust::host::SubstratePort(std::sync::Arc::new(crate::commands::program_host::ProgramHost));
+    orbital_shell_rust::host::boot::compose(programs, &app_name, Some(grants_only(overrides)), &host)
+}
+
+/// `orb serve <program>`: the program composed with `std-http-server` by the host's `program/compose`, booted, and held
+/// like `orb run`.
+pub(crate) fn serve_program(program: &Path, options: &ServeOptions) -> anyhow::Result<()> {
+    let cwd = std::env::current_dir()?;
+    let overrides = serve_overrides(options, &cwd)?;
+    let resolved = crate::commands::dev::resolve_to_temp(program)?;
+    let raw = std::fs::read_to_string(&resolved).map_err(|e| anyhow::anyhow!("read {}: {e}", resolved.display()))?;
+    let app: serde_json::Value = serde_json::from_str(&raw).map_err(|e| anyhow::anyhow!("{}: {e}", resolved.display()))?;
+    let locales: Vec<String> = app
+        .get("locales")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|l| l.as_str().map(str::to_string))
+        .collect();
+    let catalogs = orbital_shell_rust::host::boot::read_catalogs(&resolved, &locales)?;
+    let (programs, app_name) = served_programs(app, &overrides)?;
+    let host = orbital_shell_rust::host::SubstratePort(std::sync::Arc::new(crate::commands::program_host::ProgramHost));
+    let stop = stop_on_signal()?;
+    let runtime = orbital_shell_rust::host::boot::boot_composed(
+        programs,
+        &app_name,
+        Some(grants_only(&overrides)),
+        host,
+        catalogs,
+        !options.no_mock,
+        &std::env::vars().collect(),
+        false,
+    )?;
+    orbital_shell_rust::host::run::mount_init(&runtime).map_err(|e| anyhow::anyhow!("INIT: {e}"))?;
+    hold(&runtime, &stop);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

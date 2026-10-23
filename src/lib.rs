@@ -36,11 +36,11 @@ pub(crate) struct Cli {
 /// Available shell types for code generation
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum ShellType {
-    /// TypeScript/React frontend with Express backend
+    /// TypeScript/React client with a Node server running the app composed with std-http-server
     Typescript,
-    /// Python with FastAPI and PyTorch
+    /// Python host running the program on the native kernel
     Python,
-    /// Rust native application with an Axum server and a Dioxus (or TUI) client
+    /// Rust native host running the served program on the kernel, plus Dioxus and TUI clients
     Rust,
     /// Native Android application with Jetpack Compose
     Android,
@@ -62,14 +62,6 @@ impl ShellType {
             ShellType::ChromeExtension => "chrome",
         }
     }
-}
-
-/// Server framework choice for backend code generation
-#[derive(Debug, Clone, Copy, ValueEnum, Default)]
-pub enum ServerFrameworkArg {
-    /// Express.js (the only server; the Hono one is retired)
-    #[default]
-    Express,
 }
 
 /// Who runs a generated TypeScript app's execution steps
@@ -324,7 +316,7 @@ enum Commands {
         #[arg(long)]
         backend: Option<ShellType>,
 
-        /// Backend URL for frontend proxy (e.g., http://localhost:8000 for Python backend)
+        /// Backend URL for frontend proxy (e.g., http://localhost:3030 for Python backend)
         #[arg(long)]
         backend_url: Option<String>,
 
@@ -340,13 +332,17 @@ enum Commands {
         #[arg(long)]
         dev_logs: bool,
 
-        /// Server framework for backend code generation (express)
-        #[arg(long, default_value = "express")]
-        server: ServerFrameworkArg,
-
         /// Who runs the generated TypeScript app: the embedded kernel (the only host)
         #[arg(long, default_value = "kernel")]
         host: HostArg,
+
+        /// The address the compiled server listens on (the std-http1 host knob)
+        #[arg(long, default_value = "127.0.0.1")]
+        listen_host: String,
+
+        /// The port the compiled server listens on (the std-http1 port knob); PORT in its environment replaces it
+        #[arg(long, default_value = "3030")]
+        port: u16,
 
         /// Write the lowered .orb JSON to this path (for .lolo inputs).
         /// Useful for inspecting how a .lolo file lowers without running codegen.
@@ -541,10 +537,6 @@ enum Commands {
         /// pages, hooks, components, routes, services, tests.
         #[arg(long, value_name = "KINDS")]
         only: Option<String>,
-
-        /// Server framework for the TypeScript backend (express).
-        #[arg(long, value_enum, default_value_t = emit::EmitServer::Express)]
-        server: emit::EmitServer,
 
         /// Emit a Source Map v3 sidecar (`<output>.map`) that maps the
         /// generated code back to byte ranges in the `.orb` source.
@@ -1061,8 +1053,9 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
             patterns,
             verbose,
             dev_logs,
-            server,
             host,
+            listen_host,
+            port,
             emit_orb,
         }) => compile_schema(
             &path,
@@ -1075,8 +1068,8 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
             patterns.as_deref(),
             verbose,
             dev_logs,
-            server,
             host,
+            &utils::shell_programs::ServedAddress { host: &listen_host, port },
             emit_orb.as_deref(),
         ),
         Some(Commands::Test {
@@ -1087,7 +1080,18 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
             execute,
             verbose,
         }) => run_tests(&path, orbital, trait_name, &report, execute, verbose),
-        Some(Commands::Serve { .. }) => anyhow::bail!("orb serve is temporarily unavailable: the legacy server is archived; the native std-http-server caller integration remains to be completed"),
+        Some(Commands::Serve { path, port, host, open, no_mock, no_emulators, client_dir }) => {
+            if open {
+                anyhow::bail!("orb serve --open has no declared counterpart in std-http-server: open the browser yourself");
+            }
+            if no_emulators {
+                anyhow::bail!("orb serve --no-emulators has no declared counterpart in std-http-server: sign-in is selected by AUTH_PROVIDER in the environment");
+            }
+            commands::program_command::serve_program(
+                &path,
+                &commands::program_command::ServeOptions { host: &host, port, no_mock, client_dir: client_dir.as_deref() },
+            )
+        }
         Some(Commands::Gui { path, server, renderer }) => utils::desktop::window(&renderer, &path, Some(&server)),
         Some(Commands::Dev { .. }) => anyhow::bail!("orb dev is temporarily unavailable: the legacy server is archived; the native server and desktop lifecycle integration remains to be completed"),
         Some(Commands::Convert {
@@ -1183,7 +1187,6 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
             output,
             format,
             only,
-            server,
             map,
             inspect_source,
             document_version,
@@ -1198,7 +1201,6 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
             output,
             format,
             only,
-            server,
             map,
             inspect_source,
             document_version,
