@@ -48,28 +48,12 @@ pub(crate) fn discover_from(dir: &Path) -> anyhow::Result<Vec<BehaviorPackage>> 
         .map_err(|e| anyhow::anyhow!("failed to discover behavior packages: {e}"))
 }
 
-/// Set when stdout carries a protocol (`orb mcp`'s JSON-RPC): reports then go to stderr.
-static STDOUT_IS_PROTOCOL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-pub(crate) fn mark_stdout_as_protocol() {
-    STDOUT_IS_PROTOCOL.store(true, std::sync::atomic::Ordering::SeqCst);
-}
-
-pub(crate) fn report_on_stderr(stdout_is_protocol: bool) -> bool {
-    stdout_is_protocol
-}
-
-/// Whether a command's report lines must stay off stdout.
-pub(crate) fn reports_on_stderr() -> bool {
-    report_on_stderr(STDOUT_IS_PROTOCOL.load(std::sync::atomic::Ordering::SeqCst))
-}
-
 pub(crate) fn run_bun(project_dir: &Path, args: &[&str]) -> anyhow::Result<()> {
     let bun = find_bun()?;
     let status = Command::new(&bun)
         .args(args)
         .current_dir(project_dir)
-        .stdout(if reports_on_stderr() { Stdio::from(std::io::stderr()) } else { Stdio::inherit() })
+        .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .status()?;
     if !status.success() {
@@ -78,21 +62,3 @@ pub(crate) fn run_bun(project_dir: &Path, args: &[&str]) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The `(start_dir, user_store)` pair every node-style walk-up resolves
-/// against: the working directory, and the user store (falling back to the
-/// working directory itself when no home directory can be found).
-pub(crate) fn cwd_and_user_store() -> anyhow::Result<(PathBuf, PathBuf)> {
-    let cwd = std::env::current_dir()?;
-    let user_store = user_store_dir().unwrap_or_else(|| cwd.clone());
-    Ok((cwd, user_store))
-}
-
-#[cfg(test)]
-mod protocol_stdout_tests {
-    /// Under `orb mcp` stdout carries JSON-RPC: a first-run `orb update` must report on stderr.
-    #[test]
-    fn reports_go_to_stderr_while_stdout_is_a_protocol_channel() {
-        assert!(super::report_on_stderr(true));
-        assert!(!super::report_on_stderr(false), "control: a plain command reports on stdout");
-    }
-}

@@ -96,14 +96,6 @@ impl EmitOutput {
     }
 }
 
-/// Run the emit pipeline end-to-end and print what [`render`] returns.
-pub fn run(opts: EmitOptions) -> Result<()> {
-    let out = render(opts)?;
-    eprint!("{}", out.stderr);
-    print!("{}", out.stdout);
-    Ok(())
-}
-
 /// The one emit pipeline: writes the requested files and returns what `orb emit` prints.
 pub fn render(opts: EmitOptions) -> Result<EmitOutput> {
     let source = read_input(opts.path.as_deref())?;

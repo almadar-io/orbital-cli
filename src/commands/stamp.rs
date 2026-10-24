@@ -15,21 +15,6 @@ use orbital_core::behavior_packages::{discover, user_store_dir};
 use std::collections::HashSet;
 use std::path::Path;
 
-pub(crate) fn stamp_schema_cli(
-    path: &Path,
-    prior_path: Option<&Path>,
-    output: Option<&Path>,
-    imports_dir: Option<&Path>,
-) -> anyhow::Result<()> {
-    let json = stamped_json(path, prior_path, imports_dir)?;
-    match output {
-        Some(out) => std::fs::write(out, &json)
-            .map_err(|e| anyhow::anyhow!("Failed to write {}: {}", out.display(), e))?,
-        None => println!("{}", json),
-    }
-    Ok(())
-}
-
 /// What `orb stamp` writes for the `.orb` at `path`.
 pub(crate) fn stamped_json(path: &Path, prior_path: Option<&Path>, imports_dir: Option<&Path>) -> anyhow::Result<String> {
     let content = std::fs::read_to_string(path)

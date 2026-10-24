@@ -185,7 +185,11 @@ pub(crate) fn catalog_with(
     let mut indexed: BTreeMap<usize, Vec<IndexEntry>> = BTreeMap::new();
     for scope in &scopes {
         if !indexed.contains_key(&scope.package) {
-            indexed.insert(scope.package, package_index(&packages, scope.package)?);
+            let index = package_index(&packages, scope.package)?;
+            for skip in &index.skipped {
+                tracing::warn!(target: orbital_core::logging::ns::CLI, "skipped {}/{}: {}", packages[scope.package].prefix, skip.name, skip.error);
+            }
+            indexed.insert(scope.package, index.entries);
         }
         for entry in &indexed[&scope.package] {
             if in_scope(&entry.dirs, &scope.dirs) {
@@ -1470,6 +1474,7 @@ pub(crate) fn scoped_behaviors(paths: &[String]) -> anyhow::Result<Vec<ScopedPac
         .into_iter()
         .map(|pi| {
             let behaviors = package_index(&packages, pi)?
+                .entries
                 .into_iter()
                 .filter(|e| {
                     scopes

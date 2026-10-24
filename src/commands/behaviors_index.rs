@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 /// Bump when the entry shape or a rule below changes: it is part of the cache key.
-const INDEX_RULES: &str = "behavior-index-2";
+const INDEX_RULES: &str = "behavior-index-3";
 const WORKERS: usize = 8;
 /// The main thread's stack: a deep program outgrows the 2 MiB default in a debug build.
 pub(crate) const WORKER_STACK: usize = 8 * 1024 * 1024;
@@ -47,6 +47,19 @@ pub(crate) struct IndexEntry {
     pub default_entity_name: String,
     pub connectable_events: Vec<String>,
     pub traits: Vec<String>,
+}
+
+/// A package's derived index: the entries, and each behavior that could not be indexed with why.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct PackageIndex {
+    pub entries: Vec<IndexEntry>,
+    pub skipped: Vec<SkippedBehavior>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct SkippedBehavior {
+    pub name: String,
+    pub error: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -426,7 +439,7 @@ fn derive(
     packages: &[BehaviorPackage],
     pi: usize,
     only: Option<&HashSet<&str>>,
-) -> anyhow::Result<Vec<IndexEntry>> {
+) -> anyhow::Result<PackageIndex> {
     let pkg = &packages[pi];
     let files: Vec<IndexedFile> = indexed_files(pkg)?
         .into_iter()
@@ -465,13 +478,16 @@ fn derive(
                 .expect("failed to spawn an index worker");
         }
     });
-    let mut out = Vec::with_capacity(files.len());
-    for slot in slots {
+    let mut out = PackageIndex { entries: Vec::with_capacity(files.len()), skipped: Vec::new() };
+    for (slot, file) in slots.into_iter().zip(&files) {
         let entry = slot
             .into_inner()
             .map_err(|_| anyhow::anyhow!("an index worker panicked"))?
-            .ok_or_else(|| anyhow::anyhow!("a behavior was never indexed"))??;
-        out.extend(entry);
+            .ok_or_else(|| anyhow::anyhow!("a behavior was never indexed"))?;
+        match entry {
+            Ok(entry) => out.entries.extend(entry),
+            Err(e) => out.skipped.push(SkippedBehavior { name: file.name.clone(), error: format!("{e:#}") }),
+        }
     }
     Ok(out)
 }
@@ -570,25 +586,25 @@ fn collect_lolo(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 /// Every behavior `packages[pi]` ships, in path order, derived from the live sources and cached under the
-/// derived-data directory by what they depend on.
+/// derived-data directory by what they depend on; a behavior that does not load is skipped and listed.
 pub(crate) fn package_index(
     packages: &[BehaviorPackage],
     pi: usize,
-) -> anyhow::Result<Vec<IndexEntry>> {
+) -> anyhow::Result<PackageIndex> {
     let pkg = &packages[pi];
     let dir = derived_dir().join("behavior-index");
     let key = fingerprint(packages, pi)?;
     let file = dir.join(format!("{}-{key}.json", pkg.prefix));
     if let Ok(raw) = std::fs::read_to_string(&file) {
-        if let Ok(entries) = serde_json::from_str::<Vec<IndexEntry>>(&raw) {
-            return Ok(entries);
+        if let Ok(index) = serde_json::from_str::<PackageIndex>(&raw) {
+            return Ok(index);
         }
     }
-    let entries = derive(packages, pi, None)?;
+    let index = derive(packages, pi, None)?;
     if std::fs::create_dir_all(&dir).is_ok() {
         let tmp = dir.join(format!("{}-{key}.{}.tmp", pkg.prefix, std::process::id()));
         let stale_prefix = format!("{}-", pkg.prefix);
-        if std::fs::write(&tmp, serde_json::to_vec(&entries)?).is_ok()
+        if std::fs::write(&tmp, serde_json::to_vec(&index)?).is_ok()
             && std::fs::rename(&tmp, &file).is_ok()
         {
             if let Ok(listing) = std::fs::read_dir(&dir) {
@@ -605,7 +621,7 @@ pub(crate) fn package_index(
             }
         }
     }
-    Ok(entries)
+    Ok(index)
 }
 
 #[cfg(test)]
@@ -644,14 +660,14 @@ mod tests {
             };
             let mut derived = Vec::new();
             for name in sample.as_object().unwrap().keys() {
-                match derive(&packages, pi, Some(&HashSet::from([name.as_str()]))) {
-                    Ok(found) => derived.extend(found),
-                    Err(e) if format!("{e:#}").contains("Failed to lower") => {
-                        eprintln!("skipped {prefix}/{name}: a source being edited does not lower: {e:#}");
-                        unloadable += 1;
-                    }
-                    Err(e) => panic!("{prefix}/{name}: {e:#}"),
+                let found = derive(&packages, pi, Some(&HashSet::from([name.as_str()])))
+                    .unwrap_or_else(|e| panic!("{prefix}/{name}: {e:#}"));
+                for skip in &found.skipped {
+                    assert!(skip.error.contains("Failed to lower"), "{prefix}/{name}: {}", skip.error);
+                    eprintln!("skipped {prefix}/{name}: a source being edited does not lower: {}", skip.error);
+                    unloadable += 1;
                 }
+                derived.extend(found.entries);
             }
             let mut mismatches = Vec::new();
             for entry in derived {

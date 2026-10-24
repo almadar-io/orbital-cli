@@ -1,47 +1,6 @@
-//! `orb parse`, `orb resolve`, and `orb format`.
+//! The `program/read` and `program/print` resolve and format texts.
 
-use crate::utils::{detect_syntax, parse_schema_auto, InputSyntax};
-use std::path::PathBuf;
-
-/// Parse schema and display information
-pub(crate) fn parse_schema(path: &PathBuf) -> anyhow::Result<()> {
-    println!("Parsing schema: {}", path.display());
-
-    let content_raw = std::fs::read_to_string(path)?;
-    let schema = parse_schema_auto(&content_raw, &path.display().to_string())?;
-
-    println!("\nSchema: {}", schema.name);
-    if let Some(version) = &schema.version {
-        println!("Version: {}", version);
-    }
-    if let Some(description) = &schema.description {
-        println!("Description: {}", description);
-    }
-
-    println!("\nOrbitals ({}):", schema.orbitals.len());
-    for orbital in &schema.orbitals {
-        // Handle entity being either inline or reference
-        let (entity_name, field_count) = match &orbital.entity {
-            orbital_core::EntityRef::Inline(entity) => (entity.name.as_str(), entity.fields.len()),
-            orbital_core::EntityRef::Reference(ref_str) => (ref_str.as_str(), 0),
-            // Phase 3.5.G.A.5: `Extends` is rewritten to `Inline` before
-            // this CLI command runs. Fall through with the upstream
-            // `extends` reference and an unknown field count, mirroring
-            // how the `Reference` arm reports a bare reference.
-            orbital_core::EntityRef::Extends(extends) => (extends.reference.as_str(), 0),
-        };
-        println!("  - {} (entity: {})", orbital.name, entity_name);
-        println!("    Fields: {}", field_count);
-        println!("    Traits: {}", orbital.traits.len());
-        if let Some(pages) = &orbital.pages {
-            println!("    Pages: {}", pages.len());
-        }
-    }
-
-    // Note: Traits are now only defined inline within orbitals, not at schema level.
-
-    Ok(())
-}
+use crate::utils::{detect_syntax, InputSyntax};
 
 /// What `orb resolve` prints for `path`; with `output`, also written there with its catalogs and
 /// lazy behaviors. Without `output`, a program with lazy behaviors or locales is refused.

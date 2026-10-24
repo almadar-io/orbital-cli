@@ -223,11 +223,7 @@ fn print_rows(rows: &[Row]) {
             row.problem.as_deref().unwrap_or("ok"),
             if row.link { " (linked)" } else { "" }
         );
-        if super::npm_project::reports_on_stderr() {
-            eprintln!("{line}");
-        } else {
-            println!("{line}");
-        }
+        println!("{line}");
     }
 }
 

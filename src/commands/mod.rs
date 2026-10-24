@@ -20,12 +20,8 @@ pub(crate) mod sidecar_fetch;
 pub(crate) mod stamp;
 pub(crate) mod validate;
 
-pub(crate) use compile::compile_schema;
 pub(crate) use behaviors::run_which;
 pub(crate) use behaviors_catalog::{run_catalog, run_describe, run_expects, run_source};
 pub(crate) use behaviors_texts::run_texts;
-pub(crate) use parse::parse_schema;
-pub(crate) use stamp::stamp_schema_cli;
-pub(crate) use validate::validate_schema;
 pub(crate) mod packages;
 pub(crate) mod update_notice;

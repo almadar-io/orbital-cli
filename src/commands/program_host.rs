@@ -1343,6 +1343,127 @@ orbital NoteOrbital {
         assert!(error.message.contains("absolute `path`"), "{}", error.message);
     }
 
+    fn text_of(value: &serde_json::Value, key: &str) -> String {
+        value[key].as_str().unwrap_or_else(|| panic!("`{key}` in {value}")).to_string()
+    }
+
+    #[test]
+    fn print_with_a_target_answers_what_orb_emit_prints_and_each_target_differs() {
+        orbital_compiler::loader::register_source_lowerer(|path, _, _| crate::lower_lolo_file(path));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("note.lolo");
+        std::fs::write(&file, NOTE).unwrap();
+        let path = file.display().to_string();
+        let orb = json(&print_with(serde_json::json!({ "target": "orb", "path": path })).expect("emits orb"));
+        let expected = format!("{}\n", crate::emit::orb_json(NOTE, &path).unwrap());
+        assert_eq!(text_of(&orb, "text"), expected, "the bytes `orb emit orb` prints");
+        assert_eq!(text_of(&orb, "stderr"), "");
+        let lolo = json(&print_with(serde_json::json!({ "target": "lolo", "path": path })).expect("emits lolo"));
+        let expected = format!("{}\n", crate::emit::lolo_text(NOTE, &path).unwrap());
+        assert_eq!(text_of(&lolo, "text"), expected, "the bytes `orb emit lolo` prints");
+        assert_ne!(text_of(&lolo, "text"), text_of(&orb, "text"), "control: the target picks the output");
+    }
+
+    #[test]
+    fn print_with_a_target_and_output_writes_the_file_and_prints_nothing() {
+        orbital_compiler::loader::register_source_lowerer(|path, _, _| crate::lower_lolo_file(path));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("note.lolo");
+        std::fs::write(&file, NOTE).unwrap();
+        let out = dir.path().join("note.orb");
+        let answer = json(
+            &print_with(serde_json::json!({ "target": "orb", "path": file.display().to_string(), "output": out.display().to_string() }))
+                .expect("emits"),
+        );
+        assert_eq!(text_of(&answer, "text"), "");
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), crate::emit::orb_json(NOTE, &file.display().to_string()).unwrap());
+    }
+
+    #[test]
+    fn control_print_with_a_target_refuses_a_relative_path_an_unknown_option_and_a_lone_key_half() {
+        let refusal = |options: serde_json::Value| print_with(options).unwrap_err().message;
+        assert!(refusal(serde_json::json!({ "target": "orb", "path": "note.lolo" })).contains("absolute `path`"));
+        assert!(refusal(serde_json::json!({ "target": "orb", "path": "/x/note.lolo", "node": "a" })).contains("unsupported option \"node\""));
+        assert!(refusal(serde_json::json!({ "target": "java", "path": "/x/note.lolo" })).contains("not one of the accepted values"));
+        assert!(refusal(serde_json::json!({ "target": "manifest", "path": "/x/n.lolo", "signKey": "/k" })).contains("go together"));
+        assert!(refusal(serde_json::json!({ "target": "orb", "path": "/x/n.lolo", "documentVersion": 2 })).contains("needs `inspectSource`"));
+        assert!(refusal(serde_json::json!({ "target": "orb", "path": "/nowhere/missing.lolo" })).contains("Failed to read"));
+    }
+
+    #[test]
+    fn read_with_stamp_answers_what_orb_stamp_prints_and_writes_output_when_given() {
+        orbital_compiler::loader::register_source_lowerer(|path, _, _| crate::lower_lolo_file(path));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let orb = dir.path().join("note.orb");
+        std::fs::write(&orb, crate::emit::orb_json(NOTE, "note.lolo").unwrap()).unwrap();
+        let options = from_json(serde_json::json!({ "stamp": true, "path": orb.display().to_string() })).unwrap();
+        let answer = json(&ProgramHost.run("program/read", &[Value::String(String::new()), options]).expect("stamps"));
+        let expected = crate::commands::stamp::stamped_json(&orb, None, None).expect("orb stamp");
+        assert_eq!(answer["text"], serde_json::Value::String(expected.clone()));
+        assert_eq!(answer["program"], serde_json::from_str::<serde_json::Value>(&expected).unwrap());
+        let out = dir.path().join("stamped.orb");
+        let options = from_json(serde_json::json!({
+            "stamp": true, "path": orb.display().to_string(), "prior": orb.display().to_string(), "output": out.display().to_string()
+        }))
+        .unwrap();
+        let written = json(&ProgramHost.run("program/read", &[Value::String(String::new()), options]).expect("stamps"));
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), text_of(&written, "text"), "--output writes the stamped text");
+        let with_prior = crate::commands::stamp::stamped_json(&orb, Some(&orb), None).unwrap();
+        assert_eq!(text_of(&written, "text"), with_prior, "--prior anchors the ids");
+    }
+
+    #[test]
+    fn control_read_with_stamp_refuses_a_relative_path_an_unknown_option_and_a_missing_file() {
+        let read = |options: serde_json::Value| {
+            ProgramHost
+                .run("program/read", &[Value::String(String::new()), from_json(options).unwrap()])
+                .unwrap_err()
+                .message
+        };
+        assert!(read(serde_json::json!({ "stamp": true, "path": "note.orb" })).contains("absolute `path`"));
+        assert!(read(serde_json::json!({ "stamp": true, "path": "/x/note.orb", "resolve": true })).contains("unsupported option \"resolve\""));
+        assert!(read(serde_json::json!({ "stamp": true, "path": "/nowhere/note.orb" })).contains("Failed to read"));
+    }
+
+    fn generate_with(options: serde_json::Value) -> Result<Value, SubstrateFailure> {
+        ProgramHost.run("program/eval", &[Value::Null, from_json(options).unwrap()])
+    }
+
+    #[test]
+    fn eval_with_generate_reports_what_orb_compile_prints() {
+        orbital_compiler::loader::register_source_lowerer(|path, _, _| crate::lower_lolo_file(path));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("note.lolo");
+        std::fs::write(&file, NOTE).unwrap();
+        let output = dir.path().join("out");
+        let answer = json(
+            &generate_with(serde_json::json!({
+                "generate": { "path": file.display().to_string(), "output": output.display().to_string(), "shell": "typescript" }
+            }))
+            .expect("compiles"),
+        );
+        let lines = answer["lines"].as_array().expect("lines");
+        assert_eq!(lines[0], format!("Compiling schema: {}", file.display()));
+        assert_eq!(lines[2], "Target shell: Typescript");
+        assert_eq!(lines[3], "Mode: Full");
+        let files = answer["files"].as_u64().expect("files");
+        assert!(files > 0 && lines.iter().any(|l| *l == format!("✅ Generated {files} files")), "{answer}");
+        assert!(answer["warnings"].is_array() && answer["nextSteps"].is_array(), "{answer}");
+        assert!(output.exists(), "the project is written");
+    }
+
+    #[test]
+    fn control_eval_with_generate_refuses_a_relative_path_an_unknown_option_and_a_missing_shell() {
+        let refusal = |options: serde_json::Value| generate_with(options).unwrap_err().message;
+        assert!(refusal(serde_json::json!({ "generate": { "path": "n.lolo", "output": "/o", "shell": "typescript" } })).contains("absolute `path`"));
+        assert!(refusal(serde_json::json!({ "generate": { "path": "/n.lolo", "output": "o", "shell": "typescript" } })).contains("absolute `output`"));
+        assert!(refusal(serde_json::json!({ "generate": { "path": "/n.lolo", "output": "/o", "shell": "typescript", "verbose": true } })).contains("unsupported option \"verbose\""));
+        assert!(refusal(serde_json::json!({ "generate": { "path": "/n.lolo", "output": "/o" } })).contains("needs the `shell`"));
+        assert!(refusal(serde_json::json!({ "generate": { "path": "/n.lolo", "output": "/o", "shell": "cobol" } })).contains("not one of the accepted values"));
+        assert!(refusal(serde_json::json!({ "generate": { "path": "/n.lolo", "output": "/o", "shell": "typescript" }, "final": true })).contains("unsupported option \"final\""));
+        assert!(refusal(serde_json::json!({ "generate": { "path": "/nowhere/n.lolo", "output": "/o", "shell": "typescript" } })).contains("program/eval:"));
+    }
+
     #[test]
     fn step_with_a_raw_report_is_what_orb_execute_steps_prints() {
         orbital_compiler::loader::register_source_lowerer(|path, _, _| crate::lower_lolo_file(path));

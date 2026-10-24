@@ -32,7 +32,7 @@ pub(crate) struct ProgramCommand {
 /// The bootloader's own words: clap takes them before any program discovery (so a broken package can be repaired
 /// with `orb update|add|remove`), and a `cli` program declaring `cli-<word>` or `cli-<word>-…` is refused.
 const RESERVED_COMMANDS: &[&str] = &[
-    "parse", "lower", "validate", "compile", "emit", "evaluate", "stamp", "update", "add", "remove", "list", "run", "help", "--help",
+    "update", "add", "remove", "list", "run", "help", "--help",
     "-h", "--version", "-V",
 ];
 
@@ -80,7 +80,8 @@ pub(crate) fn resolve_program_command(args: &[String], cwd: &Path, user_store: &
 
 /// The installed program in a `cli` topic that declares the hook `cli-<command>`, from the behavior packages resolved
 /// from `cwd` and then `user_store`. More than one is an error that names them.
-pub(crate) fn find_command_program(command: &str, cwd: &Path, user_store: &Path) -> anyhow::Result<Option<PathBuf>> {
+#[cfg(test)]
+fn find_command_program(command: &str, cwd: &Path, user_store: &Path) -> anyhow::Result<Option<PathBuf>> {
     let programs = cli_programs(cwd, user_store)?;
     let hook = hook_name(command);
     let found = programs.declaring(&hook)?;
@@ -135,8 +136,8 @@ fn cli_programs(cwd: &Path, user_store: &Path) -> anyhow::Result<CliPrograms> {
                 continue;
             };
             let source = std::fs::read_to_string(&path).map_err(|e| anyhow::anyhow!("read {}: {e}", path.display()))?;
-            let hooks = match orbital_lolo::parse_str(&source) {
-                Ok(program) => program.app.inbound,
+            let hooks = match orbital_lolo::parse_app_header(&source) {
+                Ok(header) => header.inbound,
                 Err(inner) => {
                     programs
                         .unusable
@@ -236,35 +237,6 @@ pub(crate) fn run_program(program: &Path) -> anyhow::Result<()> {
 /// The behavior `orb serve` composes beside the app.
 const SERVER_BEHAVIOR: &str = "std/behaviors/std-http-server";
 
-/// What `orb serve` asks of the composed `std-http-server`.
-pub(crate) struct ServeOptions<'a> {
-    pub(crate) host: &'a str,
-    pub(crate) port: u16,
-    pub(crate) no_mock: bool,
-    pub(crate) client_dir: Option<&'a Path>,
-}
-
-/// The compose overrides the options map to: the `std-http1` host and port with the listen grant they are checked
-/// against, and the client directory with its read grant (relative to the working directory, where the server reads it).
-fn serve_overrides(options: &ServeOptions, cwd: &Path) -> anyhow::Result<serde_json::Value> {
-    let client_dir = match options.client_dir {
-        None => None,
-        Some(dir) => {
-            let absolute = if dir.is_absolute() { dir.to_path_buf() } else { cwd.join(dir) };
-            let relative = absolute.strip_prefix(cwd).map_err(|_| {
-                anyhow::anyhow!("--client-dir {} is outside the working directory {}; the server reads its client under it", dir.display(), cwd.display())
-            })?;
-            Some(
-                relative
-                    .to_str()
-                    .ok_or_else(|| anyhow::anyhow!("--client-dir {} is not valid UTF-8", dir.display()))?
-                    .to_string(),
-            )
-        }
-    };
-    Ok(server_overrides(options.host, options.port, false, client_dir.as_deref()))
-}
-
 /// The `std-http1` host and port with their listen grant, whether the `PORT` environment variable replaces the port
 /// (with the `env PORT` listen grant on the host), and a client directory (relative to the server's working directory)
 /// with its read grant.
@@ -357,8 +329,6 @@ pub(crate) fn served_schema(app: &orbital_core::OrbitalSchema, overrides: &serde
     orbital_shell_rust::host::boot::compose(programs, &app_name, Some(grants_only(overrides)), &host)
 }
 
-/// `orb serve <program>`: the program composed with `std-http-server` by the host's `program/compose`, booted, and held
-/// like `orb run`.
 /// Run the program a cli command handed back (`orb-run` in its answer's headers), as the bootloader runs every program.
 /// `orb-run: server` boots the composed app in the body as `orb serve` does: catalogs beside `orb-app`, the mock store
 /// under `orb-mock: on`, `INIT` mounted on the server side, held until a signal.
@@ -381,38 +351,6 @@ pub(crate) fn run_handoff(answer: &CommandAnswer) -> anyhow::Result<()> {
     let host = orbital_shell_rust::host::SubstratePort(std::sync::Arc::new(crate::commands::program_host::ProgramHost));
     let stop = stop_on_signal()?;
     let runtime = orbital_shell_rust::host::boot::boot_app(schema, host, catalogs, mock, &std::env::vars().collect(), false)?;
-    orbital_shell_rust::host::run::mount_init(&runtime, orbital_shell_rust::host::run::ProtocolSide::Server).map_err(|e| anyhow::anyhow!("INIT: {e}"))?;
-    hold(&runtime, &stop);
-    Ok(())
-}
-
-pub(crate) fn serve_program(program: &Path, options: &ServeOptions) -> anyhow::Result<()> {
-    let cwd = std::env::current_dir()?;
-    let overrides = serve_overrides(options, &cwd)?;
-    let resolved = crate::commands::dev::resolve_to_temp(program)?;
-    let raw = std::fs::read_to_string(&resolved).map_err(|e| anyhow::anyhow!("read {}: {e}", resolved.display()))?;
-    let app: serde_json::Value = serde_json::from_str(&raw).map_err(|e| anyhow::anyhow!("{}: {e}", resolved.display()))?;
-    let locales: Vec<String> = app
-        .get("locales")
-        .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|l| l.as_str().map(str::to_string))
-        .collect();
-    let catalogs = orbital_shell_rust::host::boot::read_catalogs(&resolved, &locales)?;
-    let (programs, app_name) = served_programs(app, &overrides)?;
-    let host = orbital_shell_rust::host::SubstratePort(std::sync::Arc::new(crate::commands::program_host::ProgramHost));
-    let stop = stop_on_signal()?;
-    let runtime = orbital_shell_rust::host::boot::boot_composed(
-        programs,
-        &app_name,
-        Some(grants_only(&overrides)),
-        host,
-        catalogs,
-        !options.no_mock,
-        &std::env::vars().collect(),
-        false,
-    )?;
     orbital_shell_rust::host::run::mount_init(&runtime, orbital_shell_rust::host::run::ProtocolSide::Server).map_err(|e| anyhow::anyhow!("INIT: {e}"))?;
     hold(&runtime, &stop);
     Ok(())
@@ -674,8 +612,8 @@ orbital EchoOrbital {
     fn a_reserved_word_reaches_clap_even_with_a_broken_cli_program() {
         let (cwd, store) = project("reserved-broken", "cli");
         with_broken_program(&cwd);
-        let lines: [&[&str]; 8] =
-            [&["update"], &["add", "@x/y"], &["remove", "@x/y"], &["list"], &["validate", "a.lolo"], &["emit", "orb"], &["--version"], &["--help"]];
+        let lines: [&[&str]; 6] =
+            [&["update"], &["add", "@x/y"], &["remove", "@x/y"], &["list"], &["--version"], &["--help"]];
         for args in lines {
             assert_eq!(resolve_program_command(&words(args), &cwd, &store).unwrap().map(|c| c.command), None, "{args:?}");
         }

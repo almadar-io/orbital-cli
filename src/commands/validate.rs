@@ -38,48 +38,6 @@ pub(crate) fn source_findings(content: &str) -> Vec<Finding> {
     }]
 }
 
-/// Validate schema using native Rust validation
-pub(crate) fn validate_schema(
-    path: &PathBuf,
-    json_output: bool,
-    patterns_path: Option<&std::path::Path>,
-    services_path: Option<&std::path::Path>,
-    deny_warnings: bool,
-    final_program: bool,
-) -> anyhow::Result<()> {
-    if json_output {
-        let output = validation_report(
-            path,
-            patterns_path,
-            services_path,
-            deny_warnings,
-            final_program,
-        )?;
-        println!("{}", serde_json::to_string_pretty(&output)?);
-        return Ok(());
-    }
-    if let Err(e) = tracing::info_span!(target: ns::CLI, "language data").in_scope(crate::utils::patterns::ensure_language_ready) {
-        anyhow::bail!("{}: {e}", e.code());
-    }
-
-    // Load extra patterns (explicit path or auto-discover)
-    let extra_patterns = load_extra_patterns(path, patterns_path);
-
-    // Load services registry (explicit path or the installed @almadar/core)
-    let service_registry = load_services_registry(services_path)?;
-
-    println!("Validating schema: {}", path.display());
-
-    // Use native Rust validation only
-    validate_schema_native(
-        path,
-        extra_patterns,
-        service_registry,
-        deny_warnings,
-        final_program,
-    )
-}
-
 /// `orb validate --json`'s report as a value — what the CLI prints and `orb mcp` returns.
 pub(crate) fn validation_report(
     path: &std::path::Path,
@@ -1156,45 +1114,6 @@ pub(crate) fn validate_schema_core(
         warnings,
         inlined: Some(inlined),
     }
-}
-
-/// Native Rust schema validation (human text output). Thin formatting layer
-/// over `run_full_validation` so `orb validate` and `orb verify` share one
-/// validation code path and can never diverge.
-fn validate_schema_native(
-    path: &PathBuf,
-    extra_patterns: Option<orbital_compiler::ExtraPatterns>,
-    service_registry: orbital_compiler::embedded::ServiceRegistryData,
-    deny_warnings: bool,
-    final_program: bool,
-) -> anyhow::Result<()> {
-    let diags = run_full_validation(path, extra_patterns, service_registry, final_program)?;
-
-    if !diags.errors.is_empty() {
-        eprintln!("Schema validation errors:");
-        for e in &diags.errors {
-            eprintln!("  \u{274c} {e}");
-        }
-        anyhow::bail!(
-            "Schema validation failed with {} error(s)",
-            diags.errors.len()
-        );
-    }
-
-    if !diags.warnings.is_empty() {
-        println!("Schema validation warnings:");
-        for w in &diags.warnings {
-            println!("  \u{26a0}\u{fe0f}  {w}");
-        }
-    }
-    if !validation_passes(diags.errors.len(), diags.warnings.len(), deny_warnings) {
-        anyhow::bail!(
-            "Schema validation failed: {} warning(s) under --deny-warnings",
-            diags.warnings.len()
-        );
-    }
-
-    Ok(())
 }
 
 #[cfg(test)]

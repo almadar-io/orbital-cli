@@ -89,41 +89,6 @@ pub(crate) struct CompileRequest<'a> {
     pub emit_orb: Option<&'a std::path::Path>,
 }
 
-/// Compile schema to generated code and print the report.
-pub(crate) fn compile_schema(
-    path: &PathBuf,
-    output: &PathBuf,
-    shell: ShellType,
-    mode: ShellMode,
-    frontend: Option<ShellType>,
-    backend: Option<ShellType>,
-    backend_url: Option<String>,
-    patterns_path: Option<&std::path::Path>,
-    dev_logs: bool,
-    host: HostArg,
-    address: &shell_programs::ServedAddress,
-    emit_orb: Option<&std::path::Path>,
-) -> anyhow::Result<()> {
-    let report = compile_run(CompileRequest {
-        path,
-        output,
-        shell,
-        mode,
-        frontend,
-        backend,
-        backend_url,
-        patterns_path,
-        dev_logs,
-        host,
-        address,
-        emit_orb,
-    })?;
-    for line in &report.lines {
-        println!("{line}");
-    }
-    Ok(())
-}
-
 /// The one compile pipeline: validates, generates, writes the project, and reports what `orb compile` prints.
 pub(crate) fn compile_run(request: CompileRequest) -> anyhow::Result<CompileReport> {
     let CompileRequest {
