@@ -77,7 +77,7 @@ fn emit_ts_contains_expected_exports() {
     for needle in [
         "export interface ModalRecord",
         "export type ModalRecordModalEventPayloadMap =",
-        "// ───── packages/shared/src/program.json ─────",
+        "// ───── packages/client/public/program.client.orb ─────",
     ] {
         assert!(
             stdout.contains(needle),
@@ -111,7 +111,7 @@ fn emit_py_contains_expected_classes() {
 
 // --- Phase 2: section filter ----------------------------------------------
 
-// The kernel host interprets trait logic from `program.json`; no per-trait state, hook or component file exists to select.
+// The kernel host interprets trait logic from the program (`program.orb`); no per-trait state, hook or component file exists to select.
 #[test]
 fn emit_ts_section_traits_matches_no_file_under_the_kernel_host() {
     let orb = std_modal_orb();
@@ -465,7 +465,7 @@ fn find_emit<'a>(value: &'a serde_json::Value, event: &str) -> Option<&'a serde_
 }
 
 /// An authored `null` inside a payload literal is a value the program runs with (`orb lower`, `orb resolve` and the
-/// embedded kernel all keep it), so `orb compile` must not strip it from `schema.orb`, `resolved.orb` or `program.json`;
+/// embedded kernel all keep it), so `orb compile` must not strip it from `schema.orb`, `resolved.orb` or the shipped programs;
 /// a schema field left unset stays out of the JSON, which the control checks: the only null anywhere is the authored one.
 #[test]
 fn compile_keeps_an_authored_null_payload_literal_and_leaves_unset_schema_fields_out() {
@@ -474,7 +474,7 @@ fn compile_keeps_an_authored_null_payload_literal_and_leaves_unset_schema_fields
     let (_stdout, stderr, ok) = run_orb(&["compile", lolo.to_str().unwrap(), "--shell", "typescript", "--host", "kernel", "-o", out.path().to_str().unwrap()]);
     assert!(ok, "compile exited non-zero. stderr:\n{stderr}");
 
-    for file in ["schema.orb", "resolved.orb", "packages/shared/src/program.json"] {
+    for file in ["schema.orb", "resolved.orb", "packages/server/generated/program.orb", "packages/client/public/program.client.orb"] {
         let text = std::fs::read_to_string(out.path().join(file)).unwrap_or_else(|e| panic!("{file}: {e}"));
         let json: serde_json::Value = serde_json::from_str(&text).unwrap_or_else(|e| panic!("{file} is not JSON: {e}"));
         let payload = find_emit(&json, "NULL_FAILED").unwrap_or_else(|| panic!("{file}: the emit effect is missing"));

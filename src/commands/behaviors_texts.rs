@@ -6,7 +6,6 @@
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
 use std::io::Write;
 
 use super::behaviors_catalog::{scoped_behaviors, text_facts};
@@ -31,7 +30,6 @@ pub(crate) struct TraitFacts {
     pub name: String,
     /// The upstream `Alias.traits.Y` this trait composes; absent for a trait the behavior defines.
     pub reference: Option<String>,
-    pub capabilities: Vec<String>,
     pub knobs: Vec<KnobFacts>,
 }
 
@@ -189,7 +187,7 @@ pub(crate) fn build_capability_text(entry: &RegistryEntry) -> Option<String> {
     non_empty(&entry.capabilities).map(|c| format!("Capabilities (organism): {c}"))
 }
 
-pub(crate) fn build_entry_text(entry: &RegistryEntry, traits: &[&TraitFacts]) -> String {
+pub(crate) fn build_entry_text(entry: &RegistryEntry) -> String {
     let mut parts = vec![entry.name.clone()];
     parts.extend(non_empty(&entry.description).map(str::to_string));
     parts.extend(build_capability_text(entry));
@@ -202,16 +200,6 @@ pub(crate) fn build_entry_text(entry: &RegistryEntry, traits: &[&TraitFacts]) ->
     );
     if !entry.connectable_events.is_empty() {
         parts.push(format!("Events: {}", entry.connectable_events.join(" ")));
-    }
-    let capabilities: BTreeSet<&str> = traits
-        .iter()
-        .flat_map(|t| t.capabilities.iter().map(String::as_str))
-        .collect();
-    if !capabilities.is_empty() {
-        parts.push(format!(
-            "Capabilities: {}",
-            capabilities.into_iter().collect::<Vec<_>>().join(" ")
-        ));
     }
     parts.join("\n")
 }
@@ -258,9 +246,8 @@ pub(crate) fn texts_of(
     let want = |k: TextKind| kind.is_none() || kind == Some(k);
     let mut out = Vec::new();
     if want(TextKind::Organism) {
-        for ((key, entry), orbitals) in registry.iter().zip(facts) {
-            let traits: Vec<&TraitFacts> = orbitals.iter().flat_map(|o| &o.traits).collect();
-            out.push(entry_of(key.clone(), build_entry_text(entry, &traits)));
+        for (key, entry) in registry {
+            out.push(entry_of(key.clone(), build_entry_text(entry)));
         }
     }
     if want(TextKind::Capability) {
@@ -299,17 +286,12 @@ pub(crate) fn texts_of(
     out
 }
 
-/// The organism text and the `#capabilities` text of one index entry, from the entry alone: the
-/// capabilities its traits resolve to ride in the entry as `trait_capabilities`, so no behavior is
-/// described. Equal to `texts_of`'s organism and capability texts for the same entry.
+/// The organism text and the `#capabilities` text of one index entry, from the entry alone, so no
+/// behavior is described. Equal to `texts_of`'s organism and capability texts for the same entry.
 pub(crate) fn index_texts(entry: &IndexEntry) -> (String, Option<String>) {
     let registry = RegistryEntry::from(entry);
-    let traits = TraitFacts {
-        capabilities: entry.trait_capabilities.clone(),
-        ..Default::default()
-    };
     (
-        build_entry_text(&registry, &[&traits]),
+        build_entry_text(&registry),
         build_capability_text(&registry),
     )
 }
@@ -439,17 +421,9 @@ mod tests {
             connectable_events: vec!["VALIDATE_PROGRAM".into(), "RESET".into()],
             ..Default::default()
         };
-        let own = TraitFacts {
-            capabilities: vec!["b".into(), "a".into()],
-            ..Default::default()
-        };
-        let other = TraitFacts {
-            capabilities: vec!["a".into(), "c".into()],
-            ..Default::default()
-        };
         assert_eq!(
-            build_entry_text(&entry, &[&own, &other]),
-            "std-agent-fix-loop\nAgent fix loop.\nCapabilities (organism): program repair, evaluate a program\nEntity: FixLoop\nEvents: VALIDATE_PROGRAM RESET\nCapabilities: a b c"
+            build_entry_text(&entry),
+            "std-agent-fix-loop\nAgent fix loop.\nCapabilities (organism): program repair, evaluate a program\nEntity: FixLoop\nEvents: VALIDATE_PROGRAM RESET"
         );
     }
 
@@ -460,7 +434,7 @@ mod tests {
             description: Some(String::new()),
             ..Default::default()
         };
-        assert_eq!(build_entry_text(&entry, &[]), "std-x");
+        assert_eq!(build_entry_text(&entry), "std-x");
         assert_eq!(build_capability_text(&entry), None);
     }
 
@@ -674,7 +648,6 @@ mod tests {
             default_entity_name: "Item".into(),
             connectable_events: Vec::new(),
             traits: Vec::new(),
-            trait_capabilities: Vec::new(),
         }
     }
 
@@ -704,7 +677,6 @@ mod tests {
             default_entity_name: "X".into(),
             connectable_events: vec!["GO".into(), "STOP".into()],
             traits: vec!["A".into(), "B".into(), "C".into()],
-            trait_capabilities: vec!["a".into(), "b".into(), "c".into()],
             ..index_entry("std-x")
         };
         let (organism, capability) = index_texts(&entry);
@@ -713,12 +685,10 @@ mod tests {
             traits: vec![
                 TraitFacts {
                     name: "A".into(),
-                    capabilities: vec!["a".into(), "b".into()],
                     ..Default::default()
                 },
                 TraitFacts {
                     name: "B".into(),
-                    capabilities: vec!["a".into(), "c".into()],
                     ..Default::default()
                 },
                 TraitFacts {
@@ -732,7 +702,7 @@ mod tests {
         assert_eq!(want[0].text, organism);
         assert_eq!(want[1].key, "std-x#capabilities");
         assert_eq!(Some(want[1].text.clone()), capability);
-        // Control: an entry whose traits resolve to no capabilities carries none in its text.
+        // Control: an entry with trait names only carries no capability text.
         let names_only = IndexEntry {
             traits: vec!["A".into()],
             default_entity_name: String::new(),

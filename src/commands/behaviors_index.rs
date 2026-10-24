@@ -47,8 +47,6 @@ pub(crate) struct IndexEntry {
     pub default_entity_name: String,
     pub connectable_events: Vec<String>,
     pub traits: Vec<String>,
-    /// The capabilities the traits resolve to (composed traits included), sorted and unique.
-    pub trait_capabilities: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -408,15 +406,6 @@ fn entry_of(
         &topic,
         &facts.state_pattern,
     );
-    let spec = format!("{}/{}", pkg.prefix, file.name);
-    let trait_capabilities = {
-        let mut p = programs.borrow_mut();
-        let Programs {
-            packages, loader, ..
-        } = &mut *p;
-        let resolved = super::behaviors_catalog::resolve_with_loader(loader, packages, &spec, None)?;
-        super::behaviors_catalog::resolved_trait_capabilities(&resolved, &spec)?
-    };
     Ok(Some(IndexEntry {
         name: file.name.clone(),
         dirs: file.dirs.clone(),
@@ -429,7 +418,6 @@ fn entry_of(
         default_entity_name: facts.default_entity_name,
         connectable_events: facts.connectable_events,
         traits: facts.traits,
-        trait_capabilities,
     }))
 }
 
@@ -674,7 +662,6 @@ mod tests {
                 now.insert("defaultEntityName".into(), json!(entry.default_entity_name));
                 now.insert("connectableEvents".into(), json!(entry.connectable_events));
                 now.insert("traits".into(), json!(entry.traits));
-                now.insert("traitCapabilities".into(), json!(entry.trait_capabilities));
                 if let Some(v) = &entry.exposure { now.insert("exposure".into(), json!(v)); }
                 if let Some(v) = &entry.capabilities { now.insert("capabilities".into(), json!(v)); }
                 if let Some(v) = &entry.pattern { now.insert("pattern".into(), json!(v)); }
@@ -691,7 +678,7 @@ mod tests {
                         .map(|a| a.iter().map(|v| v.as_str().unwrap().to_string()).collect())
                         .unwrap_or_default()
                 };
-                let checks: [(&str, bool); 10] = [
+                let checks: [(&str, bool); 9] = [
                     ("level", want["level"] == entry.level.as_str()),
                     ("topic", want["topic"] == entry.topic.as_str()),
                     ("exposure", want["exposure"].as_str() == entry.exposure.as_deref()),
@@ -701,7 +688,6 @@ mod tests {
                     ("defaultEntityName", want["defaultEntityName"] == entry.default_entity_name.as_str()),
                     ("connectableEvents", strings("connectableEvents") == entry.connectable_events),
                     ("traits", strings("traits") == entry.traits),
-                    ("traitCapabilities", strings("traitCapabilities") == entry.trait_capabilities),
                 ];
                 for (field, ok) in checks {
                     if !ok {
@@ -709,7 +695,6 @@ mod tests {
                         let got = match field {
                             "traits" => serde_json::to_string(&entry.traits).unwrap(),
                             "connectableEvents" => serde_json::to_string(&entry.connectable_events).unwrap(),
-                            "traitCapabilities" => serde_json::to_string(&entry.trait_capabilities).unwrap(),
                             "description" => entry.description.clone(),
                             "defaultEntityName" => entry.default_entity_name.clone(),
                             _ => String::new(),
@@ -725,7 +710,7 @@ mod tests {
                                 b.iter().filter(|x| !a.contains(x)).collect::<Vec<_>>()
                             )
                         };
-                        let (want_field, got) = if matches!(field, "traits" | "connectableEvents" | "traitCapabilities") {
+                        let (want_field, got) = if matches!(field, "traits" | "connectableEvents") {
                             (differs(&want_field, &got), String::new())
                         } else {
                             (want_field, got)

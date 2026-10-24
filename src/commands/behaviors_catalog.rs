@@ -441,27 +441,6 @@ pub(crate) fn resolve_import(
     }))
 }
 
-/// The capabilities the traits of the behavior `spec` resolves to (composed traits included), sorted and unique.
-pub(crate) fn resolved_trait_capabilities(
-    resolved: &Resolved,
-    spec: &str,
-) -> anyhow::Result<Vec<String>> {
-    use orbital_core::schema::TraitReference;
-    let program = resolved_program(resolved, spec)?;
-    Ok(program
-        .orbitals
-        .iter()
-        .flat_map(|o| o.traits.iter())
-        .filter_map(|t| match t {
-            TraitReference::Inline(td) => Some(td.capabilities.iter().cloned()),
-            _ => None,
-        })
-        .flatten()
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect())
-}
-
 #[derive(Serialize)]
 struct KnobOut {
     key: String,
@@ -794,8 +773,6 @@ struct TraitOut {
     /// The upstream trait this one composes (`trait X = Alias.traits.Y`), as written; absent for a trait the behavior defines itself.
     #[serde(rename = "ref", skip_serializing_if = "Option::is_none")]
     reference: Option<String>,
-    /// The trait's declared `@capabilities` tags.
-    capabilities: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -1040,7 +1017,6 @@ fn describe_resolved(
                 traits.push(TraitOut {
                     rebindable: td.entity_rebindable == Some(true),
                     reference: refs.get(&td.name).cloned(),
-                    capabilities: td.capabilities.clone(),
                     name: td.name.clone(),
                     config: declared_config_of(td.config.as_ref()),
                     knobs: knob_fields(
@@ -1441,12 +1417,9 @@ pub(crate) fn text_facts(spec: &str, organism: &str) -> anyhow::Result<Vec<Orbit
                     .traits
                     .iter()
                     .map(|t| {
-                        let mut capabilities = t.capabilities.clone();
-                        capabilities.sort();
                         TraitFacts {
                             name: t.name.clone(),
                             reference: t.reference.clone(),
-                            capabilities,
                             knobs: if *imported {
                                 Vec::new()
                             } else {
