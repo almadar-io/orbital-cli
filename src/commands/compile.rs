@@ -6,6 +6,7 @@ use crate::utils::{
     translate_schema_content, InputSyntax,
 };
 use crate::{HostArg, ShellMode, ShellType};
+use orbital_core::logging::ns;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -52,20 +53,43 @@ fn compiler_options_or_bail() -> anyhow::Result<orbital_compiler::CompilerOption
     Ok(options)
 }
 
-fn generate_options(verbose: bool, mode: orbital_compiler::ShellMode) -> anyhow::Result<orbital_compiler::GenerateOptions> {
+fn generate_options(mode: orbital_compiler::ShellMode) -> anyhow::Result<orbital_compiler::GenerateOptions> {
     Ok(orbital_compiler::GenerateOptions {
         // from_env, not Default: `orb compile` must honor installed behavior
         // packages exactly like `orb emit` (C-COMPILE-IGNORES-DEV-REGISTRIES).
         compiler: compiler_options_or_bail()?,
         copy_template: true,
         clean: false,
-        verbose,
         mode,
-        ..Default::default()
     })
 }
 
-/// Compile schema to generated code
+/// What one `orb compile` reports: the stdout lines, and the parts a program reads on their own.
+#[derive(Debug, Default)]
+pub(crate) struct CompileReport {
+    pub lines: Vec<String>,
+    pub files: usize,
+    pub warnings: Vec<String>,
+    pub next_steps: Vec<String>,
+}
+
+/// The inputs of one `orb compile`.
+pub(crate) struct CompileRequest<'a> {
+    pub path: &'a PathBuf,
+    pub output: &'a PathBuf,
+    pub shell: ShellType,
+    pub mode: ShellMode,
+    pub frontend: Option<ShellType>,
+    pub backend: Option<ShellType>,
+    pub backend_url: Option<String>,
+    pub patterns_path: Option<&'a std::path::Path>,
+    pub dev_logs: bool,
+    pub host: HostArg,
+    pub address: &'a shell_programs::ServedAddress<'a>,
+    pub emit_orb: Option<&'a std::path::Path>,
+}
+
+/// Compile schema to generated code and print the report.
 pub(crate) fn compile_schema(
     path: &PathBuf,
     output: &PathBuf,
@@ -75,21 +99,58 @@ pub(crate) fn compile_schema(
     backend: Option<ShellType>,
     backend_url: Option<String>,
     patterns_path: Option<&std::path::Path>,
-    verbose: bool,
     dev_logs: bool,
     host: HostArg,
     address: &shell_programs::ServedAddress,
     emit_orb: Option<&std::path::Path>,
 ) -> anyhow::Result<()> {
+    let report = compile_run(CompileRequest {
+        path,
+        output,
+        shell,
+        mode,
+        frontend,
+        backend,
+        backend_url,
+        patterns_path,
+        dev_logs,
+        host,
+        address,
+        emit_orb,
+    })?;
+    for line in &report.lines {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+/// The one compile pipeline: validates, generates, writes the project, and reports what `orb compile` prints.
+pub(crate) fn compile_run(request: CompileRequest) -> anyhow::Result<CompileReport> {
+    let CompileRequest {
+        path,
+        output,
+        shell,
+        mode,
+        frontend,
+        backend,
+        backend_url,
+        patterns_path,
+        dev_logs,
+        host,
+        address,
+        emit_orb,
+    } = request;
     // Handle mixed compilation (--frontend + --backend)
     if frontend.is_some() || backend.is_some() {
-        return compile_mixed(path, output, frontend, backend, verbose, address);
+        return compile_mixed(path, output, frontend, backend, address);
     }
 
-    println!("Compiling schema: {}", path.display());
-    println!("Output directory: {}", output.display());
-    println!("Target shell: {:?}", shell);
-    println!("Mode: {:?}", mode);
+    let mut lines = vec![
+        format!("Compiling schema: {}", path.display()),
+        format!("Output directory: {}", output.display()),
+        format!("Target shell: {:?}", shell),
+        format!("Mode: {:?}", mode),
+    ];
 
     // Syntax dispatch: detect LOLO vs Orb JSON syntax.
     // Explicit .lolo extension → always LOLO (no detection needed).
@@ -118,16 +179,7 @@ pub(crate) fn compile_schema(
                     anyhow::anyhow!("Failed to compile LOLO source: {}", e.render_with_hint())
                 })?
         };
-        if verbose {
-            println!(
-                "Detected LOLO syntax{}",
-                if is_lolo_ext {
-                    " (.lolo file)"
-                } else {
-                    " in .orb file"
-                }
-            );
-        }
+        tracing::info!(target: ns::CLI, lolo_file = is_lolo_ext, "detected LOLO syntax");
         // A schema field left unset is skipped by its type's serializer; a `null` the program authored inside an
         // expression or payload literal is a value and stays (`orb lower` and `orb resolve` keep it too).
         let value = serde_json::to_value(&schema)
@@ -141,9 +193,7 @@ pub(crate) fn compile_schema(
         };
         std::fs::write(&target, &json)
             .map_err(|e| anyhow::anyhow!("Failed to write lowered .orb: {}", e))?;
-        if verbose {
-            println!("Lowered to {}", target.display());
-        }
+        tracing::info!(target: ns::CLI, path = %target.display(), "lowered");
         target
     } else {
         // Orb JSON path — translate i18n schemas to English before compilation
@@ -173,7 +223,6 @@ pub(crate) fn compile_schema(
         .map_err(|e| anyhow::anyhow!("Failed to read schema file: {}", e))?;
 
     let options = generate_options(
-        verbose,
         match mode {
             ShellMode::Full => orbital_compiler::ShellMode::Full,
             ShellMode::Client => orbital_compiler::ShellMode::Client,
@@ -202,9 +251,34 @@ pub(crate) fn compile_schema(
         }
     }
 
+    refuse_invalid(path, path)?;
     let response = shell_programs::generate(shell.program(), &compile_path, path, output, &options, shell_options, address)?;
-    shell_programs::report(&response);
-    Ok(())
+    for file in response.files.iter().filter(|f| f.ends_with(".orb")) {
+        refuse_invalid(&output.join(file), path)?;
+    }
+    lines.extend(shell_programs::report_lines(&response));
+    Ok(CompileReport {
+        lines,
+        files: response.files.len(),
+        warnings: response.warnings.clone(),
+        next_steps: response.next_steps.clone(),
+    })
+}
+
+/// `orb compile` writes only programs that pass `orb validate`: the source before anything is generated, then every
+/// `.orb` the shell wrote.
+fn refuse_invalid(program: &Path, source: &Path) -> anyhow::Result<()> {
+    let registry = crate::utils::load_services_registry(None)?;
+    let diags = crate::commands::validate::run_full_validation(program, None, registry, false)?;
+    if diags.errors.is_empty() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "{} fails `orb validate` with {} error(s), so it is not compiled:\n{}",
+        if program == source { program.display().to_string() } else { format!("{} (compiled from {})", program.display(), source.display()) },
+        diags.errors.len(),
+        diags.errors.join("\n")
+    )
 }
 
 /// Compile with mixed frontend/backend shells
@@ -213,23 +287,25 @@ fn compile_mixed(
     output: &PathBuf,
     frontend: Option<ShellType>,
     backend: Option<ShellType>,
-    verbose: bool,
     address: &shell_programs::ServedAddress,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<CompileReport> {
     for shell in [frontend, backend].into_iter().flatten() {
         if let ShellType::ChromeExtension = shell {
             anyhow::bail!("The chrome-extension shell is a whole program; compile it without --frontend/--backend");
         }
     }
+    refuse_invalid(path, path)?;
     match backend {
         Some(ShellType::Android) => anyhow::bail!("Android shell cannot be used as a backend"),
         Some(ShellType::Ios) => anyhow::bail!("iOS shell cannot be used as a backend"),
         _ => {}
     }
 
-    println!("Compiling schema: {}", path.display());
-    println!("Output directory: {}", output.display());
-    println!("Mixed mode compilation:");
+    let mut lines = vec![
+        format!("Compiling schema: {}", path.display()),
+        format!("Output directory: {}", output.display()),
+        "Mixed mode compilation:".to_string(),
+    ];
 
     // Auto-detect LOLO vs Orb JSON syntax, handle i18n translation
     let content_raw = std::fs::read_to_string(path)
@@ -269,7 +345,7 @@ fn compile_mixed(
 
     if let Some(frontend_shell) = frontend {
         let frontend_output = output.join("frontend");
-        println!("  Frontend: {:?} -> {}", frontend_shell, frontend_output.display());
+        lines.push(format!("  Frontend: {:?} -> {}", frontend_shell, frontend_output.display()));
         let mut shell_options = BTreeMap::new();
         if let ShellType::Typescript = frontend_shell {
             shell_options.insert(
@@ -277,27 +353,35 @@ fn compile_mixed(
                 Value::from(detect_language(&content_raw).unwrap_or_else(|| "en".to_string())),
             );
         }
-        let options = generate_options(verbose, orbital_compiler::ShellMode::Client)?;
+        let options = generate_options(orbital_compiler::ShellMode::Client)?;
         let response = shell_programs::generate(frontend_shell.program(), &compile_path, path, &frontend_output, &options, shell_options, address)?;
+        for file in response.files.iter().filter(|f| f.ends_with(".orb")) {
+            refuse_invalid(&frontend_output.join(file), path)?;
+        }
         total_files += response.files.len();
     }
 
     if let Some(backend_shell) = backend {
         let backend_output = output.join("backend");
-        println!("  Backend: {:?} -> {}", backend_shell, backend_output.display());
-        let options = generate_options(verbose, orbital_compiler::ShellMode::Server)?;
+        lines.push(format!("  Backend: {:?} -> {}", backend_shell, backend_output.display()));
+        let options = generate_options(orbital_compiler::ShellMode::Server)?;
         let response = shell_programs::generate(backend_shell.program(), &compile_path, path, &backend_output, &options, BTreeMap::new(), address)?;
+        for file in response.files.iter().filter(|f| f.ends_with(".orb")) {
+            refuse_invalid(&backend_output.join(file), path)?;
+        }
         total_files += response.files.len();
     }
 
-    println!("\n✅ Generated {} total files", total_files);
+    lines.push(String::new());
+    lines.push(format!("✅ Generated {} total files", total_files));
+    let mut next_steps = Vec::new();
 
     // Generate docker-compose for mixed deployment
     if frontend.is_some() && backend.is_some() {
         let docker_compose = generate_docker_compose(frontend, backend);
         let compose_path = output.join("docker-compose.yaml");
         std::fs::write(&compose_path, docker_compose)?;
-        println!("📦 Generated docker-compose.yaml");
+        lines.push("📦 Generated docker-compose.yaml".to_string());
 
         // Generate .env file for frontend with API URL
         let backend_url = match backend {
@@ -334,20 +418,32 @@ fn compile_mixed(
         if !env_content.is_empty() {
             let env_path = output.join("frontend").join(".env");
             std::fs::write(&env_path, &env_content)?;
-            println!("🔧 Generated frontend/.env with API_URL");
+            lines.push("🔧 Generated frontend/.env with API_URL".to_string());
         }
 
-        println!("\nNext steps:");
-        println!("  cd {}", output.display());
-        println!("  docker-compose up");
-        println!("\nOr run separately:");
-        println!("  # Terminal 1: Backend");
-        println!("  cd backend && python -m venv .venv && source .venv/bin/activate && pip install -e . && python -m orbital_app");
-        println!("  # Terminal 2: Frontend");
-        println!("  cd frontend && npm install && npm run dev");
+        let steps = [
+            format!("cd {}", output.display()),
+            "docker-compose up".to_string(),
+            String::new(),
+            "Or run separately:".to_string(),
+            "# Terminal 1: Backend".to_string(),
+            "cd backend && python -m venv .venv && source .venv/bin/activate && pip install -e . && python -m orbital_app".to_string(),
+            "# Terminal 2: Frontend".to_string(),
+            "cd frontend && npm install && npm run dev".to_string(),
+        ];
+        lines.push(String::new());
+        lines.push("Next steps:".to_string());
+        for step in steps {
+            if step.is_empty() {
+                lines.push(step);
+            } else {
+                lines.push(format!("  {step}"));
+                next_steps.push(step);
+            }
+        }
     }
 
-    Ok(())
+    Ok(CompileReport { lines, files: total_files, warnings: Vec::new(), next_steps })
 }
 
 /// Generate docker-compose.yaml for mixed deployment

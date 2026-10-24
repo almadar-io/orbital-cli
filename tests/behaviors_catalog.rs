@@ -1302,45 +1302,6 @@ fn describe_carries_the_traits_state_machine_as_the_program_runs_it() {
         .any(|t| t["event"] == "OPEN"));
 }
 
-const DIAGRAM_ORB: &str = r#"{"name":"diagram","orbitals":[{"name":"DiagramOrbital","entity":{"name":"View","persistence":"runtime","fields":[]},"traits":[{"name":"Diagram","linkedEntity":"View","stateMachine":{"states":[{"name":"loading","isInitial":true},{"name":"shown"}],"events":[{"key":"INIT","name":"Initialize"},{"key":"DESCRIBED","name":"Described"}],"transitions":[{"from":"loading","to":"loading","event":"INIT","effects":[["behavior/describe",{"behavior":"./door","trait":"DoorLife"},{"emit":{"success":"DESCRIBED","failure":"DESCRIBE_FAILED"}}],["behavior/describe","@entity.picked",{"emit":{"success":"DESCRIBED"}}]]},{"from":"loading","to":"shown","event":"DESCRIBED"}]}}]}]}"#;
-
-#[test]
-fn a_literal_describe_is_answered_when_the_program_is_resolved() {
-    let p = project("m1");
-    write(&p.path().join("orbitals/door.orb"), DOOR_ORB);
-    write(&p.path().join("orbitals/diagram.orb"), DIAGRAM_ORB);
-    let resolved = json(&orb(p.path(), &["resolve", "orbitals/diagram.orb"]));
-    let effects =
-        &resolved["orbitals"][0]["traits"][0]["stateMachine"]["transitions"][0]["effects"];
-    assert_eq!(effects[0][0], "emit");
-    assert_eq!(effects[0][1], "DESCRIBED");
-    let quoted = effects[0][2]["result"].as_array().expect("a quote call");
-    assert_eq!(quoted[0], "quote");
-    let mut answer: serde_json::Value = serde_json::from_str(quoted[1].as_str().unwrap()).unwrap();
-    let mut direct = json(&orb(
-        p.path(),
-        &[
-            "behaviors",
-            "describe",
-            "--json",
-            "./orbitals/door.traits.DoorLife",
-        ],
-    ));
-    // Each answer echoes the value as its caller spelled it: the program names the file relative to itself.
-    assert_eq!(
-        answer["value"],
-        serde_json::json!({"behavior":"./door","trait":"DoorLife"})
-    );
-    answer.as_object_mut().unwrap().remove("value");
-    direct.as_object_mut().unwrap().remove("value");
-    assert_eq!(
-        answer, direct,
-        "the build answers exactly what the host would"
-    );
-    // Control: a value known only at runtime is still the host's to answer.
-    assert_eq!(effects[1][0], "behavior/describe");
-}
-
 #[test]
 fn a_registered_trait_missing_from_stale_signatures_is_described_from_its_program() {
     // `beta` ships an empty (stale) signatures file; its card is still installed and resolves.

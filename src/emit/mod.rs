@@ -23,7 +23,6 @@ use orbital_compiler::phases::{compile_schema, CompilerOptions};
 
 pub mod sourcemap;
 pub mod spans;
-pub mod trace;
 
 // --- Enums wired into clap --------------------------------------------------
 
@@ -83,8 +82,30 @@ pub struct EmitOptions {
     pub key_id: Option<String>,
 }
 
-/// Run the emit pipeline end-to-end.
+/// What one emit prints: `stdout` and `stderr` text, in the order the CLI writes it.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct EmitOutput {
+    pub stdout: String,
+    pub stderr: String,
+}
+
+impl EmitOutput {
+    fn note(&mut self, line: &str) {
+        self.stderr.push_str(line);
+        self.stderr.push('\n');
+    }
+}
+
+/// Run the emit pipeline end-to-end and print what [`render`] returns.
 pub fn run(opts: EmitOptions) -> Result<()> {
+    let out = render(opts)?;
+    eprint!("{}", out.stderr);
+    print!("{}", out.stdout);
+    Ok(())
+}
+
+/// The one emit pipeline: writes the requested files and returns what `orb emit` prints.
+pub fn render(opts: EmitOptions) -> Result<EmitOutput> {
     let source = read_input(opts.path.as_deref())?;
     let source_path = opts
         .path
@@ -99,14 +120,18 @@ pub fn run(opts: EmitOptions) -> Result<()> {
         let envelope = crate::commands::program_inspect::inspect(&source, &serde_json::json!({
             "path": original_path, "version": opts.document_version,
         })).map_err(|e| anyhow!("{}", e.message))?;
-        return write_output(&serde_json::to_string(&envelope)?, opts.output.as_deref());
+        let mut out = EmitOutput::default();
+        write_output(&serde_json::to_string(&envelope)?, opts.output.as_deref(), &mut out)?;
+        return Ok(out);
     }
+    let mut out = EmitOutput::default();
     match opts.target {
-        EmitTarget::Orb => emit_orb(&source, opts.output.as_deref(), &source_path),
-        EmitTarget::Lolo => emit_lolo(&source, opts.output.as_deref(), &source_path),
-        EmitTarget::Manifest => emit_manifest(&opts, &source, &source_path),
-        EmitTarget::Ts | EmitTarget::Py => emit_code(opts, &source, &source_path),
+        EmitTarget::Orb => emit_orb(&source, opts.output.as_deref(), &source_path, &mut out)?,
+        EmitTarget::Lolo => emit_lolo(&source, opts.output.as_deref(), &source_path, &mut out)?,
+        EmitTarget::Manifest => emit_manifest(&opts, &source, &source_path, &mut out)?,
+        EmitTarget::Ts | EmitTarget::Py => emit_code(opts, &source, &source_path, &mut out)?,
     }
+    Ok(out)
 }
 
 fn read_input(path: Option<&Path>) -> Result<String> {
@@ -124,15 +149,15 @@ fn read_input(path: Option<&Path>) -> Result<String> {
     }
 }
 
-fn write_output(rendered: &str, output: Option<&Path>) -> Result<()> {
+fn write_output(rendered: &str, output: Option<&Path>, out: &mut EmitOutput) -> Result<()> {
     match output {
         Some(p) => std::fs::write(p, rendered)
             .map_err(|e| anyhow!("Failed to write {}: {}", p.display(), e)),
         None => {
             // Trailing newline on pure-stdout output for nicer shell concat.
-            print!("{}", rendered);
+            out.stdout.push_str(rendered);
             if !rendered.ends_with('\n') {
-                println!();
+                out.stdout.push('\n');
             }
             Ok(())
         }
@@ -141,7 +166,7 @@ fn write_output(rendered: &str, output: Option<&Path>) -> Result<()> {
 
 // --- Target: orb -----------------------------------------------------------
 
-fn emit_orb(source: &str, output: Option<&Path>, source_path: &str) -> Result<()> {
+fn emit_orb(source: &str, output: Option<&Path>, source_path: &str, out_text: &mut EmitOutput) -> Result<()> {
     // Parse whichever surface the file uses (same dispatch as
     // `utils::detect::parse_schema_auto_typed`, plus the prior-ledger anchor).
     //
@@ -157,7 +182,7 @@ fn emit_orb(source: &str, output: Option<&Path>, source_path: &str) -> Result<()
         });
     let schema = parse_any_syntax_with_prior(source, prior.as_ref(), source_path)?;
     let json = canonical_orb_json(&schema)?;
-    write_output(&json, output)?;
+    write_output(&json, output, out_text)?;
     // A program with locales ships its merged catalogs beside the emitted `.orb`
     // (`<stem>.<locale>.json`, the same files `orb resolve --output` writes).
     match output {
@@ -212,7 +237,7 @@ fn canonical_orb_json(schema: &orbital_core::schema::OrbitalSchema) -> Result<St
 /// One manifest per deployment unit. `program` is the sha256 of the canonical `.orb` JSON of the parsed program
 /// (see [`canonical_orb_json`]); grants, egress, ticks and credentials are read from the resolved program, so the
 /// atoms it `uses` are counted. Without `--sign-key` the manifest is written unsigned and the gate refuses it.
-fn emit_manifest(opts: &EmitOptions, source: &str, source_path: &str) -> Result<()> {
+fn emit_manifest(opts: &EmitOptions, source: &str, source_path: &str, out: &mut EmitOutput) -> Result<()> {
     if opts.output.is_some() {
         return Err(anyhow!(
             "`orb emit manifest` writes one file per unit: use --out <dir>, not --output"
@@ -269,14 +294,14 @@ fn emit_manifest(opts: &EmitOptions, source: &str, source_path: &str) -> Result<
                 std::fs::create_dir_all(dir)
                     .map_err(|e| anyhow!("Failed to create {}: {}", dir.display(), e))?;
                 let file = dir.join(format!("{unit}.manifest.json"));
-                write_output(&rendered, Some(file.as_path()))?;
+                write_output(&rendered, Some(file.as_path()), out)?;
             }
-            None => write_output(&rendered, None)?,
+            None => write_output(&rendered, None, out)?,
         }
         if signer.is_none() {
-            eprintln!(
+            out.note(&format!(
                 "orb: manifest for unit `{unit}` is UNSIGNED (no --sign-key); the io-gate refuses it until `io-gate sign` signs it"
-            );
+            ));
         }
     }
     Ok(())
@@ -295,8 +320,8 @@ pub(crate) fn lolo_text(source: &str, source_path: &str) -> Result<String> {
     orbital_lolo::schema_to_lolo(&schema).map_err(|e| anyhow!("{}: {}", source_path, e))
 }
 
-fn emit_lolo(source: &str, output: Option<&Path>, source_path: &str) -> Result<()> {
-    write_output(&lolo_text(source, source_path)?, output)
+fn emit_lolo(source: &str, output: Option<&Path>, source_path: &str, out: &mut EmitOutput) -> Result<()> {
+    write_output(&lolo_text(source, source_path)?, output, out)
 }
 
 /// Parse either `.lolo` surface syntax or `.orb` JSON based on first
@@ -334,7 +359,7 @@ fn parse_any_syntax_with_prior(
 
 // --- Target: ts | py -------------------------------------------------------
 
-fn emit_code(opts: EmitOptions, source: &str, source_path: &str) -> Result<()> {
+fn emit_code(opts: EmitOptions, source: &str, source_path: &str, out: &mut EmitOutput) -> Result<()> {
     crate::utils::require_language_data()?;
     let schema = parse_any_syntax(source, source_path)?;
     let mut compiler_options = CompilerOptions::from_env();
@@ -373,10 +398,10 @@ fn emit_code(opts: EmitOptions, source: &str, source_path: &str) -> Result<()> {
     let files = filter::apply(&output.files, &selector, only.as_ref(), opts.target);
 
     if files.is_empty() {
-        eprintln!(
+        out.note(&format!(
             "warning: selector {} matched zero generated files",
             opts.section.as_deref().unwrap_or("(default)")
-        );
+        ));
     }
 
     let format = opts
@@ -392,10 +417,10 @@ fn emit_code(opts: EmitOptions, source: &str, source_path: &str) -> Result<()> {
             EmitFormat::Stream | EmitFormat::Markdown | EmitFormat::Raw
         )
     {
-        emit_maps(&opts, source, &files, &rendered)?;
+        emit_maps(&opts, source, &files, &rendered, out)?;
     }
 
-    write_output(&rendered, opts.output.as_deref())
+    write_output(&rendered, opts.output.as_deref(), out)
 }
 
 /// Populate sidecar source maps for each generated file (when written to
@@ -406,6 +431,7 @@ fn emit_maps(
     orb_source: &str,
     files: &[&GeneratedFile],
     rendered: &str,
+    out_text: &mut EmitOutput,
 ) -> Result<()> {
     let spans = spans::scan(orb_source);
     let orb_path = opts
@@ -424,14 +450,14 @@ fn emit_maps(
                     .and_then(|(kind, name)| spans.lookup(kind, &name).map(|range| (name, range)))
             });
             let Some((_, range)) = first_anchor else {
-                eprintln!("warning: --map: no tracked node found in selected files; map skipped");
+                out_text.note("warning: --map: no tracked node found in selected files; map skipped");
                 return Ok(());
             };
             let map_path = sourcemap::map_path_for_output(out);
             let map_json = sourcemap::build_map_for_file(rendered, orb_source, &orb_path, range);
             std::fs::write(&map_path, map_json)
                 .map_err(|e| anyhow!("Failed to write {}: {}", map_path.display(), e))?;
-            eprintln!("source map: {}", map_path.display());
+            out_text.note(&format!("source map: {}", map_path.display()));
         }
         None => {
             // Inline: append `//# sourceMappingURL=data:…` to stdout. Only
@@ -448,7 +474,7 @@ fn emit_maps(
                     let map_json =
                         sourcemap::build_map_for_file(rendered, orb_source, &orb_path, range);
                     let b64 = base64_encode(map_json.as_bytes());
-                    println!("//# sourceMappingURL=data:application/json;base64,{}", b64);
+                    out_text.stdout.push_str(&format!("//# sourceMappingURL=data:application/json;base64,{b64}\n"));
                 }
             }
         }

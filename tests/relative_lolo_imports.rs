@@ -106,26 +106,6 @@ fn validate_json_lowers_a_lolo_only_sibling() {
 }
 
 #[test]
-fn resolve_lowers_a_lolo_only_sibling() {
-    let dir = folder("resolve", &[("Cart.lolo", CART), ("Orders.lolo", ORDERS)]);
-    let out_file = dir.join("resolved.orb");
-    let out = orb()
-        .args(["resolve", dir.join("Orders.lolo").to_str().unwrap(), "-o"])
-        .arg(&out_file)
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "resolve failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let resolved: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&out_file).unwrap()).unwrap();
-    assert_eq!(resolved["orbitals"][0]["name"], "OrderProcessing");
-    assert_eq!(resolved["orbitals"][0]["traits"][0]["name"], "CartView");
-}
-
-#[test]
 fn a_missing_sibling_still_fails_validation() {
     let dir = folder("missing", &[("Orders.lolo", ORDERS)]);
     let report = validate_json(&dir.join("Orders.lolo"));

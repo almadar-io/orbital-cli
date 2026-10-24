@@ -1,0 +1,24 @@
+app compile-invalid [
+  version: "1.0.0",
+  description: "A program that lowers but fails orb validate (an optional list read where a missing value raises), which orb compile must refuse."
+]
+orbital TallyOrbital {
+  entity Tally [runtime] {
+    id : string!
+    items : [number]
+  }
+
+  trait Counter -> Tally {
+    initial: idle
+
+    state idle {
+      INIT -> idle
+        (render-ui main { type: "stack", children: [{ type: "typography", content: "Tally" }] })
+
+      ADD -> idle
+        (set @entity.items (array/append @entity.items 1))
+    }
+  }
+
+  page "/tally" as TallyPage -> Counter
+}

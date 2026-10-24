@@ -9,6 +9,7 @@ pub(crate) mod evaluate;
 pub(crate) mod i18n;
 pub(crate) mod patterns;
 pub(crate) mod shell_programs;
+pub(crate) mod terminal;
 
 pub(crate) use bun::find_bun;
 pub(crate) use detect::{

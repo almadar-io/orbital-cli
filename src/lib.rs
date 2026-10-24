@@ -14,12 +14,7 @@ mod commands;
 mod emit;
 mod utils;
 
-use commands::{
-    compile_schema, execute_cascade_cli, execute_cascade_steps_cli, execute_schema_cli,
-    format_schema, parse_schema, resolve_schema_cli, run_convert,
-    run_i18n_check,
-    run_i18n_vocab, run_tests, run_which, stamp_schema_cli, validate_schema,
-};
+use commands::{compile_schema, parse_schema, run_which, stamp_schema_cli, validate_schema};
 use utils::evaluate_sexpr;
 
 pub use utils::{parse_schema_auto_typed, TypedParseError};
@@ -31,7 +26,22 @@ pub use utils::{parse_schema_auto_typed, TypedParseError};
 pub(crate) struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
+
+    #[command(flatten)]
+    log: utils::terminal::LogArgs,
 }
+
+/// A command's exit status other than success, after it printed its own report.
+#[derive(Debug)]
+pub(crate) struct Exit(pub(crate) i32);
+
+impl std::fmt::Display for Exit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "exit status {}", self.0)
+    }
+}
+
+impl std::error::Error for Exit {}
 
 /// Available shell types for code generation
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -121,84 +131,6 @@ enum Commands {
         path: PathBuf,
     },
 
-    /// Serve the language to an agent: an MCP server on stdin/stdout whose tools are
-    /// orb's own commands (validate, complete, behaviors, describe, play, test, evaluate, …).
-    Mcp {
-        /// Also serve this program's declared inbound hooks as tools: a call is delivered as the
-        /// hook's request and answered with the handler's answer
-        #[arg(long, value_name = "FILE")]
-        program: Option<PathBuf>,
-        #[command(subcommand)]
-        command: Option<McpCommand>,
-    },
-
-    /// The language reference, generated from the compiler: no topic lists the
-    /// constructs, vocabulary and validation-code topics; a topic prints one
-    /// construct (with real examples from the installed std), `vocabulary`, or
-    /// `codes/<category>`.
-    Reference {
-        topic: Option<String>,
-    },
-
-    /// Print the whole language catalog as JSON, generated from the compiler and the
-    /// installed language data: every construct, the vocabulary, every validation
-    /// code with its description, every operator and every pattern.
-    Signatures {
-        /// Write to this file instead of stdout.
-        #[arg(long, value_name = "FILE")]
-        out: Option<PathBuf>,
-    },
-
-    /// What is valid at a cursor position in a `.lolo` source, as JSON
-    /// (`orbital_lolo::complete`): keywords, effect operators, pattern tags and
-    /// props, and installed behaviors' import paths, traits, orbitals and typed
-    /// config keys. Candidates only — ranking is the caller's.
-    Complete {
-        /// The `.lolo` file (omit with --stdin to read the unsaved buffer).
-        file: Option<PathBuf>,
-        /// Byte offset of the cursor.
-        #[arg(long)]
-        offset: usize,
-        /// Read the source from stdin instead of a file.
-        #[arg(long)]
-        stdin: bool,
-    },
-
-    /// Where each inline behavior embed sits in a `.lolo`, as JSON: the
-    /// `Inline<Short><N>` trait name the `.orb` carries, the embedded
-    /// behavior, and the 1-based line and character column of its tag.
-    Embeds {
-        /// The `.lolo` file (omit with --stdin to read the unsaved buffer).
-        file: Option<PathBuf>,
-        /// Read the source from stdin instead of a file.
-        #[arg(long)]
-        stdin: bool,
-    },
-
-    /// Resolve a schema: run Inline + Compose + Enrich and emit the
-    /// fully-inlined .orb form without generating code.
-    ///
-    /// Produces a resolved artifact structurally identical to the input
-    /// (same `OrbitalSchema` JSON shape) but with every `uses[]` import
-    /// flattened, every trait ref collapsed, every `behavior/*` composer
-    /// expanded, and every `events: { OLD: NEW }` rename applied through
-    /// transitions AND render-ui props. Downstream tools (verifiers,
-    /// parity mode, future analyzers) consume this as the canonical
-    /// bundled view of the schema without reimplementing resolver logic.
-    Resolve {
-        /// Path to the .orb schema file
-        #[arg(value_name = "FILE")]
-        path: PathBuf,
-
-        /// Write the resolved schema to a file. Defaults to stdout.
-        #[arg(short, long, value_name = "FILE")]
-        output: Option<PathBuf>,
-
-        /// Verbose phase logging on stderr.
-        #[arg(short, long)]
-        verbose: bool,
-    },
-
     /// Lower each `.lolo` (or read each `.orb`) to its program exactly as the
     /// loader does for a live behavior package — one NDJSON line per file,
     /// `{"path", "orb"}` or `{"path", "error"}`, in argument order. The single
@@ -207,57 +139,6 @@ enum Commands {
         /// The `.lolo` / `.orb` files to lower.
         #[arg(value_name = "FILE", required = true)]
         paths: Vec<PathBuf>,
-    },
-
-    /// Pure headless state-machine execution: fire one event through every
-    /// inline trait and report transitions/effects/guard evaluations as JSON.
-    ///
-    /// Effects are reported, never executed — this is the Rust-side twin of
-    /// `packages/almadar-parity`'s TypeScript harness (`ts-harness.ts`
-    /// `executeWithRuntime`), so the two can be diffed for cross-
-    /// implementation parity. Resolves imports/refs first (same as
-    /// `orb resolve`), so both harnesses see the identical inlined trait set.
-    Execute {
-        /// Path to the .orb schema file
-        #[arg(value_name = "FILE")]
-        path: PathBuf,
-
-        /// Event to fire (e.g. INIT)
-        #[arg(long, required_unless_present = "steps")]
-        event: Option<String>,
-
-        /// Event payload as a JSON object (default: {})
-        #[arg(long)]
-        payload: Option<String>,
-
-        /// Initial entity data as a JSON object (default: {})
-        #[arg(long)]
-        entity: Option<String>,
-
-        /// Only execute the trait with this name
-        #[arg(long = "trait")]
-        trait_name: Option<String>,
-
-        /// Output the execution result DTO as JSON (for programmatic consumption)
-        #[arg(long)]
-        json: bool,
-
-        /// Run the event through the kernel's full dispatch (listens fan-out, executed effects)
-        /// and print each processed trait's outcome as JSON. Requires `--trait`.
-        #[arg(long, requires = "trait_name")]
-        cascade: bool,
-
-        /// A JSON array of `{trait, event, payload, from?}` run as `--cascade` does, in order
-        /// against one kernel, in place of `--event`/`--trait`. A step with `from` plays from
-        /// that state. Each outcome reports the arm that fired, every guard tried and how each
-        /// authored effect of the fired arm ran.
-        #[arg(long, conflicts_with_all = ["event", "trait_name", "payload"])]
-        steps: Option<String>,
-
-        /// With `--steps`: run the steps on the native program host, so their os/* and http asks are answered
-        /// by this machine instead of left pending.
-        #[arg(long, requires = "steps")]
-        live: bool,
     },
 
     /// Stamp V4 identity (ids + ledger) onto a name-only `.orb` schema.
@@ -324,10 +205,6 @@ enum Commands {
         #[arg(long)]
         patterns: Option<PathBuf>,
 
-        /// Verbose output
-        #[arg(short, long)]
-        verbose: bool,
-
         /// Inject structured logging (createLogger calls) into generated hooks and handlers
         #[arg(long)]
         dev_logs: bool,
@@ -348,44 +225,6 @@ enum Commands {
         /// Useful for inspecting how a .lolo file lowers without running codegen.
         #[arg(long)]
         emit_orb: Option<PathBuf>,
-    },
-
-    /// Run exhaustive state machine tests against a schema
-    Test {
-        /// Path to the .orb schema file
-        #[arg(value_name = "FILE")]
-        path: PathBuf,
-
-        /// Filter tests by orbital name
-        #[arg(long)]
-        orbital: Option<String>,
-
-        /// Filter tests by trait name
-        #[arg(long, name = "trait")]
-        trait_name: Option<String>,
-
-        /// Output format (text, json)
-        #[arg(long, default_value = "text")]
-        report: String,
-
-        /// Actually execute tests headlessly against the state machine (RCG-09)
-        #[arg(long)]
-        execute: bool,
-
-        /// Verbose output
-        #[arg(short, long)]
-        verbose: bool,
-    },
-
-    /// Format an Orbital schema file (pretty-print JSON or lolo source)
-    Format {
-        /// Path to the .orb or .lolo schema file
-        #[arg(value_name = "FILE")]
-        path: PathBuf,
-
-        /// Edit the file in place (default: print to stdout)
-        #[arg(short, long)]
-        write: bool,
     },
 
     /// Serve a program: the native server, the program's runtime files and the TypeScript shell's prebuilt web client,
@@ -421,81 +260,6 @@ enum Commands {
         /// A built web client to serve instead of the installed typescript shell's
         #[arg(long, value_name = "DIR")]
         client_dir: Option<PathBuf>,
-    },
-
-    /// Start the Orbital desktop GUI application (not yet stable)
-    #[command(hide = true)]
-    Gui {
-        /// Path to the .orb schema file
-        #[arg(value_name = "FILE")]
-        path: PathBuf,
-
-        /// Server URL to connect to
-        #[arg(short, long, default_value = "http://127.0.0.1:3000")]
-        server: String,
-
-        /// Renderer: dioxus (window) or tui (terminal)
-        #[arg(long, default_value = "dioxus")]
-        renderer: String,
-    },
-
-    /// Start development server with hot-reload (not yet stable)
-    #[command(hide = true)]
-    Dev {
-        /// Path to the .orb schema file
-        #[arg(value_name = "FILE")]
-        path: PathBuf,
-
-        /// Port for the server
-        #[arg(short, long, default_value = "3000")]
-        port: u16,
-
-        /// Force headless mode even when a display is available
-        #[arg(long)]
-        headless: bool,
-    },
-
-    /// Convert an existing project or website to an .orb program
-    Convert {
-        /// Source project path (source scan mode)
-        #[arg(value_name = "PATH")]
-        path: Option<PathBuf>,
-
-        /// Output .orb file path
-        #[arg(short, long, default_value = "converted.orb")]
-        output: String,
-
-        /// Crawl a live website (crawl mode, or hybrid if path also given)
-        #[arg(long, value_name = "URL")]
-        crawl: Option<String>,
-
-        /// Read pre-collected CrawlFacts JSON instead of crawling
-        #[arg(long, value_name = "FILE")]
-        crawl_facts: Option<PathBuf>,
-
-        /// Enable AI interpretation and fix loop (G4-G7)
-        #[arg(long)]
-        ai: bool,
-
-        /// Enable round-trip visual verification
-        #[arg(long)]
-        verify: bool,
-
-        /// Stop after fact collection (G0-G3)
-        #[arg(long)]
-        facts_only: bool,
-
-        /// Run browser in headed mode
-        #[arg(long)]
-        headed: bool,
-
-        /// Max crawl depth
-        #[arg(long, default_value = "3")]
-        depth: u32,
-
-        /// Verbose output
-        #[arg(short, long)]
-        verbose: bool,
     },
 
     /// Emit generated code for inspection (`.orb` JSON, TypeScript, or Python).
@@ -571,22 +335,6 @@ enum Commands {
         key_id: Option<String>,
     },
 
-    /// Reverse-lookup a position in an emitted file to its `.orb` origin.
-    ///
-    /// Reads `<output>.map` beside the given file and prints the source
-    /// location. Requires the file to have been produced by
-    /// `orb emit … --map -o <output>`.
-    ///
-    /// Example: `orb emit-trace out.ts:42:8`
-    ///
-    /// (Named `emit-trace` because `trace` is already used for agent sessions.)
-    #[command(name = "emit-trace")]
-    EmitTrace {
-        /// Position as `<file>:<line>[:<col>]` (1-indexed).
-        #[arg(value_name = "POSITION")]
-        position: String,
-    },
-
     /// Evaluate an S-expression and print the result
     Evaluate {
         /// S-expression in JSON format (e.g. '[\"+\", 1, 2]'). Reads from stdin if omitted.
@@ -655,13 +403,6 @@ enum Commands {
         program: PathBuf,
     },
 
-    /// Language i18n vocabulary — inspect the baked `.lolo`/`.orb` vocabulary
-    /// tables and check translation coverage.
-    I18n {
-        #[command(subcommand)]
-        command: I18nCommand,
-    },
-
     /// Behavior packages — install/remove/update/inspect the npm packages
     /// `uses` resolves against (Almadar_Behavior_Packages.md).
     Behaviors {
@@ -675,18 +416,6 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum VectorsCommand {
-    /// Convert a legacy JSON embedding manifest (`behaviors-embeddings.json`) into the user vector
-    /// store, keeping a vector only when the text the package builds now hashes to the one the
-    /// calibrate text index recorded for it. Run it from the project that installs the package.
-    Import {
-        /// The manifest file, inside an installed behavior package.
-        #[arg(long)]
-        from: std::path::PathBuf,
-        /// The calibrate text index (`<derived cache>/embed-index/<sha256(abs manifest path)>.json`);
-        /// defaults to that path.
-        #[arg(long)]
-        index: Option<std::path::PathBuf>,
-    },
     /// Write a package's vector snapshot (`dist/vectors.vec`): the vectors of its organism and
     /// `#capabilities` texts, taken from the user store and embedding misses (needs an embedding
     /// provider for those). The same inputs give the same bytes.
@@ -777,94 +506,9 @@ enum BehaviorsCommand {
     },
 }
 
-#[derive(Subcommand)]
-enum I18nCommand {
-    /// Print the `.lolo` parser vocabulary (keywords/shapes/tags/categories/
-    /// capabilities/annotations/sigils/effects/types/units/literals/
-    /// reservedEvents) plus the `.orb` structural key list and the operator
-    /// table.
-    Vocab {
-        /// Print as JSON instead of a human-readable listing.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Check translation coverage: every non-English language's tables
-    /// against `en` (missing/orphan/empty keys), and the `orbital-lolo`
-    /// parser vocabulary against `en`. Exits 1 and lists every problem when
-    /// any are found.
-    Check,
-}
-
-#[derive(Subcommand)]
-enum McpCommand {
-    /// Register `orb mcp` in this project's config for an MCP client
-    Install {
-        #[arg(long, value_enum)]
-        client: commands::mcp::McpClient,
-    },
-}
-
-/// `orb complete`: the completion candidates at `offset`, as JSON on stdout.
-fn print_completions(
-    file: Option<&std::path::Path>,
-    offset: usize,
-    stdin: bool,
-) -> anyhow::Result<()> {
-    let source = match (file, stdin) {
-        (_, true) => {
-            let mut buf = String::new();
-            std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)?;
-            buf
-        }
-        (Some(path), false) => std::fs::read_to_string(path)?,
-        (None, false) => anyhow::bail!("orb complete: pass a .lolo file or --stdin"),
-    };
-    println!("{}", serde_json::to_string(&completions(&source, offset)?)?);
-    Ok(())
-}
-
-/// What is valid at `offset` in a `.lolo` source, against the installed behaviors.
-pub(crate) fn completions(source: &str, offset: usize) -> anyhow::Result<serde_json::Value> {
-    let cwd = std::env::current_dir()?;
-    let user_store =
-        orbital_core::behavior_packages::user_store_dir().unwrap_or_else(|| cwd.clone());
-    let packages = orbital_core::behavior_packages::discover(&cwd, &user_store)
-        .map_err(|e| anyhow::anyhow!("failed to discover behavior packages: {e}"))?;
-    let contracts = orbital_lolo::registry::LoloContracts::load(&packages).ok();
-    let result = orbital_lolo::complete::complete(source, offset, contracts.as_ref());
-    Ok(serde_json::to_value(&result)?)
-}
-
-fn print_embeds(file: Option<&std::path::Path>, stdin: bool) -> anyhow::Result<()> {
-    let source = match (file, stdin) {
-        (_, true) => {
-            let mut buf = String::new();
-            std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)?;
-            buf
-        }
-        (Some(path), false) => std::fs::read_to_string(path)?,
-        (None, false) => anyhow::bail!("orb embeds: pass a .lolo file or --stdin"),
-    };
-    let embeds = orbital_lolo::embeds::inline_embeds(&source)
-        .map_err(|e| anyhow::anyhow!("orb embeds: {e}"))?;
-    println!("{}", serde_json::to_string(&embeds)?);
-    Ok(())
-}
-
-fn print_lolo_signatures(out: Option<&std::path::Path>) -> anyhow::Result<()> {
-    let catalog = serde_json::to_string_pretty(&commands::reference::everything()?)?;
-    match out {
-        Some(path) => {
-            std::fs::write(path, &catalog)?;
-            eprintln!("Wrote {} bytes to {}", catalog.len(), path.display());
-        }
-        None => println!("{catalog}"),
-    }
-    Ok(())
-}
-
 /// The loader's `.lolo` lowerer: a relative import of a `.lolo`-only sibling.
 fn lower_lolo_file(path: &std::path::Path) -> Result<orbital_core::schema::OrbitalSchema, String> {
+    let _span = tracing::debug_span!(target: orbital_core::logging::ns::CLI, "lower import", file = %path.display()).entered();
     let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
     crate::utils::parse_schema_auto_typed(&content, &path.to_string_lossy())
         .map_err(|e| e.describe())
@@ -883,49 +527,78 @@ fn describe_trait_value(
 }
 
 pub fn run() -> anyhow::Result<()> {
-    // Namespaced structured logging (mirror of @almadar/logger). Quiet by default
-    // (warn/error only); enable namespaces with e.g. ALMADAR_DEBUG='almadar:runtime:*'.
-    orbital_core::logging::init();
+    let raw: Vec<String> = std::env::args().skip(1).collect();
+    let (log, args) = utils::terminal::split_log_args(&raw)?;
+    let terminal = utils::terminal::init(&log);
     orbital_compiler::loader::register_source_lowerer(|path, _, _| lower_lolo_file(path));
     orbital_compiler::phases::reflect::register_trait_describer(describe_trait_value);
 
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let root = tracing::info_span!(
+        target: orbital_core::logging::ns::CLI,
+        "orb",
+        args = %args.join(" "),
+        outcome = tracing::field::Empty,
+    );
+    let result = root.in_scope(|| run_command(&args));
+    orbital_core::logging::record_outcome(&root, &result);
+    drop(root);
+    terminal.finish()?;
+    match result {
+        Ok(0) => Ok(()),
+        Ok(code) => std::process::exit(code),
+        Err(e) => match e.downcast_ref::<Exit>() {
+            Some(Exit(code)) => std::process::exit(*code),
+            None => Err(e),
+        },
+    }
+}
+
+/// Run the command `args` names and answer its exit code.
+fn run_command(args: &[String]) -> anyhow::Result<i32> {
+    use orbital_core::logging::ns;
     let cwd = std::env::current_dir()?;
     let store = orbital_core::behavior_packages::user_store_dir().unwrap_or_else(|| cwd.clone());
-    if let Some(command) = commands::program_command::resolve_program_command(&args, &cwd, &store)? {
-        let answer = commands::program_command::run_command_program(&command.program, &command.command, &command.argv, &cwd)?;
+    let program = tracing::info_span!(target: ns::CLI, "resolve command")
+        .in_scope(|| commands::program_command::resolve_program_command(args, &cwd, &store))?;
+    if let Some(command) = program {
+        let answer = tracing::info_span!(target: ns::CLI, "program", hook = %command.command)
+            .in_scope(|| commands::program_command::run_command_program(&command.program, &command.command, &command.argv, &cwd))?;
+        if answer.headers.contains_key("orb-run") {
+            if let Some(text) = answer.stderr.as_deref().filter(|t| !t.is_empty()) {
+                eprintln!("{text}");
+            }
+            commands::program_command::run_handoff(&answer)?;
+            return Ok(answer.code);
+        }
         answer.write_to(&mut std::io::stdout(), &mut std::io::stderr())?;
-        std::process::exit(answer.code);
+        return Ok(answer.code);
     }
 
-    let cli = Cli::parse();
+    let cli = Cli::parse_from(std::iter::once("orb".to_string()).chain(args.iter().cloned()));
 
     let needs_language_data = !matches!(
         &cli.command,
         None | Some(Commands::Validate { .. })
-            | Some(Commands::I18n { .. })
             | Some(Commands::Update { .. })
             | Some(Commands::Add { .. })
             | Some(Commands::Remove { .. })
             | Some(Commands::List { .. })
-            | Some(Commands::Mcp { .. })
-            | Some(Commands::EmitTrace { .. })
             | Some(Commands::Behaviors {
                 command: BehaviorsCommand::Which { .. }
             })
     );
     if needs_language_data {
-        crate::utils::require_language_data()?;
+        tracing::info_span!(target: ns::CLI, "language data").in_scope(crate::utils::require_language_data)?;
     }
     let notify = !matches!(
         &cli.command,
         Some(Commands::Update { .. }) | Some(Commands::List { json: true, .. })
     );
-    let result = dispatch(cli);
+    let result = tracing::info_span!(target: ns::CLI, "run").in_scope(|| dispatch(cli));
     if notify && result.is_ok() {
-        commands::update_notice::notice();
+        tracing::info_span!(target: ns::CLI, "update notice").in_scope(commands::update_notice::notice);
     }
-    result
+    result.map(|()| 0)
 }
 
 fn dispatch(cli: Cli) -> anyhow::Result<()> {
@@ -946,18 +619,6 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
             final_program,
         ),
         Some(Commands::Parse { path }) => parse_schema(&path),
-        Some(Commands::Signatures { out }) => print_lolo_signatures(out.as_deref()),
-        Some(Commands::Complete {
-            file,
-            offset,
-            stdin,
-        }) => print_completions(file.as_deref(), offset, stdin),
-        Some(Commands::Embeds { file, stdin }) => print_embeds(file.as_deref(), stdin),
-        Some(Commands::Resolve {
-            path,
-            output,
-            verbose,
-        }) => resolve_schema_cli(&path, output.as_deref(), verbose),
         Some(Commands::Lower { paths }) => {
             use std::io::Write;
             let lower_one = |path: &std::path::PathBuf| match lower_lolo_file(path) {
@@ -997,39 +658,6 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
             }
             Ok(())
         }
-        Some(Commands::Execute {
-            path,
-            steps: Some(steps),
-            live,
-            ..
-        }) => execute_cascade_steps_cli(&path, &steps, live),
-        Some(Commands::Execute {
-            path,
-            event: Some(event),
-            payload,
-            trait_name: Some(trait_name),
-            cascade: true,
-            ..
-        }) => execute_cascade_cli(&path, &event, payload.as_deref(), &trait_name),
-        Some(Commands::Execute {
-            path,
-            event: Some(event),
-            payload,
-            entity,
-            trait_name,
-            json,
-            ..
-        }) => execute_schema_cli(
-            &path,
-            &event,
-            payload.as_deref(),
-            entity.as_deref(),
-            trait_name.as_deref(),
-            json,
-        ),
-        Some(Commands::Execute { event: None, .. }) => {
-            Err(anyhow::anyhow!("orb execute needs --event or --steps"))
-        }
         Some(Commands::Stamp {
             path,
             prior,
@@ -1041,7 +669,6 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
             output.as_deref(),
             imports.as_deref(),
         ),
-        Some(Commands::Format { path, write }) => format_schema(&path, write),
         Some(Commands::Compile {
             path,
             output,
@@ -1051,7 +678,6 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
             backend,
             backend_url,
             patterns,
-            verbose,
             dev_logs,
             host,
             listen_host,
@@ -1066,20 +692,11 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
             backend,
             backend_url,
             patterns.as_deref(),
-            verbose,
             dev_logs,
             host,
             &utils::shell_programs::ServedAddress { host: &listen_host, port },
             emit_orb.as_deref(),
         ),
-        Some(Commands::Test {
-            path,
-            orbital,
-            trait_name,
-            report,
-            execute,
-            verbose,
-        }) => run_tests(&path, orbital, trait_name, &report, execute, verbose),
         Some(Commands::Serve { path, port, host, open, no_mock, no_emulators, client_dir }) => {
             if open {
                 anyhow::bail!("orb serve --open has no declared counterpart in std-http-server: open the browser yourself");
@@ -1092,31 +709,6 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
                 &commands::program_command::ServeOptions { host: &host, port, no_mock, client_dir: client_dir.as_deref() },
             )
         }
-        Some(Commands::Gui { path, server, renderer }) => utils::desktop::window(&renderer, &path, Some(&server)),
-        Some(Commands::Dev { .. }) => anyhow::bail!("orb dev is temporarily unavailable: the legacy server is archived; the native server and desktop lifecycle integration remains to be completed"),
-        Some(Commands::Convert {
-            path,
-            output,
-            crawl,
-            crawl_facts,
-            ai,
-            verify,
-            facts_only,
-            headed,
-            depth,
-            verbose,
-        }) => run_convert(
-            path,
-            &output,
-            crawl,
-            crawl_facts,
-            ai,
-            verify,
-            facts_only,
-            headed,
-            depth,
-            verbose,
-        ),
         Some(Commands::Evaluate {
             expr,
             entity,
@@ -1128,10 +720,6 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
             payload.as_deref(),
             &output,
         ),
-        Some(Commands::I18n { command }) => match command {
-            I18nCommand::Vocab { json } => run_i18n_vocab(json),
-            I18nCommand::Check => run_i18n_check(),
-        },
         Some(Commands::Behaviors { command }) => match command {
             BehaviorsCommand::Which { spec } => run_which(spec),
             BehaviorsCommand::Catalog {
@@ -1147,9 +735,6 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
                 knob_vectors,
             } => commands::run_describe(spec, json, knob_vectors),
             BehaviorsCommand::Vectors { command } => match command {
-                VectorsCommand::Import { from, index } => {
-                    commands::behaviors_vectors_import::run_import(from, index)
-                }
                 VectorsCommand::Snapshot { package, out } => {
                     commands::behaviors_vectors_snapshot::run_snapshot(package, out)
                 }
@@ -1162,24 +747,6 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
         Some(Commands::Add { packages, global }) => commands::packages::run_add(packages, global),
         Some(Commands::Remove { packages, global }) => commands::packages::run_remove(packages, global),
         Some(Commands::List { json, global }) => commands::packages::run_list(json, global),
-        Some(Commands::Mcp {
-            program,
-            command: None,
-        }) => commands::mcp::run_mcp(program.as_deref()),
-        Some(Commands::Reference { topic }) => commands::reference::run_reference(topic.as_deref()),
-        Some(Commands::Mcp {
-            command: Some(McpCommand::Install { client }),
-            ..
-        }) => {
-            let (path, warning) = commands::mcp::install(&std::env::current_dir()?, client, || {
-                crate::utils::patterns::ensure_language_ready().map_err(|e| format!("{}: {e}", e.code()))
-            })?;
-            println!("Registered `orb mcp` in {}", path.display());
-            if let Some(warning) = warning {
-                eprintln!("orb: {warning}");
-            }
-            Ok(())
-        }
         Some(Commands::Emit {
             target,
             path,
@@ -1209,7 +776,6 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
             sign_key,
             key_id,
         }),
-        Some(Commands::EmitTrace { position }) => emit::trace::run(&position),
         None => {
             use clap::CommandFactory;
             Cli::command().print_help()?;

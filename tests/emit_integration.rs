@@ -555,3 +555,16 @@ fn emit_orb_the_manifest_hash_and_stamp_keep_an_authored_null_and_the_hash_is_st
     null_keys(&stamped, &mut nulls);
     assert_eq!(nulls, vec!["code".to_string()], "stamp: a null other than the authored one is in the output");
 }
+
+// --- the compile gate: a program that fails `orb validate` is never compiled ----
+
+#[test]
+fn compile_refuses_a_program_that_fails_validate_and_writes_nothing() {
+    let lolo = fixtures_dir().join("compile-invalid.lolo");
+    let out = tempfile::tempdir().expect("tempdir");
+    let target = out.path().join("app");
+    let (_stdout, stderr, ok) = run_orb(&["compile", lolo.to_str().unwrap(), "--shell", "typescript", "-o", target.to_str().unwrap()]);
+    assert!(!ok, "compile accepted an invalid program");
+    assert!(stderr.contains("ORB_X_OPERATOR_NULL_OPERAND"), "the refusal names the finding:\n{stderr}");
+    assert!(!target.exists(), "nothing is written for a refused program");
+}

@@ -94,7 +94,3 @@ pub(crate) fn frames(item: &str, schema: OrbitalSchema, out_dir: &Path) -> anyho
     files(desktop_protocol::request(&locate()?, request).map_err(failure)?)
 }
 
-/// Open the app window (or terminal, `renderer`) for a resolved program and wait for it to close.
-pub(crate) fn window(renderer: &str, schema: &Path, server: Option<&str>) -> anyhow::Result<()> {
-    desktop_protocol::open_window(&locate()?, renderer, schema, server).map_err(failure)
-}

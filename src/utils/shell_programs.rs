@@ -117,19 +117,18 @@ pub(crate) fn emit(
     shell_protocol::invoke_emit(&shell.binary, &request(module, resolved, served, source_path, options, shell_options)).map_err(failure)
 }
 
-/// Print a shell's reply the way `orb compile` reports it.
-pub(crate) fn report(response: &GenerateResponse) {
-    println!("\n✅ Generated {} files", response.files.len());
+/// The lines `orb compile` reports for a shell's reply.
+pub(crate) fn report_lines(response: &GenerateResponse) -> Vec<String> {
+    let mut lines = vec![String::new(), format!("✅ Generated {} files", response.files.len())];
     if !response.warnings.is_empty() {
-        println!("\nWarnings:");
-        for warning in &response.warnings {
-            println!("  ⚠️  {}", warning);
-        }
+        lines.push(String::new());
+        lines.push("Warnings:".to_string());
+        lines.extend(response.warnings.iter().map(|warning| format!("  ⚠️  {warning}")));
     }
     if !response.next_steps.is_empty() {
-        println!("\nNext steps:");
-        for step in &response.next_steps {
-            println!("  {}", step);
-        }
+        lines.push(String::new());
+        lines.push("Next steps:".to_string());
+        lines.extend(response.next_steps.iter().map(|step| format!("  {step}")));
     }
+    lines
 }

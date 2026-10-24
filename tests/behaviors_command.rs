@@ -340,101 +340,6 @@ fn list_json_reports_prefix_and_behavior_count() {
     assert_eq!(fake["behaviors"], 1);
 }
 
-#[test]
-fn which_resolves_prefixed_form() {
-    let project = Project::new();
-    let bun_stub = write_bun_stub(&project, "*");
-    seed_fake_package(&project, &bun_stub);
-
-    let output = orb(
-        &project,
-        &bun_stub,
-        &["behaviors", "which", "fake-behaviors/fake-atom"],
-    );
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let expected = std::fs::canonicalize(
-        project
-            .fake_pkg_dir()
-            .join("behaviors/registry/atoms/fake-atom.orb"),
-    )
-    .unwrap();
-    assert!(
-        stdout.contains(expected.to_str().unwrap()),
-        "stdout: {stdout}, expected path {}",
-        expected.display()
-    );
-}
-
-/// Ruling 3 (Phase 2): `std/behaviors/<name>` with an installed
-/// `almadar-std` package that MISSES the name falls through to every OTHER
-/// installed package — so a name that only exists in our fake io-shaped
-/// package still resolves. The std package itself must be installed for this
-/// fallback to run at all (Phase 2 removed the embedded-phf fallback; see
-/// `which_std_behaviors_without_installed_std_reports_not_installed` below
-/// for the no-std-at-all case).
-#[test]
-fn which_resolves_std_behaviors_alias_via_ruling_3_fallback() {
-    let project = Project::new();
-    let std_stub = write_std_bun_stub(&project, "*", "*");
-    seed_fake_package(&project, &std_stub);
-    let bun_stub = write_bun_stub(&project, "*");
-    seed_fake_package(&project, &bun_stub);
-
-    let output = orb(
-        &project,
-        &bun_stub,
-        &["behaviors", "which", "std/behaviors/fake-atom"],
-    );
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let expected = std::fs::canonicalize(
-        project
-            .fake_pkg_dir()
-            .join("behaviors/registry/atoms/fake-atom.orb"),
-    )
-    .unwrap();
-    assert!(
-        stdout.contains(expected.to_str().unwrap()),
-        "stdout: {stdout}"
-    );
-}
-
-/// Phase 2: no `almadar-std`-prefixed package installed at all is a hard,
-/// actionable error naming the install command — never a silent fallback to
-/// every other package (that only happens once std IS installed but misses
-/// the specific name, see the ruling-3 test above).
-#[test]
-fn which_std_behaviors_without_installed_std_reports_not_installed() {
-    let project = Project::new();
-    let bun_stub = write_bun_stub(&project, "*");
-    seed_fake_package(&project, &bun_stub);
-
-    let output = orb(
-        &project,
-        &bun_stub,
-        &["behaviors", "which", "std/behaviors/fake-atom"],
-    );
-    assert!(!output.status.success(), "which should have failed");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("@almadar/std is not installed"),
-        "stderr: {stderr}"
-    );
-    assert!(
-        stderr.contains("orb update"),
-        "stderr should name the install command: {stderr}"
-    );
-}
-
 /// `orb validate --json` on an already-lowered `.orb` (JSON — skips the
 /// `.lolo` lower-phase contracts check entirely, so this isolates the
 /// INLINE-phase resolution path) whose orbital `uses` a `std/behaviors/…`
@@ -603,27 +508,6 @@ fn remove_succeeds_when_unreferenced() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(!project.fake_pkg_dir().exists());
-}
-
-/// `orb reference` is generated from the compiler itself: it needs no installed package.
-#[test]
-fn reference_needs_no_installed_package() {
-    let project = Project::new();
-    let bun_stub = write_bun_stub(&project, "*");
-
-    let output = orb(&project, &bun_stub, &["reference"]);
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let index: serde_json::Value =
-        serde_json::from_slice(&output.stdout).expect("reference prints JSON");
-    assert!(index["constructs"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|c| c["name"] == "Trait"));
 }
 
 /// `verify_package`'s new core check: a std whose `dependencies["@almadar/

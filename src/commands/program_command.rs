@@ -32,7 +32,7 @@ pub(crate) struct ProgramCommand {
 /// The bootloader's own words: clap takes them before any program discovery (so a broken package can be repaired
 /// with `orb update|add|remove`), and a `cli` program declaring `cli-<word>` or `cli-<word>-…` is refused.
 const RESERVED_COMMANDS: &[&str] = &[
-    "parse", "lower", "validate", "compile", "emit", "evaluate", "update", "add", "remove", "list", "run", "help", "--help",
+    "parse", "lower", "validate", "compile", "emit", "evaluate", "stamp", "update", "add", "remove", "list", "run", "help", "--help",
     "-h", "--version", "-V",
 ];
 
@@ -163,6 +163,8 @@ pub(crate) struct CommandAnswer {
     pub(crate) code: i32,
     pub(crate) body: String,
     pub(crate) stderr: Option<String>,
+    /// The answer's declared headers; `orb-run` hands a program back to the bootloader to run (see [`run_handoff`]).
+    pub(crate) headers: std::collections::BTreeMap<String, String>,
 }
 
 impl CommandAnswer {
@@ -206,7 +208,12 @@ pub(crate) fn run_command_program_anchored(
         orbital_shell_rust::host::boot::boot_file_with(&resolved, false, &std::env::vars().collect(), false, config)?;
     let body = serde_json::json!({ "argv": argv, "cwd": cwd.display().to_string() }).to_string();
     let answer = runtime.deliver_inbound_awaiting(&hook_name(command), [("content-type", "application/json")], &body, None);
-    Ok(CommandAnswer { code: exit_code(answer.status), body: answer.body, stderr: answer.stderr })
+    Ok(CommandAnswer {
+        code: exit_code(answer.status),
+        body: answer.body,
+        stderr: answer.stderr,
+        headers: answer.headers.unwrap_or_default(),
+    })
 }
 
 /// `orb run <program>`, booted: the program on the substrate host, `INIT` mounted on every trait.
@@ -214,7 +221,7 @@ pub(crate) fn boot_run(program: &Path, trace: bool) -> anyhow::Result<std::sync:
     let resolved = crate::commands::dev::resolve_to_temp(program)?;
     let host = orbital_shell_rust::host::SubstratePort(std::sync::Arc::new(crate::commands::program_host::ProgramHost));
     let runtime = orbital_shell_rust::host::boot::boot_file(&resolved, false, &std::env::vars().collect(), trace, Some(host))?;
-    orbital_shell_rust::host::run::mount_init(&runtime).map_err(|e| anyhow::anyhow!("INIT: {e}"))?;
+    orbital_shell_rust::host::run::mount_init(&runtime, orbital_shell_rust::host::run::ProtocolSide::Process).map_err(|e| anyhow::anyhow!("INIT: {e}"))?;
     Ok(runtime)
 }
 
@@ -352,6 +359,33 @@ pub(crate) fn served_schema(app: &orbital_core::OrbitalSchema, overrides: &serde
 
 /// `orb serve <program>`: the program composed with `std-http-server` by the host's `program/compose`, booted, and held
 /// like `orb run`.
+/// Run the program a cli command handed back (`orb-run` in its answer's headers), as the bootloader runs every program.
+/// `orb-run: server` boots the composed app in the body as `orb serve` does: catalogs beside `orb-app`, the mock store
+/// under `orb-mock: on`, `INIT` mounted on the server side, held until a signal.
+pub(crate) fn run_handoff(answer: &CommandAnswer) -> anyhow::Result<()> {
+    let header = |name: &str| answer.headers.get(name).map(String::as_str);
+    match header("orb-run") {
+        Some("server") => {}
+        other => anyhow::bail!("orb-run: no hand-off named {other:?}; the bootloader runs `server`"),
+    }
+    let mock = match header("orb-mock") {
+        Some("on") => true,
+        Some("off") => false,
+        other => anyhow::bail!("orb-run: server needs orb-mock on|off, got {other:?}"),
+    };
+    let app = header("orb-app").ok_or_else(|| anyhow::anyhow!("orb-run: server needs orb-app, the resolved app beside its catalogs"))?;
+    let schema: orbital_core::OrbitalSchema =
+        serde_json::from_str(&answer.body).map_err(|e| anyhow::anyhow!("orb-run: server: the body is not a program: {e}"))?;
+    let locales = schema.locales.clone().unwrap_or_default();
+    let catalogs = orbital_shell_rust::host::boot::read_catalogs(Path::new(app), &locales)?;
+    let host = orbital_shell_rust::host::SubstratePort(std::sync::Arc::new(crate::commands::program_host::ProgramHost));
+    let stop = stop_on_signal()?;
+    let runtime = orbital_shell_rust::host::boot::boot_app(schema, host, catalogs, mock, &std::env::vars().collect(), false)?;
+    orbital_shell_rust::host::run::mount_init(&runtime, orbital_shell_rust::host::run::ProtocolSide::Server).map_err(|e| anyhow::anyhow!("INIT: {e}"))?;
+    hold(&runtime, &stop);
+    Ok(())
+}
+
 pub(crate) fn serve_program(program: &Path, options: &ServeOptions) -> anyhow::Result<()> {
     let cwd = std::env::current_dir()?;
     let overrides = serve_overrides(options, &cwd)?;
@@ -379,7 +413,7 @@ pub(crate) fn serve_program(program: &Path, options: &ServeOptions) -> anyhow::R
         &std::env::vars().collect(),
         false,
     )?;
-    orbital_shell_rust::host::run::mount_init(&runtime).map_err(|e| anyhow::anyhow!("INIT: {e}"))?;
+    orbital_shell_rust::host::run::mount_init(&runtime, orbital_shell_rust::host::run::ProtocolSide::Server).map_err(|e| anyhow::anyhow!("INIT: {e}"))?;
     hold(&runtime, &stop);
     Ok(())
 }
@@ -402,7 +436,7 @@ orbital EchoOrbital {
     id : string!
   }
 
-  trait Echo -> EchoRun [integration] {
+  trait Echo -> EchoRun {
     initial: ready
 
     state ready {
@@ -425,7 +459,7 @@ orbital EchoOrbital {
     }
   }
 
-  page "/echo" -> Echo
+  page boot as EchoStart -> Echo
 }
 "#;
 
@@ -491,13 +525,13 @@ orbital EchoOrbital {
         let refused = run_command_program(&program, "warn", &[], &cwd).unwrap();
         assert_eq!(
             refused,
-            CommandAnswer { code: 2, body: String::new(), stderr: Some("usage: orb warn <words>".into()) }
+            CommandAnswer { code: 2, body: String::new(), stderr: Some("usage: orb warn <words>".into()), headers: Default::default() }
         );
         assert_eq!(written(&refused), (String::new(), "usage: orb warn <words>\n".into()));
         let answered = run_command_program(&program, "warn", &["hi".into()], &cwd).unwrap();
         assert_eq!(
             answered,
-            CommandAnswer { code: 0, body: "hi".into(), stderr: None },
+            CommandAnswer { code: 0, body: "hi".into(), stderr: None, headers: Default::default() },
             "an answer that omits stderr has none"
         );
         assert_eq!(written(&answered), ("hi\n".into(), String::new()));
@@ -508,7 +542,7 @@ orbital EchoOrbital {
         let (cwd, store) = project("no-stderr", "cli");
         let program = find_command_program("echo", &cwd, &store).unwrap().expect("the cli program is found");
         let refused = run_command_program(&program, "echo", &[], &cwd).unwrap();
-        assert_eq!(refused, CommandAnswer { code: 2, body: "usage: orb echo <words>".into(), stderr: None });
+        assert_eq!(refused, CommandAnswer { code: 2, body: "usage: orb echo <words>".into(), stderr: None, headers: Default::default() });
         assert_eq!(written(&refused), ("usage: orb echo <words>\n".into(), String::new()));
     }
 
@@ -689,7 +723,7 @@ orbital ListenerOrbital {
     id : string!
   }
 
-  trait Listen -> Listener [integration] {
+  trait Listen -> Listener {
     initial: booting
 
     state booting {
@@ -718,7 +752,7 @@ orbital ListenerOrbital {
     }
   }
 
-  page "/listener" -> Listen
+  page boot as ListenerStart -> Listen
 }
 "#;
 
@@ -812,7 +846,7 @@ orbital SplitOrbital {{
     id : string!
   }}
 
-  trait SplitCli -> SplitRun [integration] {{
+  trait SplitCli -> SplitRun {{
     initial: ready
 
     state ready {{
@@ -834,7 +868,7 @@ orbital SplitOrbital {{
     }}
   }}
 
-  trait SplitEngine -> SplitRun [integration] {{
+  trait SplitEngine -> SplitRun {{
     initial: ready
 
     state ready {{
@@ -853,7 +887,7 @@ orbital SplitOrbital {{
     }}
   }}
 
-  page "/split" -> SplitCli, SplitEngine
+  page boot as SplitStart -> SplitCli, SplitEngine
 }}
 "#
         )

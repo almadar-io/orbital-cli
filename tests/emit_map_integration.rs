@@ -1,5 +1,4 @@
 //! Integration tests for the Phase 4 / Phase 7 subset: `--map` emission
-//! and the `orb emit-trace` reverse-lookup subcommand.
 //!
 //! See `docs/Almadar_Compiler_Emit_Code.md` §17. These cover file-level
 //! granularity only — per-expression spans land with Phase 5.
@@ -138,62 +137,4 @@ fn map_ignored_for_orb_target() {
     );
 
     let _ = std::fs::remove_file(&out);
-}
-
-// --- Phase 7a: orb emit-trace ----------------------------------------------
-
-#[test]
-fn emit_trace_resolves_generated_line() {
-    let orb = std_modal_orb();
-    if !orb.exists() {
-        return;
-    }
-    let out = tmp("trace.ts");
-    let map = PathBuf::from(format!("{}.map", out.display()));
-
-    let (_, _, ok1) = run(&[
-        "emit",
-        "ts",
-        orb.to_str().unwrap(),
-        "--section",
-        "entities.ModalRecord",
-        "-o",
-        out.to_str().unwrap(),
-        "--map",
-    ]);
-    assert!(ok1);
-
-    let target = format!("{}:{}", out.display(), 1);
-    let (stdout, _, ok2) = run(&["emit-trace", &target]);
-    assert!(ok2);
-    assert!(
-        stdout.contains("std-modal.orb"),
-        "trace output should reference the .orb source; got: {}",
-        stdout
-    );
-    assert!(
-        stdout.contains("→"),
-        "trace output should include the arrow separator; got: {}",
-        stdout
-    );
-
-    let _ = std::fs::remove_file(&out);
-    let _ = std::fs::remove_file(&map);
-}
-
-#[test]
-fn emit_trace_errors_without_map() {
-    let tmp_file = tmp("no-map.ts");
-    std::fs::write(&tmp_file, "// no map here\n").unwrap();
-    let _ = std::fs::remove_file(PathBuf::from(format!("{}.map", tmp_file.display())));
-
-    let (_, stderr, ok) = run(&["emit-trace", &format!("{}:1:1", tmp_file.display())]);
-    assert!(!ok);
-    assert!(
-        stderr.contains("no source map found"),
-        "expected clear missing-map error; got: {}",
-        stderr
-    );
-
-    let _ = std::fs::remove_file(&tmp_file);
 }

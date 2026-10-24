@@ -43,23 +43,16 @@ pub(crate) fn parse_schema(path: &PathBuf) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Resolve a schema: run Inline + Compose + Enrich, then serialize the
-/// resulting `OrbitalSchema` to JSON. Emits to `output` (if given) or
-/// stdout. Produces the same artifact `orbital compile` writes as
-/// `resolved.orb` alongside generated code — useful for tooling that
-/// wants the bundled schema view without running full codegen.
-pub(crate) fn resolve_schema_cli(
+/// What `orb resolve` prints for `path`; with `output`, also written there with its catalogs and
+/// lazy behaviors. Without `output`, a program with lazy behaviors or locales is refused.
+pub(crate) fn resolved_text(
     path: &std::path::Path,
     output: Option<&std::path::Path>,
-    verbose: bool,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<String> {
     use crate::utils::parse_schema_auto;
     use orbital_compiler::{resolve_schema_with_path, CompilerOptions};
 
-    let options = CompilerOptions {
-        verbose,
-        ..CompilerOptions::from_env()
-    };
+    let options = CompilerOptions::from_env();
 
     let content = std::fs::read_to_string(path)
         .map_err(|e| anyhow::anyhow!("Failed to read {}: {}", path.display(), e))?;
@@ -79,9 +72,7 @@ pub(crate) fn resolve_schema_cli(
         Some(out) => {
             std::fs::write(out, &json)
                 .map_err(|e| anyhow::anyhow!("Failed to write {}: {}", out.display(), e))?;
-            if verbose {
-                eprintln!("Wrote resolved schema to {}", out.display());
-            }
+            tracing::info!(target: orbital_core::logging::ns::CLI, path = %out.display(), "wrote resolved schema");
             let program_dir = path.parent().unwrap_or(std::path::Path::new("."));
             orbital_compiler::phases::messages::write_catalogs(out, &resolved, program_dir)
                 .map_err(|e| {
@@ -91,7 +82,6 @@ pub(crate) fn resolve_schema_cli(
                 out.parent().unwrap_or(std::path::Path::new(".")),
                 &lazy,
                 program_dir,
-                verbose,
             )?;
         }
         None if !lazy.is_empty() => {
@@ -107,11 +97,9 @@ pub(crate) fn resolve_schema_cli(
                 path.display()
             );
         }
-        None => {
-            println!("{}", json);
-        }
+        None => {}
     }
-    Ok(())
+    Ok(json)
 }
 
 fn resolved_json(resolved: &orbital_core::schema::OrbitalSchema) -> anyhow::Result<String> {
@@ -130,7 +118,6 @@ pub(crate) fn write_lazy(
     dir: &std::path::Path,
     lazy: &[orbital_compiler::phases::lazy::ResolvedLazy],
     program_dir: &std::path::Path,
-    verbose: bool,
 ) -> anyhow::Result<()> {
     orbital_compiler::phases::lazy::write_lazy(dir, lazy, program_dir, &|schema| {
         resolved_json(schema).map_err(|e| std::io::Error::other(e.to_string()))
@@ -142,45 +129,30 @@ pub(crate) fn write_lazy(
             e
         )
     })?;
-    if verbose {
-        for item in lazy {
-            eprintln!(
-                "Wrote lazy behavior {} to {}",
-                item.orbital,
-                dir.join(&item.orb_ref).display()
-            );
-        }
+    for item in lazy {
+        tracing::info!(
+            target: orbital_core::logging::ns::CLI,
+            orbital = %item.orbital,
+            path = %dir.join(&item.orb_ref).display(),
+            "wrote lazy behavior"
+        );
     }
     Ok(())
 }
 
-pub(crate) fn format_schema(path: &PathBuf, write: bool) -> anyhow::Result<()> {
-    let formatted = formatted_source(path)?;
-    if write {
-        std::fs::write(path, &formatted)?;
-        println!("Formatted {} ({} bytes)", path.display(), formatted.len());
-    } else {
-        println!("{}", formatted);
-    }
-    Ok(())
-}
-
-/// The file at `path`, pretty-printed in the syntax it is written in.
-pub(crate) fn formatted_source(path: &std::path::Path) -> anyhow::Result<String> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| anyhow::anyhow!("Could not read {}: {}", path.display(), e))?;
-
-    let formatted = match detect_syntax(&content) {
+/// `content` pretty-printed in the syntax it is written in: `.lolo` through the authored-AST
+/// formatter (comments kept), `.orb` JSON with sorted keys. `label` names it in errors.
+pub(crate) fn formatted_text(content: &str, label: &str) -> anyhow::Result<String> {
+    Ok(match detect_syntax(content) {
         InputSyntax::Lolo => {
-            let program = orbital_lolo::parse_str(&content)
-                .map_err(|e| anyhow::anyhow!("Parse error in {}: {:?}", path.display(), e))?;
+            let program = orbital_lolo::parse_str(content)
+                .map_err(|e| anyhow::anyhow!("Parse error in {}: {:?}", label, e))?;
             orbital_lolo::format_program(&program)
         }
         InputSyntax::OrbJson => {
-            let value: serde_json::Value = serde_json::from_str(&content)
-                .map_err(|e| anyhow::anyhow!("Invalid JSON in {}: {}", path.display(), e))?;
+            let value: serde_json::Value = serde_json::from_str(content)
+                .map_err(|e| anyhow::anyhow!("Invalid JSON in {}: {}", label, e))?;
             serde_json::to_string_pretty(&orbital_core::util::canonical_json(&value))?
         }
-    };
-    Ok(formatted)
+    })
 }

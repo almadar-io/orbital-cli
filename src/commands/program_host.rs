@@ -35,6 +35,126 @@ fn option_flag(options: Option<&Value>, key: &str) -> Option<bool> {
         .and_then(|o| o.get(key).and_then(serde_json::Value::as_bool))
 }
 
+/// An op's options object: typed reads by key, and a refusal of any key the op's form does not take.
+struct Options<'a> {
+    op: &'a str,
+    map: &'a serde_json::Map<String, serde_json::Value>,
+}
+
+impl<'a> Options<'a> {
+    fn of(op: &'a str, value: &'a serde_json::Value) -> Result<Self, SubstrateFailure> {
+        value
+            .as_object()
+            .map(|map| Self { op, map })
+            .ok_or_else(|| failure(format!("{op}: options must be an object")))
+    }
+
+    fn only(&self, form: &str, keys: &[&str]) -> Result<(), SubstrateFailure> {
+        match self.map.keys().find(|k| !keys.contains(&k.as_str())) {
+            Some(other) => Err(failure(format!("{}: unsupported option \"{other}\" with `{form}`", self.op))),
+            None => Ok(()),
+        }
+    }
+
+    fn text(&self, key: &str) -> Result<Option<String>, SubstrateFailure> {
+        match self.map.get(key) {
+            None | Some(serde_json::Value::Null) => Ok(None),
+            Some(serde_json::Value::String(s)) => Ok(Some(s.clone())),
+            Some(_) => Err(failure(format!("{}: `{key}` must be text", self.op))),
+        }
+    }
+
+    fn flag(&self, key: &str) -> Result<bool, SubstrateFailure> {
+        match self.map.get(key) {
+            None | Some(serde_json::Value::Null) => Ok(false),
+            Some(serde_json::Value::Bool(b)) => Ok(*b),
+            Some(_) => Err(failure(format!("{}: `{key}` must be a boolean", self.op))),
+        }
+    }
+
+    fn number(&self, key: &str) -> Result<Option<u64>, SubstrateFailure> {
+        match self.map.get(key) {
+            None | Some(serde_json::Value::Null) => Ok(None),
+            Some(v) => v
+                .as_u64()
+                .map(Some)
+                .ok_or_else(|| failure(format!("{}: `{key}` must be a whole number", self.op))),
+        }
+    }
+
+    fn path(&self, key: &str) -> Result<Option<PathBuf>, SubstrateFailure> {
+        Ok(self.text(key)?.map(PathBuf::from))
+    }
+
+    fn absolute(&self, key: &str, form: &str) -> Result<PathBuf, SubstrateFailure> {
+        self.path(key)?
+            .filter(|p| p.is_absolute())
+            .ok_or_else(|| failure(format!("{}: `{form}` needs the program's absolute `{key}`", self.op)))
+    }
+
+    fn choice<T: clap::ValueEnum>(&self, key: &str) -> Result<Option<T>, SubstrateFailure> {
+        self.text(key)?
+            .map(|name| {
+                T::from_str(&name, false)
+                    .map_err(|_| failure(format!("{}: `{key}` \"{name}\" is not one of the accepted values", self.op)))
+            })
+            .transpose()
+    }
+}
+
+fn has_option(options: Option<&Value>, key: &str) -> bool {
+    options
+        .map(to_json)
+        .is_some_and(|o| o.get(key).is_some_and(|v| !v.is_null()))
+}
+
+/// `program/print`'s `{ source, node | nodes }` options: format authored `.lolo` text (comments
+/// kept, as `orb format`) instead of the quoted program, whole or at a node path.
+struct PrintSource {
+    source: String,
+    node: Option<String>,
+    nodes: Option<String>,
+}
+
+impl PrintSource {
+    fn of(options: Option<&Value>) -> Result<Option<Self>, SubstrateFailure> {
+        let Some(options) = options.map(to_json) else { return Ok(None) };
+        let text = |key: &str| -> Result<Option<String>, SubstrateFailure> {
+            match options.get(key) {
+                None | Some(serde_json::Value::Null) => Ok(None),
+                Some(serde_json::Value::String(s)) => Ok(Some(s.clone())),
+                Some(_) => Err(failure(format!("program/print: `{key}` must be text"))),
+            }
+        };
+        let (node, nodes) = (text("node")?, text("nodes")?);
+        let Some(source) = text("source")? else {
+            return match node.or(nodes) {
+                Some(_) => Err(failure("program/print: `node` and `nodes` read the authored `source`, which is missing")),
+                None => Ok(None),
+            };
+        };
+        if node.is_some() && nodes.is_some() {
+            return Err(failure("program/print: give `node` or `nodes`, not both"));
+        }
+        Ok(Some(PrintSource { source, node, nodes }))
+    }
+
+    fn print(self) -> Result<Value, SubstrateFailure> {
+        let at = |path: &str| -> Result<Vec<String>, SubstrateFailure> {
+            let program = orbital_lolo::parse_str(&self.source).map_err(|e| failure(format!("program/print: parse error: {e:?}")))?;
+            orbital_lolo::format_path(&program, path).map_err(|e| failure(format!("program/print: {e}")))
+        };
+        match (&self.node, &self.nodes) {
+            (Some(path), _) if path.contains("[*]") => Err(failure("program/print: `node` names one construct; use `nodes` for a `[*]` path")),
+            (Some(path), _) => Ok(Value::String(at(path)?.remove(0))),
+            (None, Some(path)) => from_json(serde_json::Value::from(at(path)?)),
+            (None, None) => crate::commands::parse::formatted_text(&self.source, "source")
+                .map(Value::String)
+                .map_err(|e| failure(format!("program/print: {e}"))),
+        }
+    }
+}
+
 /// A scratch directory removed when dropped.
 struct Scratch(PathBuf);
 
@@ -156,6 +276,178 @@ fn issues(report: &serde_json::Value, key: &str) -> Vec<serde_json::Value> {
 }
 
 impl ProgramHost {
+    /// `program/validate { report: true, path, final?, denyWarnings? }`: the report `orb validate --json` prints for the
+    /// file at the absolute `path` (lowering, types, every validator finding with its source position).
+    fn validation_report(options: &serde_json::Value) -> Result<Value, SubstrateFailure> {
+        let op = "program/validate";
+        let path = options
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .map(std::path::Path::new)
+            .filter(|p| p.is_absolute())
+            .ok_or_else(|| failure(format!("{op}: `report` needs the program's absolute `path`")))?;
+        let flag = |key: &str| match options.get(key) {
+            None | Some(serde_json::Value::Null) => Ok(false),
+            Some(serde_json::Value::Bool(b)) => Ok(*b),
+            Some(_) => Err(failure(format!("{op}: `{key}` must be a boolean"))),
+        };
+        for key in options.as_object().into_iter().flat_map(|o| o.keys()) {
+            if !["report", "path", "final", "denyWarnings", "patterns", "services"].contains(&key.as_str()) {
+                return Err(failure(format!("{op}: unsupported option \"{key}\" with `report`")));
+            }
+        }
+        let file = |key: &str| match options.get(key) {
+            None | Some(serde_json::Value::Null) => Ok(None),
+            Some(serde_json::Value::String(p)) => Ok(Some(std::path::PathBuf::from(p))),
+            Some(_) => Err(failure(format!("{op}: `{key}` must be a path"))),
+        };
+        let (patterns, services) = (file("patterns")?, file("services")?);
+        let report = crate::commands::validate::validation_report(
+            path,
+            patterns.as_deref(),
+            services.as_deref(),
+            flag("denyWarnings")?,
+            flag("final")?,
+        )
+            .map_err(|e| failure(format!("{op}: {e}")))?;
+        from_json(serde_json::to_value(report).map_err(|e| failure(e.to_string()))?)
+    }
+
+    /// `program/read { resolve: true, path, output? }`: what `orb resolve <path> [--output]` prints
+    /// and writes, as `{ program, text }`; the file at the absolute `path` is read, not `text`.
+    fn read_resolved(options: &serde_json::Value) -> Result<Value, SubstrateFailure> {
+        let path = options
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .map(std::path::Path::new)
+            .filter(|p| p.is_absolute())
+            .ok_or_else(|| failure("program/read: `resolve` needs the program's absolute `path`"))?;
+        let output = match options.get("output") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(serde_json::Value::String(out)) => Some(std::path::PathBuf::from(out)),
+            Some(_) => return Err(failure("program/read: `output` must be a path")),
+        };
+        let text = crate::commands::parse::resolved_text(path, output.as_deref())
+            .map_err(|e| failure(format!("program/read: {e}")))?;
+        let program: serde_json::Value = serde_json::from_str(&text).map_err(|e| failure(e.to_string()))?;
+        from_json(serde_json::json!({ "program": program, "text": text }))
+    }
+
+    /// `program/read { stamp: true, path, prior?, imports?, output? }`: what `orb stamp` prints, as `{ program, text }`;
+    /// with `output` the stamped text is written to that file (as `--output`) and printed by nobody.
+    fn read_stamped(options: &serde_json::Value) -> Result<Value, SubstrateFailure> {
+        let options = Options::of("program/read", options)?;
+        options.only("stamp", &["stamp", "path", "prior", "imports", "output"])?;
+        let path = options.absolute("path", "stamp")?;
+        let prior = options.path("prior")?;
+        let imports = options.path("imports")?;
+        let output = options.path("output")?;
+        let text = crate::commands::stamp::stamped_json(&path, prior.as_deref(), imports.as_deref())
+            .map_err(|e| failure(format!("program/read: {e}")))?;
+        if let Some(out) = &output {
+            std::fs::write(out, &text)
+                .map_err(|e| failure(format!("program/read: Failed to write {}: {e}", out.display())))?;
+        }
+        let program: serde_json::Value = serde_json::from_str(&text).map_err(|e| failure(e.to_string()))?;
+        from_json(serde_json::json!({ "program": program, "text": text }))
+    }
+
+    /// `program/print { target, path, section?, format?, only?, map?, output?, inspectSource?, documentVersion?, unit?,
+    /// out?, signKey?, keyId? }`: what `orb emit <target> <path>` prints, as `{ text, stderr }`; the files `orb emit`
+    /// writes (`output`, the source map, `out`) are written.
+    fn print_target(options: &serde_json::Value) -> Result<Value, SubstrateFailure> {
+        use crate::emit::{EmitFormat, EmitOptions, EmitTarget};
+        let options = Options::of("program/print", options)?;
+        options.only(
+            "target",
+            &[
+                "target", "path", "section", "format", "only", "map", "output", "inspectSource", "documentVersion",
+                "unit", "out", "signKey", "keyId",
+            ],
+        )?;
+        let target: EmitTarget = options
+            .choice("target")?
+            .ok_or_else(|| failure("program/print: `target` must be orb, lolo, ts, py or manifest"))?;
+        let path = options.absolute("path", "target")?;
+        let (sign_key, key_id) = (options.path("signKey")?, options.text("keyId")?);
+        if sign_key.is_some() != key_id.is_some() {
+            return Err(failure("program/print: `signKey` and `keyId` go together"));
+        }
+        let inspect_source = options.path("inspectSource")?;
+        let document_version = options.number("documentVersion")?;
+        if document_version.is_some() && inspect_source.is_none() {
+            return Err(failure("program/print: `documentVersion` needs `inspectSource`"));
+        }
+        let rendered = crate::emit::render(EmitOptions {
+            target,
+            path: Some(path),
+            section: options.text("section")?,
+            output: options.path("output")?,
+            format: options.choice::<EmitFormat>("format")?,
+            only: options.text("only")?,
+            map: options.flag("map")?,
+            inspect_source,
+            document_version,
+            unit: options.text("unit")?,
+            out: options.path("out")?,
+            sign_key,
+            key_id,
+        })
+        .map_err(|e| failure(format!("program/print: {e}")))?;
+        from_json(serde_json::json!({ "text": rendered.stdout, "stderr": rendered.stderr }))
+    }
+
+    /// `program/eval { generate: { path, output, shell, mode?, frontend?, backend?, backendUrl?, patterns?, devLogs?,
+    /// host?, listenHost?, port?, emitOrb? } }`: what `orb compile` does and prints, as `{ lines, files, warnings,
+    /// nextSteps }`. The program is validated before anything is generated, as the command does.
+    fn eval_generate(options: &serde_json::Value) -> Result<Value, SubstrateFailure> {
+        use crate::commands::compile::{compile_run, CompileRequest};
+        let op = "program/eval";
+        Options::of(op, options)?.only("generate", &["generate"])?;
+        let generate = options.get("generate").unwrap_or(&serde_json::Value::Null);
+        let g = Options::of(op, generate)?;
+        g.only(
+            "generate",
+            &[
+                "path", "output", "shell", "mode", "frontend", "backend", "backendUrl", "patterns", "devLogs", "host",
+                "listenHost", "port", "emitOrb",
+            ],
+        )?;
+        let path = g.absolute("path", "generate")?;
+        let output = g.absolute("output", "generate")?;
+        let shell: crate::ShellType = g
+            .choice("shell")?
+            .ok_or_else(|| failure(format!("{op}: `generate` needs the `shell` to generate for")))?;
+        let port = match g.number("port")? {
+            Some(n) => u16::try_from(n).map_err(|_| failure(format!("{op}: `port` must be a port number")))?,
+            None => 3030,
+        };
+        let listen_host = g.text("listenHost")?.unwrap_or_else(|| "127.0.0.1".to_string());
+        let address = crate::utils::shell_programs::ServedAddress { host: &listen_host, port };
+        let (patterns, emit_orb) = (g.path("patterns")?, g.path("emitOrb")?);
+        let report = compile_run(CompileRequest {
+            path: &path,
+            output: &output,
+            shell,
+            mode: g.choice("mode")?.unwrap_or_default(),
+            frontend: g.choice("frontend")?,
+            backend: g.choice("backend")?,
+            backend_url: g.text("backendUrl")?,
+            patterns_path: patterns.as_deref(),
+            dev_logs: g.flag("devLogs")?,
+            host: g.choice("host")?.unwrap_or_default(),
+            address: &address,
+            emit_orb: emit_orb.as_deref(),
+        })
+        .map_err(|e| failure(format!("{op}: {e}")))?;
+        from_json(serde_json::json!({
+            "lines": report.lines,
+            "files": report.files,
+            "warnings": report.warnings,
+            "nextSteps": report.next_steps,
+        }))
+    }
+
     fn read(&self, text: &str) -> Result<Value, SubstrateFailure> {
         let scratch = Scratch::new("almadar-program")?;
         let path = scratch.write("program.lolo", text)?;
@@ -627,8 +919,15 @@ impl ProgramHost {
             .map(to_json)
             .and_then(|r| r.as_array().cloned())
             .ok_or_else(|| failure(format!("{op}: expected a list of requests")))?;
+        let raw = match options.map(to_json).as_ref().and_then(|o| o.get("report")) {
+            None | Some(serde_json::Value::Null) => false,
+            Some(serde_json::Value::String(r)) if r == "raw" => true,
+            Some(other) => return Err(failure(format!("{op}: options.report must be \"raw\", not {other}"))),
+        };
+        // A raw request is an `orb execute --steps` step: the kernel dispatch from the held state, no `from` to check.
+        let required: &[&str] = if raw { &["trait", "event"] } else { &["orbital", "trait", "from", "event"] };
         for r in &requests {
-            for key in ["orbital", "trait", "from", "event"] {
+            for key in required.iter().copied() {
                 if !r.get(key).is_some_and(serde_json::Value::is_string) {
                     return Err(failure(format!("{op}: each request needs a {key}")));
                 }
@@ -664,7 +963,10 @@ impl ProgramHost {
         let steps: Vec<serde_json::Value> = requests
             .iter()
             .map(|r| {
-                let mut step = serde_json::json!({ "trait": r["trait"], "event": r["event"], "payload": r.get("payload").cloned().unwrap_or(serde_json::json!({})), "from": r["from"] });
+                let mut step = serde_json::json!({ "trait": r["trait"], "event": r["event"], "payload": r.get("payload").cloned().unwrap_or(serde_json::json!({})) });
+                if let Some(from) = r.get("from") {
+                    step["from"] = from.clone();
+                }
                 for key in ["entity", "config", "now", "settleMs", "viewer"] {
                     if let Some(v) = r.get(key) {
                         step[key] = v.clone();
@@ -690,6 +992,9 @@ impl ProgramHost {
             live,
         )
         .map_err(|e| failure(format!("{op}: {e}")))?;
+        if raw {
+            return from_json(report);
+        }
         if report.get("success") != Some(&serde_json::Value::Bool(true)) {
             return Err(failure(format!(
                 "{op}: {}",
@@ -889,10 +1194,26 @@ impl SubstrateHandler for ProgramHost {
                     let options = to_json(&args[1]);
                     super::program_inspect::inspect(text, &options).and_then(from_json)
                 }
+                Some(Value::String(text)) if option_flag(args.get(1), "embeds") == Some(true) => {
+                    let embeds = orbital_lolo::embeds::inline_embeds(text)
+                        .map_err(|e| failure(format!("program/read: {e}")))?;
+                    from_json(serde_json::to_value(embeds).map_err(|e| failure(e.to_string()))?)
+                }
+                Some(Value::String(_)) if option_flag(args.get(1), "resolve") == Some(true) => {
+                    Self::read_resolved(&to_json(&args[1]))
+                }
+                Some(Value::String(_)) if option_flag(args.get(1), "stamp") == Some(true) => {
+                    Self::read_stamped(&to_json(&args[1]))
+                }
                 Some(Value::String(text)) => self.read(text),
                 _ => Err(failure("program/read: expected .lolo text")),
             },
-            "program/print" => self.print(program_arg(op, args.first())?),
+            "program/print" if has_option(args.get(1), "target") => Self::print_target(&to_json(&args[1])),
+            "program/print" => match PrintSource::of(args.get(1))? {
+                Some(source) => source.print(),
+                None => self.print(program_arg(op, args.first())?),
+            },
+            "program/validate" if option_flag(args.get(1), "report") == Some(true) => Self::validation_report(&to_json(&args[1])),
             "program/validate" => self.validate(program_arg(op, args.first())?, args.get(1)),
             "behavior/catalog" => {
                 let embedder = ProviderEmbedder::from_env();
@@ -907,8 +1228,21 @@ impl SubstrateHandler for ProgramHost {
             "behavior/texts" => Self::texts(args.first()),
             "behavior/packages" => Self::packages(),
             "behavior/source" => Self::source(op, args.first(), args.get(1)),
+            "behavior/resolve" if option_flag(args.get(1), "expects") == Some(true) => {
+                let spec = Self::behavior_of(op, args.first())?;
+                let derived = crate::commands::behaviors_catalog::expectations(&spec).map_err(|e| failure(format!("{op}: {e}")))?;
+                from_json(derived)
+            }
+            "behavior/resolve" if option_flag(args.get(1), "path") == Some(true) => {
+                let spec = Self::behavior_of(op, args.first())?;
+                match crate::commands::behaviors::which(&spec).map_err(|e| failure(format!("{op}: {e}")))? {
+                    Ok((path, owner)) => from_json(serde_json::json!({ "path": path.display().to_string(), "owner": owner })),
+                    Err(refusal) => Err(failure(format!("{op}: {refusal}"))),
+                }
+            }
             "behavior/resolve" => self.resolve_behavior(&Self::behavior_of(op, args.first())?),
             "program/compose" => self.compose(args),
+            "program/eval" if has_option(args.get(1), "generate") => Self::eval_generate(&to_json(&args[1])),
             "program/eval" => self.eval(program_arg(op, args.first())?, args.get(1)),
             "program/step" => self.step(program_arg(op, args.first())?, args.get(1), args.get(2)),
             "behavior/dependencies" => self.dependencies(program_arg(op, args.first())?),
@@ -934,7 +1268,7 @@ orbital NoteOrbital {
     text : string = ""
   }
 
-  trait NoteView -> Note [interaction] {
+  trait NoteView -> Note {
     initial: idle
 
     state idle {
@@ -976,6 +1310,158 @@ orbital NoteOrbital {
             text.contains("note-pad") && text.contains("NoteView"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn read_with_embeds_lists_each_inline_embed_and_control_none_without_one() {
+        let source = "app a [version: \"1.0.0\"]\norbital O {\n  uses Button from \"std/behaviors/std-button\"\n  entity E [runtime] {\n    id : string!\n  }\n  trait V -> E {\n    initial: idle\n    state idle {\n      INIT -> idle\n        (render-ui main <Button.traits.ButtonRender label={\"Go\"} />)\n    }\n  }\n}\n";
+        let options = from_json(serde_json::json!({ "embeds": true })).unwrap();
+        let embeds = json(&ProgramHost.run("program/read", &[Value::String(source.into()), options.clone()]).expect("reads"));
+        assert_eq!(embeds.as_array().map(Vec::len), Some(1), "{embeds}");
+        assert_eq!(embeds[0]["behavior"], "Button.traits.ButtonRender");
+        let none = json(&ProgramHost.run("program/read", &[Value::String(NOTE.into()), options]).expect("reads"));
+        assert_eq!(none, serde_json::json!([]));
+    }
+
+    #[test]
+    fn read_with_resolve_answers_what_orb_resolve_prints() {
+        orbital_compiler::loader::register_source_lowerer(|path, _, _| crate::lower_lolo_file(path));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("note.lolo");
+        std::fs::write(&file, NOTE).unwrap();
+        let options = from_json(serde_json::json!({ "resolve": true, "path": file.display().to_string() })).unwrap();
+        let answer = json(&ProgramHost.run("program/read", &[Value::String(String::new()), options]).expect("resolves"));
+        let expected = crate::commands::parse::resolved_text(&file, None).expect("orb resolve");
+        assert_eq!(answer["text"], serde_json::Value::String(expected.clone()));
+        assert_eq!(answer["program"], serde_json::from_str::<serde_json::Value>(&expected).unwrap());
+    }
+
+    #[test]
+    fn read_with_resolve_refuses_a_relative_path() {
+        let options = from_json(serde_json::json!({ "resolve": true, "path": "note.lolo" })).unwrap();
+        let error = ProgramHost.run("program/read", &[Value::String(String::new()), options]).unwrap_err();
+        assert!(error.message.contains("absolute `path`"), "{}", error.message);
+    }
+
+    #[test]
+    fn step_with_a_raw_report_is_what_orb_execute_steps_prints() {
+        orbital_compiler::loader::register_source_lowerer(|path, _, _| crate::lower_lolo_file(path));
+        let source = NOTE.to_string();
+        let program = ProgramHost.run("program/read", &[Value::String(source)]).expect("reads");
+        let steps = serde_json::json!([{ "trait": "NoteView", "event": "INIT" }]);
+        let raw = from_json(serde_json::json!({ "report": "raw" })).unwrap();
+        let answer = json(&ProgramHost.run("program/step", &[program.clone(), from_json(steps.clone()).unwrap(), raw]).expect("steps"));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let orb = dir.path().join("program.orb");
+        std::fs::write(&orb, json(&program).to_string()).unwrap();
+        let expected = crate::commands::execute::run_cascade_with(&orb, &steps, false).expect("execute --steps");
+        assert_eq!(answer, expected);
+        assert_eq!(answer["success"], true, "{answer}");
+    }
+
+    #[test]
+    fn control_a_reshaped_step_still_needs_its_from_and_report_takes_only_raw() {
+        let source = NOTE.to_string();
+        let program = ProgramHost.run("program/read", &[Value::String(source)]).expect("reads");
+        let steps = from_json(serde_json::json!([{ "orbital": "NoteOrbital", "trait": "NoteView", "event": "INIT" }])).unwrap();
+        let error = ProgramHost.run("program/step", &[program.clone(), steps.clone()]).unwrap_err();
+        assert!(error.message.contains("needs a from"), "{}", error.message);
+        let wrong = from_json(serde_json::json!({ "report": "full" })).unwrap();
+        let error = ProgramHost.run("program/step", &[program, steps, wrong]).unwrap_err();
+        assert!(error.message.contains("must be \"raw\""), "{}", error.message);
+    }
+
+    #[test]
+    fn resolve_with_path_answers_what_orb_behaviors_which_prints() {
+        let spec = "std/behaviors/std-button";
+        let value = from_json(serde_json::json!({ "behavior": spec })).unwrap();
+        let options = from_json(serde_json::json!({ "path": true })).unwrap();
+        let answer = ProgramHost.run("behavior/resolve", &[value, options]);
+        match crate::commands::behaviors::which(spec).expect("packages discover") {
+            Ok((path, owner)) => assert_eq!(
+                json(&answer.expect("resolves")),
+                serde_json::json!({ "path": path.display().to_string(), "owner": owner })
+            ),
+            Err(refusal) => assert!(answer.unwrap_err().message.contains(&refusal)),
+        }
+    }
+
+    #[test]
+    fn resolve_with_expects_answers_what_orb_behaviors_expects_prints() {
+        orbital_compiler::loader::register_source_lowerer(|path, _, _| crate::lower_lolo_file(path));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let orb = dir.path().join("note.orb");
+        let program = ProgramHost.run("program/read", &[Value::String(NOTE.to_string())]).expect("reads");
+        std::fs::write(&orb, json(&program).to_string()).unwrap();
+        let spec = orb.display().to_string();
+        let value = from_json(serde_json::json!({ "behavior": spec })).unwrap();
+        let options = from_json(serde_json::json!({ "expects": true })).unwrap();
+        let answer = json(&ProgramHost.run("behavior/resolve", &[value, options]).expect("derives"));
+        assert_eq!(answer, crate::commands::behaviors_catalog::expectations(&spec).unwrap());
+        assert!(answer.get("NoteOrbital").is_some(), "{answer}");
+    }
+
+    #[test]
+    fn control_resolve_with_path_refuses_a_value_naming_no_behavior() {
+        let options = from_json(serde_json::json!({ "path": true })).unwrap();
+        let error = ProgramHost.run("behavior/resolve", &[Value::Null, options]).unwrap_err();
+        assert!(error.message.contains("naming its behavior"), "{}", error.message);
+    }
+
+    #[test]
+    fn validate_with_a_report_answers_what_orb_validate_json_prints() {
+        orbital_compiler::loader::register_source_lowerer(|path, _, _| crate::lower_lolo_file(path));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("note.lolo");
+        std::fs::write(&file, NOTE).unwrap();
+        let options = from_json(serde_json::json!({ "report": true, "path": file.display().to_string() })).unwrap();
+        let answer = json(&ProgramHost.run("program/validate", &[Value::Null, options]).expect("reports"));
+        let expected = serde_json::to_value(crate::commands::validate::validation_report(&file, None, None, false, false).unwrap()).unwrap();
+        assert_eq!(answer, expected);
+        assert!(answer.get("valid").is_some(), "{answer}");
+    }
+
+    #[test]
+    fn control_validate_report_refuses_a_relative_path_and_an_unknown_option() {
+        let relative = from_json(serde_json::json!({ "report": true, "path": "note.lolo" })).unwrap();
+        assert!(ProgramHost.run("program/validate", &[Value::Null, relative]).unwrap_err().message.contains("absolute `path`"));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("x.lolo").display().to_string();
+        let unknown = from_json(serde_json::json!({ "report": true, "path": path, "prior": {} })).unwrap();
+        assert!(ProgramHost.run("program/validate", &[Value::Null, unknown]).unwrap_err().message.contains("unsupported option"));
+    }
+
+    fn print_with(options: serde_json::Value) -> Result<Value, SubstrateFailure> {
+        ProgramHost.run("program/print", &[Value::Null, from_json(options).unwrap()])
+    }
+
+    #[test]
+    fn print_of_source_keeps_its_comments_as_orb_format_does() {
+        let commented = NOTE.replace("orbital NoteOrbital {", ";; the one note\norbital NoteOrbital {");
+        let Value::String(text) = print_with(serde_json::json!({ "source": commented })).expect("prints") else {
+            panic!("text")
+        };
+        assert!(text.contains(";; the one note"), "{text}");
+        assert_eq!(text, crate::commands::parse::formatted_text(&commented, "x").unwrap(), "the same bytes as orb format");
+    }
+
+    #[test]
+    fn print_of_a_node_is_that_construct_and_nodes_is_every_match() {
+        let Value::String(entity) = print_with(serde_json::json!({ "source": NOTE, "node": "orbitals[0].entity" })).expect("prints") else {
+            panic!("text")
+        };
+        assert!(entity.starts_with("entity Note"), "{entity}");
+        let fields = json(&print_with(serde_json::json!({ "source": NOTE, "nodes": "orbitals[0].entity.fields[*]" })).expect("prints"));
+        assert_eq!(fields.as_array().map(Vec::len), Some(2), "{fields}");
+    }
+
+    #[test]
+    fn print_refuses_a_node_without_source_a_wildcard_node_and_both_keys() {
+        let message = |options| print_with(options).unwrap_err().message;
+        assert!(message(serde_json::json!({ "node": "orbitals[0]" })).contains("missing"));
+        assert!(message(serde_json::json!({ "source": NOTE, "node": "orbitals[*]" })).contains("use `nodes`"));
+        assert!(message(serde_json::json!({ "source": NOTE, "node": "orbitals[0]", "nodes": "orbitals[*]" })).contains("not both"));
+        assert!(message(serde_json::json!({ "source": NOTE, "node": "orbitals[3]" })).contains("out of range"));
     }
 
     #[test]

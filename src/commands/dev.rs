@@ -29,7 +29,6 @@ pub(crate) fn resolve_schema_to_temp(schema: orbital_core::OrbitalSchema, path: 
         out.parent().unwrap_or(std::path::Path::new(".")),
         &lazy,
         program_dir,
-        false,
     )?;
     Ok(out)
 }

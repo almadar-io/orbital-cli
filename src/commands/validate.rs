@@ -9,6 +9,7 @@ use crate::{
     SourcePosition, ValidationJsonError, ValidationJsonOutput, ValidationJsonWarning,
     ValidationStats,
 };
+use orbital_core::logging::ns;
 use std::path::PathBuf;
 
 /// `.lolo` source facts the lowered schema cannot carry. The pre-bracket app
@@ -57,7 +58,7 @@ pub(crate) fn validate_schema(
         println!("{}", serde_json::to_string_pretty(&output)?);
         return Ok(());
     }
-    if let Err(e) = crate::utils::patterns::ensure_language_ready() {
+    if let Err(e) = tracing::info_span!(target: ns::CLI, "language data").in_scope(crate::utils::patterns::ensure_language_ready) {
         anyhow::bail!("{}: {e}", e.code());
     }
 
@@ -87,7 +88,7 @@ pub(crate) fn validation_report(
     deny_warnings: bool,
     final_program: bool,
 ) -> anyhow::Result<ValidationJsonOutput> {
-    if let Err(e) = crate::utils::patterns::ensure_language_ready() {
+    if let Err(e) = tracing::info_span!(target: ns::CLI, "language data").in_scope(crate::utils::patterns::ensure_language_ready) {
         return Ok(ValidationJsonOutput {
             success: true,
             valid: false,
@@ -217,7 +218,7 @@ fn validate_schema_json(
     // `PrefixConflict` (or a malformed installed package) is validator
     // infrastructure, never a schema authoring error, so it is reported
     // before the schema is even read.
-    let discovery_probe = CompilerOptions::from_env();
+    let discovery_probe = tracing::info_span!(target: ns::CLI, "discover packages").in_scope(CompilerOptions::from_env);
     if let Some(discovery_err) = &discovery_probe.discovery_error {
         let output = ValidationJsonOutput {
             success: true,
@@ -269,7 +270,7 @@ fn validate_schema_json(
     };
 
     let (mut schema, source_map, replaced_ids) =
-        match parse_schema_auto_typed_with_map(&content_raw, &path.display().to_string()) {
+        match tracing::info_span!(target: ns::CLI, "lower").in_scope(|| parse_schema_auto_typed_with_map(&content_raw, &path.display().to_string())) {
             Ok(s) => s,
             Err(e) => {
                 // Map parse/lower/type errors into typed `ValidationJsonError`
@@ -292,14 +293,14 @@ fn validate_schema_json(
         Some(lang) if lang != "en" => orbital_compiler::SchemaLanguage::NonLatin(lang),
         _ => orbital_compiler::SchemaLanguage::English,
     };
-    let (lazy_errors, lazy_warnings) = validate_lazy_children(
+    let (lazy_errors, lazy_warnings) = tracing::info_span!(target: ns::CLI, "lazy children").in_scope(|| validate_lazy_children(
         &mut schema,
         &json_language,
         path.as_path(),
         &extra_patterns,
         &service_registry,
         &discovery_probe,
-    );
+    ));
     let mut lazy_errors: Vec<ValidationJsonError> = lazy_errors
         .into_iter()
         .chain(program_findings(&schema, path.as_path()))
@@ -337,14 +338,14 @@ fn validate_schema_json(
     let mut inline_config = discovery_probe.inline;
     let session = orbital_compiler::phases::inline::InlineSession::default();
     inline_config.session = Some(session.clone());
-    if let Err(e) = inline_schema_with_orbital_diagnostics(
+    if let Err(e) = tracing::info_span!(target: ns::CLI, "inline").in_scope(|| inline_schema_with_orbital_diagnostics(
         &mut schema,
         &inline_config,
         Some(path.as_path()),
         &mut trait_ref_config_diagnostics,
         &mut orbital_ref_diagnostics,
         &mut uses_config_diagnostics,
-    ) {
+    )) {
         // Source-tag from the inline-phase variant: when the producer
         // populated a structured path (e.g. DuplicateTraitName carries
         // `orbitals[name=Foo].traits[idx]`), surface it on the JSON
@@ -459,13 +460,13 @@ fn validate_schema_json(
     };
 
     // Step 2: Run comprehensive schema validation (with language awareness)
-    let mut comprehensive_result = validate_comprehensive_full(
+    let mut comprehensive_result = tracing::info_span!(target: ns::CLI, "validate").in_scope(|| validate_comprehensive_full(
         &schema,
         extra_patterns,
         json_language,
         service_registry,
         inline_config.loader_config.packages.clone(),
-    );
+    ));
     comprehensive_result.merge(
         orbital_compiler::phases::validation::id_integrity::authored_ids_replaced_on_load(
             &replaced_ids,
@@ -480,7 +481,7 @@ fn validate_schema_json(
     );
     if final_program {
         comprehensive_result.merge(
-            orbital_compiler::phases::validation::final_program::validate_final_program(&schema),
+            tracing::info_span!(target: ns::CLI, "final program").in_scope(|| orbital_compiler::phases::validation::final_program::validate_final_program(&schema)),
         );
     }
 
@@ -560,10 +561,10 @@ fn validate_schema_json(
     // only on a schema validation accepted.
     // Already inlined above WITH the source path; re-inlining here would
     // resolve relative `uses` against the cwd instead of the file's folder.
-    let mut options = CompilerOptions::from_env();
+    let mut options = tracing::info_span!(target: ns::CLI, "discover packages").in_scope(CompilerOptions::from_env);
     options.inline.skip_inline = true;
     let compile_result = if all_errors.is_empty() {
-        Some(compile_schema(schema, &options))
+        Some(tracing::info_span!(target: ns::CLI, "compile").in_scope(|| compile_schema(schema, &options)))
     } else {
         None
     };
@@ -830,7 +831,7 @@ pub(crate) fn run_full_validation(
     // Behavior-package discovery runs unconditionally in `from_env` — a
     // `PrefixConflict` (or a malformed installed package) is validator
     // infrastructure, checked before the schema is even read.
-    let default_opts = CompilerOptions::from_env();
+    let default_opts = tracing::info_span!(target: ns::CLI, "discover packages").in_scope(CompilerOptions::from_env);
     if let Some(discovery_err) = &default_opts.discovery_error {
         return Ok(ValidationDiagnostics {
             errors: vec![format!(
@@ -847,8 +848,8 @@ pub(crate) fn run_full_validation(
         Some(lang) if lang != "en" => SchemaLanguage::NonLatin(lang),
         _ => SchemaLanguage::English,
     };
-    let (schema, source_map, replaced_ids) =
-        parse_schema_auto_with_map(&content_raw, &path.display().to_string())?;
+    let (schema, source_map, replaced_ids) = tracing::info_span!(target: ns::CLI, "lower")
+        .in_scope(|| parse_schema_auto_with_map(&content_raw, &path.display().to_string()))?;
 
     let mut core = validate_schema_core(
         schema,
@@ -961,14 +962,14 @@ pub(crate) fn validate_schema_core(
     use orbital_compiler::{compile_schema, validate_comprehensive_full, CompilerOptions};
     use orbital_core::ir::{OirValidator, ValidationSeverity};
 
-    let (mut errors, mut warnings) = validate_lazy_children(
+    let (mut errors, mut warnings) = tracing::info_span!(target: ns::CLI, "lazy children").in_scope(|| validate_lazy_children(
         &mut schema,
         &schema_language,
         path,
         &extra_patterns,
         &service_registry,
         default_opts,
-    );
+    ));
     errors.extend(own_secret_findings(&schema));
     if check_own_catalogs {
         errors.extend(program_findings(&schema, path));
@@ -999,14 +1000,14 @@ pub(crate) fn validate_schema_core(
     let session = orbital_compiler::phases::inline::InlineSession::default();
     let mut inline_opts = default_opts.inline.clone();
     inline_opts.session = Some(session.clone());
-    if let Err(e) = inline_schema_with_orbital_diagnostics(
+    if let Err(e) = tracing::info_span!(target: ns::CLI, "inline").in_scope(|| inline_schema_with_orbital_diagnostics(
         &mut schema,
         &inline_opts,
         Some(path),
         &mut trait_ref_config_diagnostics,
         &mut orbital_ref_diagnostics,
         &mut uses_config_diagnostics,
-    ) {
+    )) {
         let path_part = match e.structured_path() {
             "" => String::new(),
             p => format!(" {p}:"),
@@ -1029,7 +1030,7 @@ pub(crate) fn validate_schema_core(
             inlined: None,
         };
     }
-    enrich_schema(&mut schema, &default_opts.enrichment);
+    tracing::info_span!(target: ns::CLI, "enrich").in_scope(|| enrich_schema(&mut schema, &default_opts.enrichment));
 
     errors.extend(used_secret_findings(&session));
 
@@ -1048,13 +1049,13 @@ pub(crate) fn validate_schema_core(
         }
     }
 
-    let mut comprehensive_result = validate_comprehensive_full(
+    let mut comprehensive_result = tracing::info_span!(target: ns::CLI, "validate").in_scope(|| validate_comprehensive_full(
         &schema,
         extra_patterns,
         schema_language,
         service_registry,
         default_opts.inline.loader_config.packages.clone(),
-    );
+    ));
     merge_post_inline_diagnostics(
         &mut comprehensive_result,
         &trait_ref_config_diagnostics,
@@ -1064,7 +1065,7 @@ pub(crate) fn validate_schema_core(
     );
     if final_program {
         comprehensive_result.merge(
-            orbital_compiler::phases::validation::final_program::validate_final_program(&schema),
+            tracing::info_span!(target: ns::CLI, "final program").in_scope(|| orbital_compiler::phases::validation::final_program::validate_final_program(&schema)),
         );
     }
 
@@ -1098,10 +1099,10 @@ pub(crate) fn validate_schema_core(
 
     // Compile to OIR (schema already inlined+enriched above -> skip re-inline).
     let inlined = schema.clone();
-    let mut options = CompilerOptions::from_env();
+    let mut options = tracing::info_span!(target: ns::CLI, "discover packages").in_scope(CompilerOptions::from_env);
     options.inline.skip_inline = true;
     let compile_result = if errors.is_empty() {
-        Some(compile_schema(schema, &options))
+        Some(tracing::info_span!(target: ns::CLI, "compile").in_scope(|| compile_schema(schema, &options)))
     } else {
         None
     };

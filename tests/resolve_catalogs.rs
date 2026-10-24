@@ -58,63 +58,6 @@ fn orb() -> Command {
 }
 
 #[test]
-fn resolve_to_a_file_writes_each_locales_catalog_beside_it() {
-    let dir = folder("file", true);
-    let out = dir.join("out.orb");
-    let status = orb()
-        .args([
-            "resolve",
-            dir.join("site.lolo").to_str().unwrap(),
-            "-o",
-            out.to_str().unwrap(),
-        ])
-        .output()
-        .unwrap();
-    assert!(
-        status.status.success(),
-        "{}",
-        String::from_utf8_lossy(&status.stderr)
-    );
-    let ar = std::fs::read_to_string(dir.join("out.ar.json")).unwrap();
-    assert!(
-        ar.contains("site:hero.title") && ar.contains("مرحبا"),
-        "{ar}"
-    );
-}
-
-#[test]
-fn resolve_to_stdout_refuses_a_program_with_locales() {
-    let dir = folder("stdout", true);
-    let out = orb()
-        .args(["resolve", dir.join("site.lolo").to_str().unwrap()])
-        .output()
-        .unwrap();
-    assert!(!out.status.success());
-    assert!(
-        String::from_utf8_lossy(&out.stderr).contains("--output"),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-}
-
-#[test]
-fn control_resolve_to_stdout_still_prints_a_program_without_locales() {
-    let dir = folder("plain", false);
-    let out = orb()
-        .args(["resolve", dir.join("site.lolo").to_str().unwrap()])
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert!(String::from_utf8_lossy(&out.stdout)
-        .trim_start()
-        .starts_with('{'));
-}
-
-#[test]
 fn emit_orb_to_a_file_writes_each_locales_catalog_beside_it() {
     let dir = folder("emit", true);
     let registry = dir.join("registry");

@@ -32,6 +32,11 @@ serde.workspace = true
 serde_json.workspace = true
 # `orb run` stops on SIGINT/SIGTERM.
 tokio.workspace = true
+# Logging flags, live phase spinners and timing outputs (`utils/terminal.rs`).
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-indicatif = "0.3.13"
+indicatif = "0.18.0"
 
 # Source Map v3 emission for `orb emit --map` and `orb trace`
 sourcemap = "9"

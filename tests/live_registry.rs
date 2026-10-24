@@ -182,16 +182,6 @@ fn live_std_corpus_validates_real_organisms() {
         std::fs::create_dir_all(to.parent().unwrap()).unwrap();
         std::os::unix::fs::symlink(std_root.join(rel), &to).unwrap();
     }
-    let which = Command::new(PathBuf::from(env!("CARGO_BIN_EXE_orb")))
-        .args(["behaviors", "which", "std/behaviors/std-app-layout"])
-        .current_dir(p.path())
-        .output()
-        .unwrap();
-    let which = String::from_utf8_lossy(&which.stdout).to_string();
-    assert!(
-        which.contains("std-app-layout.lolo"),
-        "std imports resolve to the live .lolo source: {which}"
-    );
     for organism in [
         "agent/organisms/std-agent-assistant.lolo",
         "agent/organisms/std-agent-builder.lolo",

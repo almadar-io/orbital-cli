@@ -106,6 +106,14 @@ fn capability_phrases(declared: Option<&str>) -> Vec<String> {
         .collect()
 }
 
+/// Which vectors a catalog carries.
+pub(crate) enum Vectors<'a> {
+    /// None: the entries carry no `vectors` and no `model`.
+    Omit,
+    /// The stored ones; a text with none is embedded by this embedder, or is an error when `None`.
+    Attach(Option<&'a dyn Embedder>),
+}
+
 pub(crate) fn run_catalog(
     paths: Vec<String>,
     exposure: Vec<String>,
@@ -131,14 +139,6 @@ pub(crate) fn run_catalog(
         }
     }
     Ok(())
-}
-
-/// Which vectors a catalog carries.
-pub(crate) enum Vectors<'a> {
-    /// None: the entries carry no `vectors` and no `model`.
-    Omit,
-    /// The stored ones; a text with none is embedded by this embedder, or is an error when `None`.
-    Attach(Option<&'a dyn Embedder>),
 }
 
 /// The installed behaviors under `paths` — what `orb behaviors catalog` prints: vectors attached,
@@ -1115,11 +1115,15 @@ fn describe_resolved(
     })
 }
 
-/// `orb behaviors expects`: every orbital's derived `expects`, from the behavior as written
-/// (the slice view factory generation and the edit-demote materializer need), its imports
-/// resolved through the loader.
 pub(crate) fn run_expects(spec: String, _json: bool) -> anyhow::Result<()> {
-    let file = std::path::Path::new(&spec);
+    println!("{}", serde_json::to_string(&expectations(&spec)?)?);
+    Ok(())
+}
+
+/// Each orbital's derived expectations for the `.orb` file or behavior `spec` names, as
+/// `orb behaviors expects` prints them.
+pub(crate) fn expectations(spec: &str) -> anyhow::Result<Value> {
+    let file = std::path::Path::new(spec);
     let schema: Value = if file.is_file() {
         serde_json::from_str(&std::fs::read_to_string(file)?)
             .map_err(|e| anyhow::anyhow!("`{spec}` is not a .orb program: {e}"))?
@@ -1149,8 +1153,13 @@ pub(crate) fn run_expects(spec: String, _json: bool) -> anyhow::Result<()> {
             .map_err(|e| anyhow::anyhow!("cannot derive `{name}` expectations: {e}"))?;
         out.insert(name, serde_json::to_value(derived)?);
     }
-    println!("{}", serde_json::to_string(&Value::Object(out))?);
-    Ok(())
+    Ok(Value::Object(out))
+}
+
+/// What `orb behaviors describe` reads: a specifier, or a trait/orbital value.
+pub(crate) enum DescribeTarget {
+    Spec(String),
+    Value(Value),
 }
 
 pub(crate) fn run_describe(spec: String, _json: bool, knob_vectors: bool) -> anyhow::Result<()> {
@@ -1173,17 +1182,6 @@ pub(crate) fn run_describe(spec: String, _json: bool, knob_vectors: bool) -> any
     let out = describe_with(target, None, vectors, None)?;
     println!("{}", serde_json::to_string_pretty(&out)?);
     Ok(())
-}
-
-/// What `orb behaviors describe` reads: a specifier, or a trait/orbital value.
-pub(crate) enum DescribeTarget {
-    Spec(String),
-    Value(Value),
-}
-
-/// `orb behaviors describe` as a value — what the CLI prints and `orb mcp` returns.
-pub(crate) fn describe(target: DescribeTarget) -> anyhow::Result<Value> {
-    describe_from(target, None)
 }
 
 /// [`describe`] of a trait value a program names: a relative value resolves from that program.
