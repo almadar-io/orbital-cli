@@ -6,16 +6,14 @@ mod common;
 use std::path::PathBuf;
 use std::process::Command;
 
-const SITE: &str = r#"app site "1.0.0"
-"Site"
-locales [en, ar]
+const SITE: &str = r#"app site [ version: "1.0.0", description: "Site", locales: [en, ar] ]
 
 orbital Home {
   entity HomeView [runtime] {
     id : string!
   }
 
-  trait HomePage -> HomeView [interaction, instance] {
+  trait HomePage -> HomeView {
     initial: idle
 
     state idle {
@@ -36,7 +34,7 @@ fn folder(tag: &str, locales: bool) -> PathBuf {
     let source = if locales {
         SITE.to_string()
     } else {
-        SITE.replace("locales [en, ar]\n", "")
+        SITE.replace(", locales: [en, ar]", "")
             .replace(r#"(i18n/t "hero.title")"#, r#""Hello""#)
     };
     std::fs::write(dir.join("site.lolo"), source).unwrap();

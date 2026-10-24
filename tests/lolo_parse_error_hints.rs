@@ -55,7 +55,7 @@ fn first_parse_error(result: &serde_json::Value) -> &serde_json::Value {
 fn semicolon_comment_gets_hint() {
     let lolo = r#"orbital X {
   entity X [runtime] { id : string! }
-  trait T -> X [interaction] {
+  trait T -> X {
     initial: idle
     state idle {
       INIT -> idle
@@ -81,7 +81,7 @@ fn lex_error_inside_slash_comment_gets_comment_hint() {
     // line-grounded `//`-comment hint must win (C-COMMENT-SLASH lex shape).
     let lolo = r#"orbital X {
   entity X [runtime] { id : string! }
-  trait T -> X [interaction] {
+  trait T -> X {
     initial: idle
     state idle {
       // We'll assume the graph can handle it.
@@ -111,7 +111,7 @@ fn js_call_syntax_in_object_value_gets_prefix_operator_hint() {
     // disambiguates (C-CALL-SYNTAX).
     let lolo = r#"orbital X {
   entity X [runtime] { id : string! }
-  trait T -> X [interaction] {
+  trait T -> X {
     initial: idle
     state idle {
       INIT -> idle
@@ -141,7 +141,7 @@ fn colon_after_unclosed_paren_gets_swallowed_block_hint() {
     // fires instead — that shape has its own hint.)
     let lolo = r#"orbital X {
   entity X [runtime] { id : string! }
-  trait T -> X [interaction] {
+  trait T -> X {
     initial: idle
     state idle {
       INIT -> idle
@@ -177,7 +177,7 @@ fn closer_collision_in_array_names_the_unclosed_opener() {
     id : string!
     ok : boolean
   }
-  trait T -> X [interaction] {
+  trait T -> X {
     initial: idle
     state idle {
       INIT -> idle
@@ -213,7 +213,7 @@ fn closer_collision_via_rbrace_names_unclosed_array_opener() {
   entity X [runtime] {
     id : string!
   }
-  trait T -> X [interaction] {
+  trait T -> X {
     initial: idle
     state idle {
       INIT -> idle
@@ -245,7 +245,7 @@ fn effect_stranded_at_trait_level_names_surplus_brace() {
   entity X [runtime] {
     id : string!
   }
-  trait T -> X [interaction] {
+  trait T -> X {
     initial: idle
     state idle {
       INIT -> idle
@@ -277,7 +277,7 @@ fn parenless_effect_in_children_gets_call_syntax_hint() {
   entity X [runtime] {
     id : string!
   }
-  trait T -> X [interaction] {
+  trait T -> X {
     initial: idle
     state idle {
       INIT -> idle
@@ -312,7 +312,7 @@ fn comma_in_children_gets_hint() {
     id : string!
     ok : boolean
   }
-  trait T -> X [interaction] {
+  trait T -> X {
     initial: idle
     state idle {
       INIT -> idle
@@ -345,7 +345,7 @@ fn array_type_bang_gets_hint() {
     let lolo = r#"type Q = { options : [string!]! }
 orbital X {
   entity X [runtime] { id : string! }
-  trait T -> X [interaction] {
+  trait T -> X {
     initial: idle
     state idle {
       INIT -> idle
@@ -373,7 +373,7 @@ fn when_guard_gets_hint() {
     id : string!
     n : number
   }
-  trait T -> X [interaction] {
+  trait T -> X {
     initial: a
     state a {
       INIT -> a
@@ -400,7 +400,7 @@ fn payload_keyword_in_emits_gets_hint() {
     // old silent loop-break surfaced a trait-level keyword error instead.
     let lolo = r#"orbital X {
   entity X [runtime] { id : string! }
-  trait T -> X [interaction] {
+  trait T -> X {
     initial: idle
     state idle {
       CLICK -> idle
@@ -437,7 +437,7 @@ fn tier_word_as_emit_route_gets_hint() {
     // written as a route; the bare token list never converted the model.
     let lolo = r#"orbital X {
   entity X [runtime] { id : string! }
-  trait T -> X [interaction] {
+  trait T -> X {
     initial: idle
     state idle {
       CLICK -> idle
@@ -468,7 +468,7 @@ fn operator_head_colon_gets_hint() {
     // colon on the s-expression head.
     let lolo = r#"orbital X {
   entity X [runtime] { id : string! }
-  trait T -> X [interaction] {
+  trait T -> X {
     initial: idle
     state idle {
       CLICK -> idle
@@ -501,7 +501,7 @@ fn uses_inline_config_gets_hint() {
     let lolo = r#"orbital X {
   uses ReminderScheduler from "std/behaviors/std-reminder-scheduler" { dateField: "nextReviewDate" }
   entity X [runtime] { id : string! }
-  trait T -> X [interaction] {
+  trait T -> X {
     initial: idle
     state idle {
       CLICK -> idle
@@ -534,7 +534,7 @@ fn uses_config_block_parses() {
     let lolo = r#"orbital X {
   uses ReminderScheduler from "std/behaviors/std-reminder-scheduler" { config { dateField: "nextReviewDate" } }
   entity X [runtime] { id : string! }
-  trait T -> X [interaction] {
+  trait T -> X {
     initial: idle
     state idle {
       CLICK -> idle
@@ -565,7 +565,7 @@ fn generic_type_syntax_gets_hint() {
     id : string!
     reviewCounts : map[date, number]
   }
-  trait T -> X [interaction] {
+  trait T -> X {
     initial: idle
     state idle {
       CLICK -> idle
@@ -592,7 +592,7 @@ fn keyless_object_entry_gets_hint() {
     id : string!
     recentActivity : [any] = []
   }
-  trait T -> X [interaction] {
+  trait T -> X {
     initial: idle
     state idle {
       CLICK -> idle
@@ -657,7 +657,7 @@ fn event_name_with_space_gets_hint() {
     // run 39 (KnowledgeTracer): `REVIEW_ COMPLETED -> updateMastery`.
     let lolo = r#"orbital X {
   entity X [runtime] { id : string! }
-  trait T -> X [interaction] {
+  trait T -> X {
     initial: idle
     state idle {
       REVIEW_ COMPLETED -> idle
@@ -685,7 +685,7 @@ fn payload_field_default_gets_hint() {
     // inside an emits payload block.
     let lolo = r#"orbital X {
   entity X [runtime] { id : string! }
-  trait T -> X [interaction] {
+  trait T -> X {
     initial: idle
     state idle {
       CLICK -> idle
@@ -712,7 +712,7 @@ fn invented_private_block_gets_hint() {
     // run 39 (KnowledgeTracer): a JS-class `private { … }` methods block.
     let lolo = r#"orbital X {
   entity X [runtime] { id : string! }
-  trait T -> X [interaction] {
+  trait T -> X {
     initial: idle
     state idle {
       CLICK -> idle
@@ -846,7 +846,7 @@ fn let_with_equals_gets_hint() {
     // run 39e (StreakTracker): `(let day = @payload.day)`.
     let lolo = r#"orbital X {
   entity X [runtime] { id : string! }
-  trait T -> X [interaction] {
+  trait T -> X {
     initial: idle
     state idle {
       CLICK -> idle
@@ -874,7 +874,7 @@ fn infix_in_object_value_gets_hint() {
     // run 40 (StreakTracker): `streakCount: @entity.currentStreak + 1`.
     let lolo = r#"orbital X {
   entity X [runtime] { id : string! }
-  trait T -> X [interaction] {
+  trait T -> X {
     initial: idle
     state idle {
       CLICK -> idle
@@ -898,7 +898,7 @@ fn jsx_attr_colon_gets_hint() {
     // `gap={sm}` JSX style to `renderItem: (fn …)` object style.
     let lolo = r#"orbital X {
   entity X [runtime] { id : string! }
-  trait T -> X [interaction] {
+  trait T -> X {
     initial: idle
     state idle {
       CLICK -> idle
@@ -931,7 +931,7 @@ fn jsx_markup_in_lambda_body_gets_hoist_hint() {
     // run 40 (ReviewScheduler residual): `(fn item {` with a JSX body.
     let lolo = r#"orbital X {
   entity X [runtime] { id : string! }
-  trait T -> X [interaction] {
+  trait T -> X {
     initial: idle
     state idle {
       CLICK -> idle
@@ -960,7 +960,7 @@ fn effect_under_routed_listens_gets_listens_hint() {
     // run 40b (StudyDashboard): a routed listens entry carrying effects.
     let lolo = r#"orbital X {
   entity X [runtime] { id : string! }
-  trait T -> X [interaction] {
+  trait T -> X {
     initial: idle
     state idle {
       CLICK -> idle

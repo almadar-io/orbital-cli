@@ -30,7 +30,7 @@ orbital ModalRecordOrbital {
     createdAt : string
   }
 
-  trait ModalRecordModal -> @rebindable ModalRecord [interaction, instance] {
+  trait ModalRecordModal -> @rebindable ModalRecord {
     initial: closed
 
     state closed {

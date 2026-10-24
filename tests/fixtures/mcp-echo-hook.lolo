@@ -9,7 +9,7 @@ orbital EchoOrbital {
     id : string!
   }
 
-  trait EchoHook -> EchoState [integration, instance] {
+  trait EchoHook -> EchoState {
     initial: ready
 
     state ready {

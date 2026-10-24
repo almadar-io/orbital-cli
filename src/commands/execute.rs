@@ -187,7 +187,7 @@ fn resolve_parsed(schema: orbital_core::OrbitalSchema, path: &Path) -> anyhow::R
     Ok(resolved)
 }
 
-/// [`run_cascade`]; `live` runs the steps on the native program host (`orbital_shell_rust::host`), so their os/* and
+/// Replays `steps` on the program at `path`; `live` runs the steps on the native program host (`orbital_shell_rust::host`), so their os/* and
 /// http asks are answered by this machine instead of left pending (G-ORB-459).
 pub(crate) fn run_cascade_with(path: &Path, steps: &serde_json::Value, live: bool) -> anyhow::Result<serde_json::Value> {
     use orbital_core::runtime::{EntitySource, InMemoryEntityCache, RuntimeKernel};
@@ -396,6 +396,7 @@ pub(crate) fn run_cascade_with(path: &Path, steps: &serde_json::Value, live: boo
 #[cfg(test)]
 mod outcome_report_tests {
     use super::*;
+    use orbital_core::SExpression;
     use orbital_core::runtime::{EffectRun, EffectRunStatus, ProcessEventResult};
     use orbital_core::state_machine::{ArmGuard, GuardResult};
 
@@ -490,6 +491,10 @@ mod outcome_report_tests {
 #[cfg(test)]
 mod cascade_from_tests {
     use super::*;
+
+    fn run_cascade(path: &Path, steps: &serde_json::Value) -> anyhow::Result<serde_json::Value> {
+        run_cascade_with(path, steps, false)
+    }
 
     const MODES: &str = r#"{"name":"EditorApp","orbitals":[{"name":"Editor","entity":{"name":"Doc","persistence":"runtime","fields":[{"name":"id","type":"string"}]},"pages":[],"traits":[{"name":"Modes","linkedEntity":"Doc","stateMachine":{"states":[{"name":"NORMAL","isInitial":true},{"name":"INSERT"},{"name":"VISUAL"}],"transitions":[{"from":"NORMAL","to":"INSERT","event":"KEY","guard":["=","@payload.key","i"]},{"from":"NORMAL","to":"VISUAL","event":"KEY","guard":["=","@payload.key","v"]}]}}]}]}"#;
 

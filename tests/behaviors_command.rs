@@ -378,17 +378,13 @@ fn validate_json_orb_uses_import_without_std_needs_install() {
     .unwrap();
 
     let output = orb(&project, &bun_stub, &["validate", "--json", "app.orb"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "with no std installed `orb validate` has no program to run");
     assert!(
-        output.status.success(),
-        "orb validate --json should exit 0 even when the schema fails to resolve: {}",
-        String::from_utf8_lossy(&output.stderr)
+        stderr.contains("ORB_COMMAND_NOT_INSTALLED") && stderr.contains("`cli-validate`") && stderr.contains("orb update"),
+        "{stderr}"
     );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let result: serde_json::Value = serde_json::from_str(&stdout).expect("valid json");
-    let errors = result["errors"].as_array().expect("errors array");
-    let err = errors.first().expect("at least one error");
-    assert_eq!(err["code"], "ORB_BEHAVIOR_PACKAGE_NOT_INSTALLED");
-    assert_eq!(err["needsInstall"], true, "result: {result}");
+    assert!(output.stdout.is_empty(), "nothing is printed on stdout");
 }
 
 /// `.lolo`-lower-phase mirror of `validate_json_orb_uses_import_without_std_needs_install`:
@@ -421,23 +417,13 @@ orbital FixtureOrbital {
     .unwrap();
 
     let output = orb(&project, &bun_stub, &["validate", "--json", "app.lolo"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "with no std installed `orb validate` has no program to run");
     assert!(
-        output.status.success(),
-        "orb validate --json should exit 0 even when the schema fails to resolve: {}",
-        String::from_utf8_lossy(&output.stderr)
+        stderr.contains("ORB_COMMAND_NOT_INSTALLED") && stderr.contains("`cli-validate`") && stderr.contains("orb update"),
+        "{stderr}"
     );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let result: serde_json::Value = serde_json::from_str(&stdout).expect("valid json");
-    let errors = result["errors"].as_array().expect("errors array");
-    let err = errors.first().expect("at least one error");
-    assert_eq!(err["code"], "ORB_BEHAVIOR_PACKAGE_NOT_INSTALLED");
-    assert_eq!(err["needsInstall"], true, "result: {result}");
-    let message = err["message"].as_str().expect("message string");
-    assert!(
-        message.contains("@almadar/std is not installed")
-            && message.contains("orb update"),
-        "message: {message}"
-    );
+    assert!(output.stdout.is_empty(), "nothing is printed on stdout");
 }
 
 /// `orb behaviors list` in a project with no installed std simply omits it —
@@ -675,14 +661,11 @@ fn validate_json_without_installed_core_needs_install() {
         .env("ORB_NO_AUTO_SETUP", "1")
         .output()
         .expect("spawn orb");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "with no std installed `orb validate` has no program to run");
     assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
+        stderr.contains("ORB_COMMAND_NOT_INSTALLED") && stderr.contains("`cli-validate`") && stderr.contains("orb update"),
+        "{stderr}"
     );
-    let result: serde_json::Value = serde_json::from_slice(&output.stdout).expect("valid json");
-    let err = &result["errors"][0];
-    assert_eq!(err["code"], "ORB_LANGUAGE_DATA_NOT_INSTALLED", "{result}");
-    assert_eq!(err["needsInstall"], true, "{result}");
-    assert_eq!(result["valid"], false);
+    assert!(output.stdout.is_empty(), "nothing is printed on stdout");
 }

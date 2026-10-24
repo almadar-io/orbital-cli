@@ -14,7 +14,7 @@ const CART: &str = r#"orbital ShoppingCart {
     total : number = 0
   }
 
-  trait CartView -> @rebindable Cart [interaction, instance] {
+  trait CartView -> @rebindable Cart {
     initial: idle
 
     state idle {
@@ -110,4 +110,59 @@ fn a_missing_sibling_still_fails_validation() {
     let dir = folder("missing", &[("Orders.lolo", ORDERS)]);
     let report = validate_json(&dir.join("Orders.lolo"));
     assert_eq!(report["valid"], false, "{report:#}");
+}
+
+fn lazy_child(page: &str) -> String {
+    format!("app child [ version: \"1.0.0\" ]\norbital ChildOrbital {{\n  entity Note [runtime] {{\n    id : string!\n  }}\n  trait ChildView -> Note {{\n    initial: a\n    state a {{\n      INIT -> a\n        (render-ui main {{ type: typography, content: \"child\" }})\n    }}\n  }}\n  page \"{page}\" as ChildPage -> ChildView\n}}\n")
+}
+
+const LAZY_PARENT: &str = "app main [ version: \"1.0.0\" ]\nuses lazy Child from \"./child\"\norbital MainOrbital {\n  entity Item [runtime] {\n    id : string!\n  }\n  trait MainView -> Item {\n    initial: a\n    state a {\n      INIT -> a\n        (render-ui main { type: typography, content: \"main\" })\n    }\n  }\n  page \"/\" as Home -> MainView\n}\norbital Kid = Child.orbitals.ChildOrbital {\n}\n";
+
+fn lazy_child_findings(report: &serde_json::Value) -> Vec<String> {
+    report["errors"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e["path"].as_str())
+        .filter(|p| p.starts_with("lazy[Kid]."))
+        .map(str::to_string)
+        .collect()
+}
+
+#[test]
+fn a_lazy_childs_lint_finding_is_reported_under_its_orbital() {
+    let dir = folder(
+        "lazy-bad",
+        &[
+            ("child.lolo", &lazy_child("child")),
+            ("main.lolo", LAZY_PARENT),
+        ],
+    );
+    let report = validate_json(&dir.join("main.lolo"));
+    assert_eq!(
+        lazy_child_findings(&report),
+        vec!["lazy[Kid].orbitals[0].pages[0].path".to_string(); 2],
+        "the page-path lint runs on the lazy child: {report:#}"
+    );
+}
+
+#[test]
+fn control_a_healthy_lazy_child_adds_no_child_finding() {
+    let dir = folder(
+        "lazy-ok",
+        &[
+            ("child.lolo", &lazy_child("/child")),
+            ("main.lolo", LAZY_PARENT),
+        ],
+    );
+    let report = validate_json(&dir.join("main.lolo"));
+    assert!(
+        report.is_object(),
+        "validate answers rather than hanging: {report:#}"
+    );
+    assert_eq!(
+        lazy_child_findings(&report),
+        Vec::<String>::new(),
+        "{report:#}"
+    );
 }

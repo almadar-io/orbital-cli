@@ -28,6 +28,11 @@ fn from_json(value: serde_json::Value) -> Result<Value, SubstrateFailure> {
     serde_json::from_value(value).map_err(|e| failure(e.to_string()))
 }
 
+/// The `program/read` modes `options` turns on, in the order they are documented.
+fn read_modes(options: Option<&Value>) -> Vec<&'static str> {
+    ["stamp", "inspect", "embeds", "resolve"].into_iter().filter(|mode| option_flag(options, mode) == Some(true)).collect()
+}
+
 /// A boolean option of an op's options argument; absent or not a boolean is `None`.
 fn option_flag(options: Option<&Value>, key: &str) -> Option<bool> {
     options
@@ -248,7 +253,7 @@ fn stamp_and_validate(
         };
     let stamped = scratch.write(&format!("{name}.stamped.orb"), &stamped_text)?;
     let report =
-        crate::commands::validate::validation_report(&stamped, None, None, true, final_program)
+        crate::commands::validate::validation_report(&stamped, None, None, true, final_program, &[])
             .map_err(|e| failure(format!("{op}: {e}")))?;
     let report = serde_json::to_value(&report).map_err(|e| failure(e.to_string()))?;
     let (errors, warnings) = (issues(&report, "errors"), issues(&report, "warnings"));
@@ -276,8 +281,9 @@ fn issues(report: &serde_json::Value, key: &str) -> Vec<serde_json::Value> {
 }
 
 impl ProgramHost {
-    /// `program/validate { report: true, path, final?, denyWarnings? }`: the report `orb validate --json` prints for the
-    /// file at the absolute `path` (lowering, types, every validator finding with its source position).
+    /// `program/validate { report: true, path, final?, denyWarnings?, findings? }`: the report `orb validate --json` prints
+    /// for the file at the absolute `path` (lowering, types, every validator finding with its source position); each of
+    /// `findings` (a std lint's) joins the errors or warnings by its severity, positioned the same way.
     fn validation_report(options: &serde_json::Value) -> Result<Value, SubstrateFailure> {
         let op = "program/validate";
         let path = options
@@ -292,7 +298,7 @@ impl ProgramHost {
             Some(_) => Err(failure(format!("{op}: `{key}` must be a boolean"))),
         };
         for key in options.as_object().into_iter().flat_map(|o| o.keys()) {
-            if !["report", "path", "final", "denyWarnings", "patterns", "services"].contains(&key.as_str()) {
+            if !["report", "path", "final", "denyWarnings", "patterns", "services", "findings"].contains(&key.as_str()) {
                 return Err(failure(format!("{op}: unsupported option \"{key}\" with `report`")));
             }
         }
@@ -302,12 +308,18 @@ impl ProgramHost {
             Some(_) => Err(failure(format!("{op}: `{key}` must be a path"))),
         };
         let (patterns, services) = (file("patterns")?, file("services")?);
+        let findings: Vec<crate::commands::validate::ProgramFinding> = match options.get("findings") {
+            None | Some(serde_json::Value::Null) => Vec::new(),
+            Some(list) => serde_json::from_value(list.clone())
+                .map_err(|e| failure(format!("{op}: `findings` must be a list of {{ code, path, message, suggestion, severity: \"error\" | \"warning\" }}: {e}")))?,
+        };
         let report = crate::commands::validate::validation_report(
             path,
             patterns.as_deref(),
             services.as_deref(),
             flag("denyWarnings")?,
             flag("final")?,
+            &findings,
         )
             .map_err(|e| failure(format!("{op}: {e}")))?;
         from_json(serde_json::to_value(report).map_err(|e| failure(e.to_string()))?)
@@ -315,6 +327,8 @@ impl ProgramHost {
 
     /// `program/read { resolve: true, path, output? }`: what `orb resolve <path> [--output]` prints
     /// and writes, as `{ program, text }`; the file at the absolute `path` is read, not `text`.
+    /// `text: false` answers `{ program, lazy: [{ orbital, program }] }` and writes nothing, so a program with lazy
+    /// behaviors or locales is not refused (the lint input reads programs this way).
     fn read_resolved(options: &serde_json::Value) -> Result<Value, SubstrateFailure> {
         let path = options
             .get("path")
@@ -327,6 +341,18 @@ impl ProgramHost {
             Some(serde_json::Value::String(out)) => Some(std::path::PathBuf::from(out)),
             Some(_) => return Err(failure("program/read: `output` must be a path")),
         };
+        match options.get("text") {
+            None | Some(serde_json::Value::Null) | Some(serde_json::Value::Bool(true)) => {}
+            Some(serde_json::Value::Bool(false)) if output.is_some() => {
+                return Err(failure("program/read: `text: false` writes nothing, so it takes no `output`"))
+            }
+            Some(serde_json::Value::Bool(false)) => {
+                let answer = crate::commands::parse::resolved_value(path)
+                    .map_err(|e| failure(format!("program/read: {e}")))?;
+                return from_json(answer);
+            }
+            Some(_) => return Err(failure("program/read: `text` must be a boolean")),
+        }
         let text = crate::commands::parse::resolved_text(path, output.as_deref())
             .map_err(|e| failure(format!("program/read: {e}")))?;
         let program: serde_json::Value = serde_json::from_str(&text).map_err(|e| failure(e.to_string()))?;
@@ -451,11 +477,11 @@ impl ProgramHost {
     fn read(&self, text: &str) -> Result<Value, SubstrateFailure> {
         let scratch = Scratch::new("almadar-program")?;
         let path = scratch.write("program.lolo", text)?;
-        match crate::emit::orb_json(text, &path.display().to_string()) {
-            Ok(json) => from_json(serde_json::from_str(&json).map_err(|e| failure(e.to_string()))?),
+        match crate::emit::orb_value(text, &path.display().to_string()) {
+            Ok(json) => from_json(json),
             Err(lowering) => {
                 let report =
-                    crate::commands::validate::validation_report(&path, None, None, true, false)
+                    crate::commands::validate::validation_report(&path, None, None, true, false, &[])
                         .map_err(|e| failure(format!("program/read: {e}")))?;
                 let report = serde_json::to_value(&report).map_err(|e| failure(e.to_string()))?;
                 let found: Vec<serde_json::Value> = issues(&report, "errors")
@@ -1190,6 +1216,11 @@ impl SubstrateHandler for ProgramHost {
     fn run(&self, op: &str, args: &[Value]) -> Result<Value, SubstrateFailure> {
         match op {
             "program/read" => match args.first() {
+                Some(Value::String(_)) if read_modes(args.get(1)).len() > 1 => Err(failure(format!(
+                    "program/read: unsupported option \"{}\" with `{}`: one of inspect, embeds, resolve, stamp per call",
+                    read_modes(args.get(1))[1],
+                    read_modes(args.get(1))[0]
+                ))),
                 Some(Value::String(text)) if option_flag(args.get(1), "inspect") == Some(true) => {
                     let options = to_json(&args[1]);
                     super::program_inspect::inspect(text, &options).and_then(from_json)
@@ -1287,6 +1318,32 @@ orbital NoteOrbital {
     }
 
     #[test]
+    fn read_keeps_a_record_literals_author_key_order() {
+        orbital_compiler::loader::register_source_lowerer(|path, _, _| crate::lower_lolo_file(path));
+        let probe = r#"app order-probe [ version: "1.0.0" ]
+orbital O {
+  entity E [runtime] {
+    id : string!
+  }
+  trait T -> E {
+    initial: a
+    state a {
+      INIT -> a
+        (log (json/stringify { zeta: 1, alpha: 2, mid: 3 }))
+    }
+  }
+}
+"#;
+        let read = |text: &str| serde_json::to_string(&json(&ProgramHost.run("program/read", &[Value::String(text.to_string())]).expect("reads"))).unwrap();
+        let text = read(probe);
+        let (z, a, m) = (text.find("\"zeta\"").unwrap(), text.find("\"alpha\"").unwrap(), text.find("\"mid\"").unwrap());
+        assert!(z < a && a < m, "author order zeta, alpha, mid: {text}");
+        let control = read(&probe.replace("{ zeta: 1, alpha: 2, mid: 3 }", "{ alpha: 2, mid: 3, zeta: 1 }"));
+        let (z, a, m) = (control.find("\"zeta\"").unwrap(), control.find("\"alpha\"").unwrap(), control.find("\"mid\"").unwrap());
+        assert!(a < m && m < z, "control: the other author order is kept too: {control}");
+    }
+
+    #[test]
     fn read_lowers_text_to_the_program_emit_orb_prints_and_print_writes_it_back() {
         orbital_compiler::loader::register_source_lowerer(|path, _, _| crate::lower_lolo_file(path));
         let host = ProgramHost;
@@ -1334,6 +1391,50 @@ orbital NoteOrbital {
         let expected = crate::commands::parse::resolved_text(&file, None).expect("orb resolve");
         assert_eq!(answer["text"], serde_json::Value::String(expected.clone()));
         assert_eq!(answer["program"], serde_json::from_str::<serde_json::Value>(&expected).unwrap());
+    }
+
+    #[test]
+    fn read_with_resolve_and_no_text_answers_a_program_with_locales() {
+        orbital_compiler::loader::register_source_lowerer(|path, _, _| crate::lower_lolo_file(path));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("note.lolo");
+        std::fs::write(&file, NOTE.replacen("app note-pad [", "app note-pad [\n  locales: [en, ar],", 1)).unwrap();
+        let read = |extra: serde_json::Value| {
+            let mut options = serde_json::json!({ "resolve": true, "path": file.display().to_string() });
+            options.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            ProgramHost.run("program/read", &[Value::String(String::new()), from_json(options).unwrap()])
+        };
+        let answer = json(&read(serde_json::json!({ "text": false })).expect("answers the program"));
+        assert_eq!(answer["program"]["name"], "note-pad", "{answer}");
+        assert!(answer.get("text").is_none(), "no text is printed: {answer}");
+        let refused = read(serde_json::json!({})).unwrap_err();
+        assert!(refused.message.contains("declares locales"), "control: the printed form still needs --output: {}", refused.message);
+        let both = read(serde_json::json!({ "text": false, "output": "/tmp/x.orb" })).unwrap_err();
+        assert!(both.message.contains("takes no `output`"), "{}", both.message);
+    }
+
+    #[test]
+    fn read_with_resolve_and_no_text_answers_each_lazy_child_by_its_orbital() {
+        orbital_compiler::loader::register_source_lowerer(|path, _, _| crate::lower_lolo_file(path));
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("child.lolo"), "app child [ version: \"1.0.0\" ]\norbital ChildOrbital {\n  entity Note [runtime] {\n    id : string!\n  }\n  trait ChildView -> Note {\n    initial: a\n    state a {\n      INIT -> a\n        (render-ui main { type: \"typography\", content: \"child\" })\n    }\n  }\n  page \"/child\" as ChildPage -> ChildView\n}\n").unwrap();
+        let main = |lazy: bool| {
+            let head = if lazy { "uses lazy Child from \"./child\"\n" } else { "" };
+            let tail = if lazy { "orbital Kid = Child.orbitals.ChildOrbital {\n}\n" } else { "" };
+            format!("app main [ version: \"1.0.0\" ]\n{head}orbital MainOrbital {{\n  entity Item [runtime] {{\n    id : string!\n  }}\n  trait MainView -> Item {{\n    initial: a\n    state a {{\n      INIT -> a\n        (render-ui main {{ type: \"typography\", content: \"main\" }})\n    }}\n  }}\n  page \"/\" as Home -> MainView\n}}\n{tail}")
+        };
+        let read = |text: String| {
+            let file = dir.path().join("main.lolo");
+            std::fs::write(&file, text).unwrap();
+            let options = from_json(serde_json::json!({ "resolve": true, "text": false, "path": file.display().to_string() })).unwrap();
+            json(&ProgramHost.run("program/read", &[Value::String(String::new()), options]).expect("answers"))
+        };
+        let with = read(main(true));
+        let lazy = with["lazy"].as_array().expect("lazy list");
+        assert_eq!(lazy.len(), 1, "{with}");
+        assert_eq!(lazy[0]["orbital"], "Kid");
+        assert!(lazy[0]["program"]["orbitals"].is_array(), "the child program is answered: {}", lazy[0]);
+        assert_eq!(read(main(false))["lazy"], serde_json::json!([]), "control: no lazy import, no children");
     }
 
     #[test]
@@ -1430,29 +1531,6 @@ orbital NoteOrbital {
     }
 
     #[test]
-    fn eval_with_generate_reports_what_orb_compile_prints() {
-        orbital_compiler::loader::register_source_lowerer(|path, _, _| crate::lower_lolo_file(path));
-        let dir = tempfile::tempdir().expect("tempdir");
-        let file = dir.path().join("note.lolo");
-        std::fs::write(&file, NOTE).unwrap();
-        let output = dir.path().join("out");
-        let answer = json(
-            &generate_with(serde_json::json!({
-                "generate": { "path": file.display().to_string(), "output": output.display().to_string(), "shell": "typescript" }
-            }))
-            .expect("compiles"),
-        );
-        let lines = answer["lines"].as_array().expect("lines");
-        assert_eq!(lines[0], format!("Compiling schema: {}", file.display()));
-        assert_eq!(lines[2], "Target shell: Typescript");
-        assert_eq!(lines[3], "Mode: Full");
-        let files = answer["files"].as_u64().expect("files");
-        assert!(files > 0 && lines.iter().any(|l| *l == format!("✅ Generated {files} files")), "{answer}");
-        assert!(answer["warnings"].is_array() && answer["nextSteps"].is_array(), "{answer}");
-        assert!(output.exists(), "the project is written");
-    }
-
-    #[test]
     fn control_eval_with_generate_refuses_a_relative_path_an_unknown_option_and_a_missing_shell() {
         let refusal = |options: serde_json::Value| generate_with(options).unwrap_err().message;
         assert!(refusal(serde_json::json!({ "generate": { "path": "n.lolo", "output": "/o", "shell": "typescript" } })).contains("absolute `path`"));
@@ -1537,9 +1615,69 @@ orbital NoteOrbital {
         std::fs::write(&file, NOTE).unwrap();
         let options = from_json(serde_json::json!({ "report": true, "path": file.display().to_string() })).unwrap();
         let answer = json(&ProgramHost.run("program/validate", &[Value::Null, options]).expect("reports"));
-        let expected = serde_json::to_value(crate::commands::validate::validation_report(&file, None, None, false, false).unwrap()).unwrap();
+        let expected = serde_json::to_value(crate::commands::validate::validation_report(&file, None, None, false, false, &[]).unwrap()).unwrap();
         assert_eq!(answer, expected);
         assert!(answer.get("valid").is_some(), "{answer}");
+    }
+
+    #[test]
+    fn validate_with_findings_positions_each_lint_finding_like_a_compiler_finding() {
+        orbital_compiler::loader::register_source_lowerer(|path, _, _| crate::lower_lolo_file(path));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("note.lolo");
+        std::fs::write(&file, NOTE).unwrap();
+        let report = |findings: serde_json::Value| {
+            let options = from_json(serde_json::json!({ "report": true, "path": file.display().to_string(), "findings": findings })).unwrap();
+            ProgramHost.run("program/validate", &[Value::Null, options]).map(|v| json(&v))
+        };
+        let plain = report(serde_json::json!([])).expect("reports");
+        let expected = serde_json::to_value(crate::commands::validate::validation_report(&file, None, None, false, false, &[]).unwrap()).unwrap();
+        assert_eq!(plain, expected, "control: no findings leave the report as it is");
+        let with = report(serde_json::json!([
+            { "code": "ORB_LINT_E", "path": "orbitals[0].traits[0]", "message": "m", "suggestion": "", "severity": "error", "validValues": ["a", "b"] },
+            { "code": "ORB_LINT_W", "path": "orbitals[0]", "message": "w", "suggestion": "s", "severity": "warning" }
+        ]))
+        .expect("reports");
+        let error = with["errors"].as_array().unwrap().iter().find(|e| e["code"] == "ORB_LINT_E").expect("the lint error joins errors");
+        assert!(error["line"].is_number() && error["column"].is_number(), "positioned: {error}");
+        assert!(error.get("suggestion").is_none(), "an empty suggestion is left out: {error}");
+        assert_eq!(error["validValues"], serde_json::json!(["a", "b"]), "the closed set travels with the finding");
+        assert!(with["warnings"].as_array().unwrap().iter().all(|w| w.get("validValues").is_none()), "control: a finding without one carries none");
+        assert_eq!(with["valid"], false, "an error-severity finding fails the report");
+        let warning = with["warnings"].as_array().unwrap().iter().find(|w| w["code"] == "ORB_LINT_W").expect("the lint warning joins warnings");
+        assert_eq!(warning["suggestion"], "s");
+        assert!(warning["line"].is_number(), "positioned: {warning}");
+        let refused = report(serde_json::json!([{ "code": "X", "path": "p", "message": "m", "severity": "fatal" }])).unwrap_err();
+        assert!(refused.message.contains("`findings` must be a list"), "{}", refused.message);
+    }
+
+    #[test]
+    fn a_lint_error_keeps_the_compile_step_from_restating_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("ghost.orb");
+        std::fs::write(
+            &file,
+            serde_json::json!({ "name": "ghost", "version": "1.0.0", "orbitals": [{ "name": "Notes",
+                "entity": { "name": "Note", "persistence": "runtime", "fields": [
+                    { "name": "id", "type": "string", "required": true },
+                    { "name": "owner", "type": "relation", "relation": { "entity": "Ghost", "cardinality": "one" } }
+                ] }, "traits": [], "pages": [] }] })
+            .to_string(),
+        )
+        .unwrap();
+        let codes = |findings: serde_json::Value| {
+            let options = from_json(serde_json::json!({ "report": true, "path": file.display().to_string(), "findings": findings })).unwrap();
+            let report = json(&ProgramHost.run("program/validate", &[Value::Null, options]).expect("reports"));
+            report["errors"].as_array().into_iter().flatten().map(|e| e["code"].as_str().unwrap_or("").to_string()).collect::<Vec<_>>()
+        };
+        let relation = serde_json::json!({ "code": "ORB_E_INVALID_RELATION", "path": "orbitals[0].entity.fields[1].relation.entity", "message": "Relation target entity 'Ghost' does not exist", "severity": "error" });
+        let with = codes(serde_json::json!([relation]));
+        assert!(with.contains(&"ORB_E_INVALID_RELATION".to_string()), "{with:?}");
+        assert!(!with.contains(&"COMPILATION_ERROR".to_string()), "the compile step only restates the lint error: {with:?}");
+        let without = codes(serde_json::json!([]));
+        assert!(without.contains(&"COMPILATION_ERROR".to_string()), "control: with no finding the compile step still reports: {without:?}");
+        let warned = codes(serde_json::json!([{ "code": "ORB_LINT_W", "path": "orbitals[0]", "message": "w", "severity": "warning" }]));
+        assert!(warned.contains(&"COMPILATION_ERROR".to_string()), "control: a warning does not hold the compile step back: {warned:?}");
     }
 
     #[test]

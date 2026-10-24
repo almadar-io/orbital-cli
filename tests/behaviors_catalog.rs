@@ -335,8 +335,9 @@ fn the_derived_index_is_cached_by_content_and_follows_an_edit() {
     assert_ne!(after, once);
 }
 
+/// Owner ruling (G-ORB-488): a behavior that cannot be indexed is reported and skipped, never fatal to its package.
 #[test]
-fn a_lolo_header_tag_outside_the_vocabulary_is_a_named_error() {
+fn a_lolo_header_tag_outside_the_vocabulary_is_named_and_that_behavior_skipped() {
     let p = project("m1");
     let card = p
         .path()
@@ -346,12 +347,16 @@ fn a_lolo_header_tag_outside_the_vocabulary_is_a_named_error() {
         p.path(),
         &["behaviors", "catalog", "--json", "--no-vectors", "alpha"],
     );
-    assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{err}");
     assert!(
-        err.contains("alpha/alpha-card") && err.contains("sideways"),
+        err.contains("skipped alpha/alpha-card") && err.contains("sideways"),
         "{err}"
     );
+    let listed: serde_json::Value = serde_json::from_slice(&out.stdout).expect("catalog json");
+    let names: Vec<&str> = listed.as_array().unwrap().iter().filter_map(|e| e["behavior"].as_str()).collect();
+    assert!(!names.contains(&"alpha/alpha-card"), "{names:?}");
+    assert!(names.contains(&"alpha/alpha-board"), "control: the package's other behaviors are still listed: {names:?}");
 }
 
 #[test]
@@ -844,6 +849,11 @@ fn snapshot_writes_exactly_the_package_texts_deterministically_and_needs_a_provi
     let p = project("m1");
     let root = p.path();
     let pkg = root.join("node_modules/alpha");
+    // This package ships no snapshot of its own, so every text is a miss until the user store holds it
+    // (the locked-snapshot source is pinned by `snapshot_reuses_locked_package_vectors_with_warm_cache_and_no_provider`).
+    std::fs::remove_file(pkg.join("dist/vectors.vec")).unwrap();
+    let manifest = std::fs::read_to_string(pkg.join("package.json")).unwrap().replace(r#""vectors":"dist/vectors.vec","#, "");
+    write(&pkg.join("package.json"), &manifest);
     let out = root.join("alpha.vec");
     let snapshot = || {
         orb(

@@ -316,7 +316,7 @@ orbital Mechanism {
     id : string!
     text : string = ""
   }
-  trait Cycle -> @rebindable Row [interaction] {
+  trait Cycle -> @rebindable Row {
     initial: idle
     state idle {
       NEXT -> done

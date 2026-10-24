@@ -15,7 +15,7 @@ const EMIT_NO_NAME_LOLO: &str = r#"orbital TopicOrbital {
   entity Topic [runtime] {
     id : string!
   }
-  trait TopicSave -> Topic [interaction] {
+  trait TopicSave -> Topic {
     initial: idle
     emits { SAVED }
     state idle {

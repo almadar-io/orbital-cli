@@ -315,6 +315,12 @@ fn run_command(args: &[String]) -> anyhow::Result<i32> {
         return Ok(answer.code);
     }
 
+    if let Some(message) = commands::program_command::not_installed(&args) {
+        // A command program missing because the language data is not installed or invalid: the typed preflight error
+        // names the cause and its fix; only with the language data in place is the program itself the missing piece.
+        crate::utils::require_language_data()?;
+        anyhow::bail!(message);
+    }
     let cli = Cli::parse_from(std::iter::once("orb".to_string()).chain(args.iter().cloned()));
 
     let needs_language_data = !matches!(

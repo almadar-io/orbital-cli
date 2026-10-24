@@ -32,7 +32,7 @@ const PROBE_LOLO: &str = r#"orbital ProbeOrbital {
   entity Probe [runtime] {
     flag : boolean = false
   }
-  trait ProbeGuard -> Probe [interaction, instance] {
+  trait ProbeGuard -> Probe {
     initial: idle
     state idle {
       INIT -> idle

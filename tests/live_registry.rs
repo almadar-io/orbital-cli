@@ -13,7 +13,7 @@ orbital ShoppingCart {
     total : number = 0
   }
 
-  trait CartView -> @rebindable Cart [interaction, instance] {
+  trait CartView -> @rebindable Cart {
     initial: idle
 
     state idle {
@@ -75,6 +75,7 @@ fn live_std(project: &Path) -> PathBuf {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, body).unwrap();
     }
+    orbital_test_support::link_installed_std_programs(&std, Path::new(env!("CARGO_MANIFEST_DIR")));
     std.join("behaviors/lolo/app/atoms/std-cartx.lolo")
 }
 

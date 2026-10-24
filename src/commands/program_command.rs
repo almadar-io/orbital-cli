@@ -32,17 +32,27 @@ pub(crate) struct ProgramCommand {
 /// The bootloader's own words: clap takes them before any program discovery (so a broken package can be repaired
 /// with `orb update|add|remove`), and a `cli` program declaring `cli-<word>` or `cli-<word>-…` is refused.
 const RESERVED_COMMANDS: &[&str] = &[
-    "update", "add", "remove", "list", "run", "help", "--help",
-    "-h", "--version", "-V",
+    "update",
+    "add",
+    "remove",
+    "list",
+    "run",
+    "help",
+    "--help",
+    "-h",
+    "--version",
+    "-V",
 ];
 
 /// The reserved word a hook would take, if any.
 fn reserved_word_of(hook: &str) -> Option<&'static str> {
     let command = hook.strip_prefix("cli-")?;
-    RESERVED_COMMANDS
-        .iter()
-        .copied()
-        .find(|word| command == *word || command.strip_prefix(*word).is_some_and(|rest| rest.starts_with('-')))
+    RESERVED_COMMANDS.iter().copied().find(|word| {
+        command == *word
+            || command
+                .strip_prefix(*word)
+                .is_some_and(|rest| rest.starts_with('-'))
+    })
 }
 
 /// The commands `args` (argv after the binary) may name, in the order they are tried: `w1 w2 …` is `w1-w2` with
@@ -51,7 +61,10 @@ fn command_candidates(args: &[String]) -> Vec<(String, &[String])> {
     let is_word = |a: &String| !a.starts_with('-');
     match args {
         [first, second, rest @ ..] if is_word(first) && is_word(second) => {
-            vec![(format!("{first}-{second}"), rest), (first.clone(), &args[1..])]
+            vec![
+                (format!("{first}-{second}"), rest),
+                (first.clone(), &args[1..]),
+            ]
         }
         [first, rest @ ..] if is_word(first) => vec![(first.clone(), rest)],
         _ => Vec::new(),
@@ -60,8 +73,15 @@ fn command_candidates(args: &[String]) -> Vec<(String, &[String])> {
 
 /// The installed program `args` names, if any (see [`command_candidates`]); `None` leaves the line to `orb`'s own
 /// subcommands. A reserved word goes to them without reading any package.
-pub(crate) fn resolve_program_command(args: &[String], cwd: &Path, user_store: &Path) -> anyhow::Result<Option<ProgramCommand>> {
-    if args.first().is_some_and(|first| RESERVED_COMMANDS.contains(&first.as_str())) {
+pub(crate) fn resolve_program_command(
+    args: &[String],
+    cwd: &Path,
+    user_store: &Path,
+) -> anyhow::Result<Option<ProgramCommand>> {
+    if args
+        .first()
+        .is_some_and(|first| RESERVED_COMMANDS.contains(&first.as_str()))
+    {
         return Ok(None);
     }
     let candidates = command_candidates(args);
@@ -71,17 +91,44 @@ pub(crate) fn resolve_program_command(args: &[String], cwd: &Path, user_store: &
     let programs = cli_programs(cwd, user_store)?;
     for (command, argv) in &candidates {
         if let Some(program) = programs.declaring(&hook_name(command))? {
-            return Ok(Some(ProgramCommand { program, command: command.clone(), argv: argv.to_vec() }));
+            return Ok(Some(ProgramCommand {
+                program,
+                command: command.clone(),
+                argv: argv.to_vec(),
+            }));
         }
     }
-    programs.unanswered(&candidates.iter().map(|(command, _)| hook_name(command)).collect::<Vec<_>>())?;
+    programs.unanswered(
+        &candidates
+            .iter()
+            .map(|(command, _)| hook_name(command))
+            .collect::<Vec<_>>(),
+    )?;
     Ok(None)
+}
+
+/// The refusal for a command word no installed program declares and the bootloader does not carry: orb's commands
+/// live in std, so a missing std reads as a missing command, never as clap's unknown subcommand.
+pub(crate) fn not_installed(args: &[String]) -> Option<String> {
+    use clap::CommandFactory;
+    let word = args.first().filter(|w| !w.starts_with('-'))?;
+    if crate::Cli::command().find_subcommand(word).is_some() {
+        return None;
+    }
+    Some(format!(
+        "ORB_COMMAND_NOT_INSTALLED: `orb {word}` is not a bootloader command and no installed program declares `{}`; orb's commands ship in @almadar/std — run `orb update` to install it",
+        hook_name(word)
+    ))
 }
 
 /// The installed program in a `cli` topic that declares the hook `cli-<command>`, from the behavior packages resolved
 /// from `cwd` and then `user_store`. More than one is an error that names them.
 #[cfg(test)]
-fn find_command_program(command: &str, cwd: &Path, user_store: &Path) -> anyhow::Result<Option<PathBuf>> {
+fn find_command_program(
+    command: &str,
+    cwd: &Path,
+    user_store: &Path,
+) -> anyhow::Result<Option<PathBuf>> {
     let programs = cli_programs(cwd, user_store)?;
     let hook = hook_name(command);
     let found = programs.declaring(&hook)?;
@@ -101,14 +148,22 @@ struct CliPrograms {
 
 impl CliPrograms {
     fn declaring(&self, hook: &str) -> anyhow::Result<Option<PathBuf>> {
-        let mut found: Vec<&PathBuf> =
-            self.declared.iter().filter(|(_, hooks)| hooks.iter().any(|h| h == hook)).map(|(p, _)| p).collect();
+        let mut found: Vec<&PathBuf> = self
+            .declared
+            .iter()
+            .filter(|(_, hooks)| hooks.iter().any(|h| h == hook))
+            .map(|(p, _)| p)
+            .collect();
         match found.len() {
             0 => Ok(None),
             1 => Ok(found.pop().cloned()),
             _ => anyhow::bail!(
                 "more than one installed program declares `{hook}`: {}",
-                found.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
+                found
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
         }
     }
@@ -118,7 +173,11 @@ impl CliPrograms {
         if self.unusable.is_empty() {
             return Ok(());
         }
-        let hooks = hooks.iter().map(|hook| format!("`{hook}`")).collect::<Vec<_>>().join(" or ");
+        let hooks = hooks
+            .iter()
+            .map(|hook| format!("`{hook}`"))
+            .collect::<Vec<_>>()
+            .join(" or ");
         anyhow::bail!(
             "no installed program declares {hooks}, and these `cli` programs declare no command:\n{}",
             self.unusable.join("\n")
@@ -127,25 +186,40 @@ impl CliPrograms {
 }
 
 fn cli_programs(cwd: &Path, user_store: &Path) -> anyhow::Result<CliPrograms> {
-    let packages = orbital_core::behavior_packages::discover(cwd, user_store).map_err(|e| anyhow::anyhow!("{e}"))?;
-    let mut programs = CliPrograms { declared: Vec::new(), unusable: Vec::new() };
+    let packages = orbital_core::behavior_packages::discover(cwd, user_store)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let mut programs = CliPrograms {
+        declared: Vec::new(),
+        unusable: Vec::new(),
+    };
     for package in &packages {
-        let files = orbital_core::behavior_index::indexed_files(package).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let files = orbital_core::behavior_index::indexed_files(package)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
         for file in files.iter().filter(|file| file.topic() == "cli") {
-            let Some(path) = orbital_core::behavior_index::lolo_path_of(package, file).filter(|p| p.is_file()) else {
+            let Some(path) =
+                orbital_core::behavior_index::lolo_path_of(package, file).filter(|p| p.is_file())
+            else {
                 continue;
             };
-            let source = std::fs::read_to_string(&path).map_err(|e| anyhow::anyhow!("read {}: {e}", path.display()))?;
+            let source = std::fs::read_to_string(&path)
+                .map_err(|e| anyhow::anyhow!("read {}: {e}", path.display()))?;
             let hooks = match orbital_lolo::parse_app_header(&source) {
                 Ok(header) => header.inbound,
                 Err(inner) => {
-                    programs
-                        .unusable
-                        .push(orbital_lolo::LoloError::Parse { path: path.display().to_string(), inner }.render());
+                    programs.unusable.push(
+                        orbital_lolo::LoloError::Parse {
+                            path: path.display().to_string(),
+                            inner,
+                        }
+                        .render(),
+                    );
                     continue;
                 }
             };
-            if let Some((hook, word)) = hooks.iter().find_map(|hook| reserved_word_of(hook).map(|word| (hook, word))) {
+            if let Some((hook, word)) = hooks
+                .iter()
+                .find_map(|hook| reserved_word_of(hook).map(|word| (hook, word)))
+            {
                 programs.unusable.push(format!(
                     "{} declares `{hook}`, but `{word}` is a reserved `orb` command no program can take",
                     path.display()
@@ -186,7 +260,12 @@ impl CommandAnswer {
 }
 
 /// Run `program` as `orb <command> <argv…>`: its answer, with the exit code of its status.
-pub(crate) fn run_command_program(program: &Path, command: &str, argv: &[String], cwd: &Path) -> anyhow::Result<CommandAnswer> {
+pub(crate) fn run_command_program(
+    program: &Path,
+    command: &str,
+    argv: &[String],
+    cwd: &Path,
+) -> anyhow::Result<CommandAnswer> {
     run_command_program_anchored(program, command, argv, cwd, None)
 }
 
@@ -199,16 +278,28 @@ pub(crate) fn run_command_program_anchored(
     anchors: Option<orbital_core::runtime::os_host::OsAnchors>,
 ) -> anyhow::Result<CommandAnswer> {
     let resolved = crate::commands::dev::resolve_to_temp(program)?;
-    let host = orbital_shell_rust::host::SubstratePort(std::sync::Arc::new(crate::commands::program_host::ProgramHost));
+    let host = orbital_shell_rust::host::SubstratePort(std::sync::Arc::new(
+        crate::commands::program_host::ProgramHost,
+    ));
     let config = orbital_shell_rust::host::HostConfig {
         substrate: Some(host),
         anchors,
         ..orbital_shell_rust::host::HostConfig::default()
     };
-    let runtime =
-        orbital_shell_rust::host::boot::boot_file_with(&resolved, false, &std::env::vars().collect(), false, config)?;
+    let runtime = orbital_shell_rust::host::boot::boot_file_with(
+        &resolved,
+        false,
+        &std::env::vars().collect(),
+        false,
+        config,
+    )?;
     let body = serde_json::json!({ "argv": argv, "cwd": cwd.display().to_string() }).to_string();
-    let answer = runtime.deliver_inbound_awaiting(&hook_name(command), [("content-type", "application/json")], &body, None);
+    let answer = runtime.deliver_inbound_awaiting(
+        &hook_name(command),
+        [("content-type", "application/json")],
+        &body,
+        None,
+    );
     Ok(CommandAnswer {
         code: exit_code(answer.status),
         body: answer.body,
@@ -218,11 +309,26 @@ pub(crate) fn run_command_program_anchored(
 }
 
 /// `orb run <program>`, booted: the program on the substrate host, `INIT` mounted on every trait.
-pub(crate) fn boot_run(program: &Path, trace: bool) -> anyhow::Result<std::sync::Arc<orbital_shell_rust::host::Host>> {
+pub(crate) fn boot_run(
+    program: &Path,
+    trace: bool,
+) -> anyhow::Result<std::sync::Arc<orbital_shell_rust::host::Host>> {
     let resolved = crate::commands::dev::resolve_to_temp(program)?;
-    let host = orbital_shell_rust::host::SubstratePort(std::sync::Arc::new(crate::commands::program_host::ProgramHost));
-    let runtime = orbital_shell_rust::host::boot::boot_file(&resolved, false, &std::env::vars().collect(), trace, Some(host))?;
-    orbital_shell_rust::host::run::mount_init(&runtime, orbital_shell_rust::host::run::ProtocolSide::Process).map_err(|e| anyhow::anyhow!("INIT: {e}"))?;
+    let host = orbital_shell_rust::host::SubstratePort(std::sync::Arc::new(
+        crate::commands::program_host::ProgramHost,
+    ));
+    let runtime = orbital_shell_rust::host::boot::boot_file(
+        &resolved,
+        false,
+        &std::env::vars().collect(),
+        trace,
+        Some(host),
+    )?;
+    orbital_shell_rust::host::run::mount_init(
+        &runtime,
+        orbital_shell_rust::host::run::ProtocolSide::Process,
+    )
+    .map_err(|e| anyhow::anyhow!("INIT: {e}"))?;
     Ok(runtime)
 }
 
@@ -240,7 +346,12 @@ const SERVER_BEHAVIOR: &str = "std/behaviors/std-http-server";
 /// The `std-http1` host and port with their listen grant, whether the `PORT` environment variable replaces the port
 /// (with the `env PORT` listen grant on the host), and a client directory (relative to the server's working directory)
 /// with its read grant.
-pub(crate) fn server_overrides(host: &str, port: u16, port_from_env: bool, client_dir: Option<&str>) -> serde_json::Value {
+pub(crate) fn server_overrides(
+    host: &str,
+    port: u16,
+    port_from_env: bool,
+    client_dir: Option<&str>,
+) -> serde_json::Value {
     let mut overrides = serde_json::json!({
         "Http1.host": host,
         "Http1.port": port,
@@ -256,10 +367,86 @@ pub(crate) fn server_overrides(host: &str, port: u16, port_from_env: bool, clien
     }
     if let Some(relative) = client_dir {
         overrides["ServerStatic.clientDir"] = serde_json::json!(relative);
-        overrides["grants"]["anchored"]["fs"] =
-            serde_json::json!([{ "anchor": "cwd", "glob": format!("{relative}/**"), "modes": ["read"] }]);
+        overrides["grants"]["anchored"]["fs"] = serde_json::json!([{ "anchor": "cwd", "glob": format!("{relative}/**"), "modes": ["read"] }]);
     }
     overrides
+}
+
+/// Sets each `Trait.knob` override on the server source: a knob the trait forwards from its orbital (`@config.<name>`)
+/// sets that orbital knob's default and keeps the forward, any other knob becomes the trait's call-site config.
+fn set_server_knobs(
+    source: &mut serde_json::Value,
+    overrides: &serde_json::Value,
+) -> anyhow::Result<()> {
+    for (key, value) in overrides
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter(|(k, _)| k.as_str() != "grants")
+    {
+        let (trait_name, knob) = key
+            .split_once('.')
+            .ok_or_else(|| anyhow::anyhow!("serve override {key} is not <Trait>.<knob>"))?;
+        let kind = match value {
+            serde_json::Value::String(_) => "string",
+            serde_json::Value::Number(_) => "number",
+            serde_json::Value::Bool(_) => "boolean",
+            _ => {
+                return Err(anyhow::anyhow!(
+                    "serve override {key}: only a text, number or boolean knob can be set"
+                ))
+            }
+        };
+        let orbital = source
+            .get_mut("orbitals")
+            .and_then(serde_json::Value::as_array_mut)
+            .into_iter()
+            .flatten()
+            .find(|o| {
+                o.get("traits")
+                    .and_then(serde_json::Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .any(|t| t.get("name").and_then(serde_json::Value::as_str) == Some(trait_name))
+            })
+            .ok_or_else(|| {
+                anyhow::anyhow!("serve override {key}: {SERVER_BEHAVIOR} has no trait {trait_name}")
+            })?;
+        let forwarded = orbital["traits"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|t| t.get("name").and_then(serde_json::Value::as_str) == Some(trait_name))
+            .and_then(|t| t.pointer(&format!("/config/{knob}/default")))
+            .and_then(serde_json::Value::as_str)
+            .and_then(|d| d.strip_prefix("@config."))
+            .map(str::to_string);
+        if let Some(name) = forwarded {
+            let declared = orbital
+                .pointer_mut(&format!("/config/{name}"))
+                .and_then(serde_json::Value::as_object_mut)
+                .ok_or_else(|| anyhow::anyhow!("serve override {key}: {trait_name} forwards @config.{name}, which its orbital does not declare"))?;
+            declared.insert("default".to_string(), value.clone());
+            continue;
+        }
+        let found = orbital["traits"]
+            .as_array_mut()
+            .into_iter()
+            .flatten()
+            .find(|t| t.get("name").and_then(serde_json::Value::as_str) == Some(trait_name))
+            .ok_or_else(|| {
+                anyhow::anyhow!("serve override {key}: {SERVER_BEHAVIOR} has no trait {trait_name}")
+            })?;
+        let config = found
+            .as_object_mut()
+            .ok_or_else(|| {
+                anyhow::anyhow!("serve override {key}: trait {trait_name} is not an object")
+            })?
+            .entry("config")
+            .or_insert_with(|| serde_json::json!({}));
+        config[knob] = serde_json::json!({ "type": kind, "default": value });
+    }
+    Ok(())
 }
 
 /// `std-http-server` resolved with the serve options' knobs set as call-site config on its traits (`Trait.knob`), so the
@@ -267,31 +454,7 @@ pub(crate) fn server_overrides(host: &str, port: u16, port_from_env: bool, clien
 fn resolved_server(overrides: &serde_json::Value) -> anyhow::Result<std::path::PathBuf> {
     let source_path = crate::commands::behaviors_catalog::behavior_source_path(SERVER_BEHAVIOR)?;
     let mut source = crate::commands::behaviors_catalog::source(SERVER_BEHAVIOR)?;
-    for (key, value) in overrides.as_object().into_iter().flatten().filter(|(k, _)| k.as_str() != "grants") {
-        let (trait_name, knob) = key
-            .split_once('.')
-            .ok_or_else(|| anyhow::anyhow!("serve override {key} is not <Trait>.<knob>"))?;
-        let found = source
-            .get_mut("orbitals")
-            .and_then(serde_json::Value::as_array_mut)
-            .into_iter()
-            .flatten()
-            .flat_map(|o| o.get_mut("traits").and_then(serde_json::Value::as_array_mut).into_iter().flatten())
-            .find(|t| t.get("name").and_then(serde_json::Value::as_str) == Some(trait_name))
-            .ok_or_else(|| anyhow::anyhow!("serve override {key}: {SERVER_BEHAVIOR} has no trait {trait_name}"))?;
-        let config = found
-            .as_object_mut()
-            .ok_or_else(|| anyhow::anyhow!("serve override {key}: trait {trait_name} is not an object"))?
-            .entry("config")
-            .or_insert_with(|| serde_json::json!({}));
-        let kind = match value {
-            serde_json::Value::String(_) => "string",
-            serde_json::Value::Number(_) => "number",
-            serde_json::Value::Bool(_) => "boolean",
-            _ => return Err(anyhow::anyhow!("serve override {key}: only a text, number or boolean knob can be set")),
-        };
-        config[knob] = serde_json::json!({ "type": kind, "default": value });
-    }
+    set_server_knobs(&mut source, overrides)?;
     let schema: orbital_core::OrbitalSchema =
         serde_json::from_value(source).map_err(|e| anyhow::anyhow!("{SERVER_BEHAVIOR}: {e}"))?;
     crate::commands::dev::resolve_schema_to_temp(schema, &source_path)
@@ -299,7 +462,10 @@ fn resolved_server(overrides: &serde_json::Value) -> anyhow::Result<std::path::P
 
 /// The app and `std-http-server` (its knobs set from `overrides`), the programs `program/compose` joins, with the app's
 /// name.
-fn served_programs(app: serde_json::Value, overrides: &serde_json::Value) -> anyhow::Result<(Vec<orbital_core::Value>, String)> {
+fn served_programs(
+    app: serde_json::Value,
+    overrides: &serde_json::Value,
+) -> anyhow::Result<(Vec<orbital_core::Value>, String)> {
     let app_name = app
         .get("name")
         .and_then(serde_json::Value::as_str)
@@ -307,12 +473,15 @@ fn served_programs(app: serde_json::Value, overrides: &serde_json::Value) -> any
         .to_string();
     let server_path = resolved_server(overrides)?;
     let server: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(&server_path).map_err(|e| anyhow::anyhow!("read {}: {e}", server_path.display()))?,
+        &std::fs::read_to_string(&server_path)
+            .map_err(|e| anyhow::anyhow!("read {}: {e}", server_path.display()))?,
     )
     .map_err(|e| anyhow::anyhow!("{}: {e}", server_path.display()))?;
     let programs = [app, server]
         .into_iter()
-        .map(|p| serde_json::from_value(p).map_err(|e| anyhow::anyhow!("the program to compose: {e}")))
+        .map(|p| {
+            serde_json::from_value(p).map_err(|e| anyhow::anyhow!("the program to compose: {e}"))
+        })
         .collect::<anyhow::Result<Vec<orbital_core::Value>>>()?;
     Ok((programs, app_name))
 }
@@ -322,11 +491,22 @@ fn grants_only(overrides: &serde_json::Value) -> serde_json::Value {
 }
 
 /// The resolved `app` composed with `std-http-server` as `orb serve` composes it, for a compiled server to run.
-pub(crate) fn served_schema(app: &orbital_core::OrbitalSchema, overrides: &serde_json::Value) -> anyhow::Result<orbital_core::OrbitalSchema> {
-    let app = serde_json::to_value(app).map_err(|e| anyhow::anyhow!("the program to serve: {e}"))?;
+pub(crate) fn served_schema(
+    app: &orbital_core::OrbitalSchema,
+    overrides: &serde_json::Value,
+) -> anyhow::Result<orbital_core::OrbitalSchema> {
+    let app =
+        serde_json::to_value(app).map_err(|e| anyhow::anyhow!("the program to serve: {e}"))?;
     let (programs, app_name) = served_programs(app, overrides)?;
-    let host = orbital_shell_rust::host::SubstratePort(std::sync::Arc::new(crate::commands::program_host::ProgramHost));
-    orbital_shell_rust::host::boot::compose(programs, &app_name, Some(grants_only(overrides)), &host)
+    let host = orbital_shell_rust::host::SubstratePort(std::sync::Arc::new(
+        crate::commands::program_host::ProgramHost,
+    ));
+    orbital_shell_rust::host::boot::compose(
+        programs,
+        &app_name,
+        Some(grants_only(overrides)),
+        &host,
+    )
 }
 
 /// Run the program a cli command handed back (`orb-run` in its answer's headers), as the bootloader runs every program.
@@ -336,22 +516,39 @@ pub(crate) fn run_handoff(answer: &CommandAnswer) -> anyhow::Result<()> {
     let header = |name: &str| answer.headers.get(name).map(String::as_str);
     match header("orb-run") {
         Some("server") => {}
-        other => anyhow::bail!("orb-run: no hand-off named {other:?}; the bootloader runs `server`"),
+        other => {
+            anyhow::bail!("orb-run: no hand-off named {other:?}; the bootloader runs `server`")
+        }
     }
     let mock = match header("orb-mock") {
         Some("on") => true,
         Some("off") => false,
         other => anyhow::bail!("orb-run: server needs orb-mock on|off, got {other:?}"),
     };
-    let app = header("orb-app").ok_or_else(|| anyhow::anyhow!("orb-run: server needs orb-app, the resolved app beside its catalogs"))?;
-    let schema: orbital_core::OrbitalSchema =
-        serde_json::from_str(&answer.body).map_err(|e| anyhow::anyhow!("orb-run: server: the body is not a program: {e}"))?;
+    let app = header("orb-app").ok_or_else(|| {
+        anyhow::anyhow!("orb-run: server needs orb-app, the resolved app beside its catalogs")
+    })?;
+    let schema: orbital_core::OrbitalSchema = serde_json::from_str(&answer.body)
+        .map_err(|e| anyhow::anyhow!("orb-run: server: the body is not a program: {e}"))?;
     let locales = schema.locales.clone().unwrap_or_default();
     let catalogs = orbital_shell_rust::host::boot::read_catalogs(Path::new(app), &locales)?;
-    let host = orbital_shell_rust::host::SubstratePort(std::sync::Arc::new(crate::commands::program_host::ProgramHost));
+    let host = orbital_shell_rust::host::SubstratePort(std::sync::Arc::new(
+        crate::commands::program_host::ProgramHost,
+    ));
     let stop = stop_on_signal()?;
-    let runtime = orbital_shell_rust::host::boot::boot_app(schema, host, catalogs, mock, &std::env::vars().collect(), false)?;
-    orbital_shell_rust::host::run::mount_init(&runtime, orbital_shell_rust::host::run::ProtocolSide::Server).map_err(|e| anyhow::anyhow!("INIT: {e}"))?;
+    let runtime = orbital_shell_rust::host::boot::boot_app(
+        schema,
+        host,
+        catalogs,
+        mock,
+        &std::env::vars().collect(),
+        false,
+    )?;
+    orbital_shell_rust::host::run::mount_init(
+        &runtime,
+        orbital_shell_rust::host::run::ProtocolSide::Server,
+    )
+    .map_err(|e| anyhow::anyhow!("INIT: {e}"))?;
     hold(&runtime, &stop);
     Ok(())
 }
@@ -402,8 +599,11 @@ orbital EchoOrbital {
 "#;
 
     fn project(name: &str, topic: &str) -> (PathBuf, PathBuf) {
-        orbital_compiler::loader::register_source_lowerer(|path, _, _| crate::lower_lolo_file(path));
-        let root = std::env::temp_dir().join(format!("orb-program-command-{name}-{}", std::process::id()));
+        orbital_compiler::loader::register_source_lowerer(|path, _, _| {
+            crate::lower_lolo_file(path)
+        });
+        let root =
+            std::env::temp_dir().join(format!("orb-program-command-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let package = root.join("project/node_modules/@fake/cli");
         let dir = package.join("behaviors/lolo").join(topic).join("atoms");
@@ -418,6 +618,54 @@ orbital EchoOrbital {
         (root.join("project"), root.join("store"))
     }
 
+    fn server_source() -> serde_json::Value {
+        serde_json::json!({ "orbitals": [{
+            "name": "HttpServerOrbital",
+            "config": { "port": { "type": "number", "default": 3000 } },
+            "traits": [{ "name": "Http1", "config": { "port": { "type": "unknown", "default": "@config.port" } } }]
+        }] })
+    }
+
+    #[test]
+    fn a_knob_its_trait_forwards_is_set_on_the_orbital_and_the_forward_kept() {
+        let mut source = server_source();
+        set_server_knobs(&mut source, &serde_json::json!({ "Http1.port": 4100 })).unwrap();
+        let orbital = &source["orbitals"][0];
+        assert_eq!(orbital["config"]["port"]["default"], 4100, "{source}");
+        assert_eq!(
+            orbital["traits"][0]["config"]["port"]["default"], "@config.port",
+            "{source}"
+        );
+    }
+
+    #[test]
+    fn control_a_knob_with_no_forward_is_set_on_the_trait() {
+        let mut source = server_source();
+        set_server_knobs(
+            &mut source,
+            &serde_json::json!({ "Http1.portFromEnv": true }),
+        )
+        .unwrap();
+        let orbital = &source["orbitals"][0];
+        assert_eq!(
+            orbital["traits"][0]["config"]["portFromEnv"],
+            serde_json::json!({ "type": "boolean", "default": true })
+        );
+        assert_eq!(
+            orbital["config"]["port"]["default"], 3000,
+            "the orbital's knob is untouched"
+        );
+    }
+
+    #[test]
+    fn a_forward_to_a_knob_the_orbital_does_not_declare_is_refused() {
+        let mut source = server_source();
+        source["orbitals"][0]["config"] = serde_json::json!({});
+        let error =
+            set_server_knobs(&mut source, &serde_json::json!({ "Http1.port": 4100 })).unwrap_err();
+        assert!(error.to_string().contains("@config.port"), "{error}");
+    }
+
     #[test]
     fn the_status_class_is_the_exit_code() {
         assert_eq!([200, 201, 299].map(exit_code), [0, 0, 0]);
@@ -428,13 +676,31 @@ orbital EchoOrbital {
     #[test]
     fn a_cli_program_declaring_the_hook_is_the_command_and_runs_with_its_arguments() {
         let (cwd, store) = project("found", "cli");
-        let program = find_command_program("echo", &cwd, &store).unwrap().expect("the cli program is found");
-        assert!(program.ends_with("cli/atoms/fake-echo.lolo"), "{}", program.display());
-        assert_eq!(find_command_program("nope", &cwd, &store).unwrap(), None, "control: no program declares cli-nope");
-        let CommandAnswer { code, body: out, .. } = run_command_program(&program, "echo", &["hello".into(), "world".into()], &cwd).unwrap();
+        let program = find_command_program("echo", &cwd, &store)
+            .unwrap()
+            .expect("the cli program is found");
+        assert!(
+            program.ends_with("cli/atoms/fake-echo.lolo"),
+            "{}",
+            program.display()
+        );
+        assert_eq!(
+            find_command_program("nope", &cwd, &store).unwrap(),
+            None,
+            "control: no program declares cli-nope"
+        );
+        let CommandAnswer {
+            code, body: out, ..
+        } = run_command_program(&program, "echo", &["hello".into(), "world".into()], &cwd).unwrap();
         assert_eq!((code, out.as_str()), (0, "hello world"));
-        let CommandAnswer { code, body: out, .. } = run_command_program(&program, "echo", &[], &cwd).unwrap();
-        assert_eq!((code, out.as_str()), (2, "usage: orb echo <words>"), "a refused input is exit 2 with its message");
+        let CommandAnswer {
+            code, body: out, ..
+        } = run_command_program(&program, "echo", &[], &cwd).unwrap();
+        assert_eq!(
+            (code, out.as_str()),
+            (2, "usage: orb echo <words>"),
+            "a refused input is exit 2 with its message"
+        );
     }
 
     fn with_stderr_program(cwd: &Path) {
@@ -445,31 +711,52 @@ orbital EchoOrbital {
                 r#"{ status: 400, body: "usage: orb echo <words>" }"#,
                 r#"{ status: 400, body: "", stderr: "usage: orb warn <words>" }"#,
             )
-            .replace("{ status : number! body : string! }", "{ status : number! body : string! stderr : string }");
+            .replace(
+                "{ status : number! body : string! }",
+                "{ status : number! body : string! stderr : string }",
+            );
         std::fs::write(dir.join("fake-warn.lolo"), source).unwrap();
     }
 
     fn written(answer: &CommandAnswer) -> (String, String) {
         let (mut out, mut err) = (Vec::new(), Vec::new());
         answer.write_to(&mut out, &mut err).unwrap();
-        (String::from_utf8(out).unwrap(), String::from_utf8(err).unwrap())
+        (
+            String::from_utf8(out).unwrap(),
+            String::from_utf8(err).unwrap(),
+        )
     }
 
     #[test]
     fn an_answer_stderr_reaches_stderr_and_its_status_is_the_exit_code() {
         let (cwd, store) = project("stderr", "cli");
         with_stderr_program(&cwd);
-        let program = find_command_program("warn", &cwd, &store).unwrap().expect("the stderr program is found");
+        let program = find_command_program("warn", &cwd, &store)
+            .unwrap()
+            .expect("the stderr program is found");
         let refused = run_command_program(&program, "warn", &[], &cwd).unwrap();
         assert_eq!(
             refused,
-            CommandAnswer { code: 2, body: String::new(), stderr: Some("usage: orb warn <words>".into()), headers: Default::default() }
+            CommandAnswer {
+                code: 2,
+                body: String::new(),
+                stderr: Some("usage: orb warn <words>".into()),
+                headers: Default::default()
+            }
         );
-        assert_eq!(written(&refused), (String::new(), "usage: orb warn <words>\n".into()));
+        assert_eq!(
+            written(&refused),
+            (String::new(), "usage: orb warn <words>\n".into())
+        );
         let answered = run_command_program(&program, "warn", &["hi".into()], &cwd).unwrap();
         assert_eq!(
             answered,
-            CommandAnswer { code: 0, body: "hi".into(), stderr: None, headers: Default::default() },
+            CommandAnswer {
+                code: 0,
+                body: "hi".into(),
+                stderr: None,
+                headers: Default::default()
+            },
             "an answer that omits stderr has none"
         );
         assert_eq!(written(&answered), ("hi\n".into(), String::new()));
@@ -478,10 +765,23 @@ orbital EchoOrbital {
     #[test]
     fn control_an_answer_without_stderr_prints_its_body_on_stdout_only() {
         let (cwd, store) = project("no-stderr", "cli");
-        let program = find_command_program("echo", &cwd, &store).unwrap().expect("the cli program is found");
+        let program = find_command_program("echo", &cwd, &store)
+            .unwrap()
+            .expect("the cli program is found");
         let refused = run_command_program(&program, "echo", &[], &cwd).unwrap();
-        assert_eq!(refused, CommandAnswer { code: 2, body: "usage: orb echo <words>".into(), stderr: None, headers: Default::default() });
-        assert_eq!(written(&refused), ("usage: orb echo <words>\n".into(), String::new()));
+        assert_eq!(
+            refused,
+            CommandAnswer {
+                code: 2,
+                body: "usage: orb echo <words>".into(),
+                stderr: None,
+                headers: Default::default()
+            }
+        );
+        assert_eq!(
+            written(&refused),
+            ("usage: orb echo <words>\n".into(), String::new())
+        );
     }
 
     #[test]
@@ -490,17 +790,32 @@ orbital EchoOrbital {
         let dir = cwd.join("node_modules/@fake/cli/behaviors/lolo/cli/atoms");
         std::fs::write(
             dir.join("fake-bad.lolo"),
-            ECHO.replace("cli-echo", "cli-bad").replace("status : number!", "status : Nope!"),
+            ECHO.replace("cli-echo", "cli-bad")
+                .replace("status : number!", "status : Nope!"),
         )
         .unwrap();
-        let echo = find_command_program("echo", &cwd, &store).unwrap().expect("the healthy command still resolves");
-        let CommandAnswer { code, body: out, .. } = run_command_program(&echo, "echo", &["hi".into()], &cwd).unwrap();
+        let echo = find_command_program("echo", &cwd, &store)
+            .unwrap()
+            .expect("the healthy command still resolves");
+        let CommandAnswer {
+            code, body: out, ..
+        } = run_command_program(&echo, "echo", &["hi".into()], &cwd).unwrap();
         assert_eq!((code, out.as_str()), (0, "hi"));
-        let bad =
-            find_command_program("bad", &cwd, &store).unwrap().expect("the broken program's hook is still readable");
-        assert!(bad.ends_with("cli/atoms/fake-bad.lolo"), "{}", bad.display());
-        let error = run_command_program(&bad, "bad", &[], &cwd).unwrap_err().to_string();
-        assert!(error.contains("fake-bad.lolo") && error.contains("Nope"), "{error}");
+        let bad = find_command_program("bad", &cwd, &store)
+            .unwrap()
+            .expect("the broken program's hook is still readable");
+        assert!(
+            bad.ends_with("cli/atoms/fake-bad.lolo"),
+            "{}",
+            bad.display()
+        );
+        let error = run_command_program(&bad, "bad", &[], &cwd)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("fake-bad.lolo") && error.contains("Nope"),
+            "{error}"
+        );
         assert_eq!(
             find_command_program("nope", &cwd, &store).unwrap(),
             None,
@@ -512,23 +827,45 @@ orbital EchoOrbital {
     fn an_unparseable_program_is_reported_only_where_no_healthy_program_answers() {
         let (cwd, store) = project("parse-broken", "cli");
         with_broken_program(&cwd);
-        let echo = find_command_program("echo", &cwd, &store).unwrap().expect("the healthy command still resolves");
-        assert!(echo.ends_with("cli/atoms/fake-echo.lolo"), "{}", echo.display());
-        assert_eq!(routed(&["echo", "hi"], &cwd, &store), Some(("echo".into(), words(&["hi"]))));
-        let error = find_command_program("nope", &cwd, &store).unwrap_err().to_string();
-        assert!(error.contains("fake-broken.lolo") && error.contains("`cli-nope`"), "{error}");
+        let echo = find_command_program("echo", &cwd, &store)
+            .unwrap()
+            .expect("the healthy command still resolves");
+        assert!(
+            echo.ends_with("cli/atoms/fake-echo.lolo"),
+            "{}",
+            echo.display()
+        );
+        assert_eq!(
+            routed(&["echo", "hi"], &cwd, &store),
+            Some(("echo".into(), words(&["hi"])))
+        );
+        let error = find_command_program("nope", &cwd, &store)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("fake-broken.lolo") && error.contains("`cli-nope`"),
+            "{error}"
+        );
     }
 
     fn with_programs(cwd: &Path, hooks: &[&str]) {
         let dir = cwd.join("node_modules/@fake/cli/behaviors/lolo/cli/atoms");
         for hook in hooks {
-            std::fs::write(dir.join(format!("fake-{hook}.lolo")), ECHO.replace("cli-echo", hook)).unwrap();
+            std::fs::write(
+                dir.join(format!("fake-{hook}.lolo")),
+                ECHO.replace("cli-echo", hook),
+            )
+            .unwrap();
         }
     }
 
     fn with_broken_program(cwd: &Path) {
         let dir = cwd.join("node_modules/@fake/cli/behaviors/lolo/cli/atoms");
-        std::fs::write(dir.join("fake-broken.lolo"), "app fake-broken [ this does not parse").unwrap();
+        std::fs::write(
+            dir.join("fake-broken.lolo"),
+            "app fake-broken [ this does not parse",
+        )
+        .unwrap();
     }
 
     fn words(args: &[&str]) -> Vec<String> {
@@ -536,25 +873,41 @@ orbital EchoOrbital {
     }
 
     fn routed(args: &[&str], cwd: &Path, store: &Path) -> Option<(String, Vec<String>)> {
-        resolve_program_command(&words(args), cwd, store).unwrap().map(|c| (c.command, c.argv))
+        resolve_program_command(&words(args), cwd, store)
+            .unwrap()
+            .map(|c| (c.command, c.argv))
     }
 
     #[test]
     fn program_first_a_clap_subcommand_word_resolves_to_the_program_declaring_it() {
         use clap::CommandFactory;
         let (cwd, store) = project("program-first", "cli");
-        with_programs(&cwd, &["cli-serve", "cli-behaviors", "cli-behaviors-describe"]);
+        with_programs(
+            &cwd,
+            &["cli-run2", "cli-behaviors", "cli-behaviors-describe"],
+        );
         let clap = crate::Cli::command();
-        assert!(clap.find_subcommand("serve").is_some() && clap.find_subcommand("behaviors").is_some());
-        assert_eq!(routed(&["serve", "a"], &cwd, &store), Some(("serve".into(), words(&["a"]))));
+        assert!(clap.find_subcommand("behaviors").is_some());
+        assert_eq!(
+            routed(&["run2", "a"], &cwd, &store),
+            Some(("run2".into(), words(&["a"])))
+        );
         assert_eq!(
             routed(&["behaviors", "describe", "x"], &cwd, &store),
             Some(("behaviors-describe".into(), words(&["x"]))),
             "the two-word hook is tried first"
         );
-        assert_eq!(routed(&["behaviors", "catalog"], &cwd, &store), Some(("behaviors".into(), words(&["catalog"]))));
-        let command = resolve_program_command(&words(&["behaviors", "describe", "hi"]), &cwd, &store).unwrap().unwrap();
-        let CommandAnswer { code, body: out, .. } = run_command_program(&command.program, &command.command, &command.argv, &cwd).unwrap();
+        assert_eq!(
+            routed(&["behaviors", "catalog"], &cwd, &store),
+            Some(("behaviors".into(), words(&["catalog"])))
+        );
+        let command =
+            resolve_program_command(&words(&["behaviors", "describe", "hi"]), &cwd, &store)
+                .unwrap()
+                .unwrap();
+        let CommandAnswer {
+            code, body: out, ..
+        } = run_command_program(&command.program, &command.command, &command.argv, &cwd).unwrap();
         assert_eq!((code, out.as_str()), (0, "hi"));
     }
 
@@ -563,8 +916,14 @@ orbital EchoOrbital {
         use clap::Parser;
         let (cwd, store) = project("route1", "cli");
         with_programs(&cwd, &["cli-simulate", "cli-language"]);
-        assert_eq!(routed(&["simulate", "app.lolo"], &cwd, &store), Some(("simulate".into(), words(&["app.lolo"]))));
-        assert_eq!(routed(&["language", "which"], &cwd, &store), Some(("language".into(), words(&["which"]))));
+        assert_eq!(
+            routed(&["simulate", "app.lolo"], &cwd, &store),
+            Some(("simulate".into(), words(&["app.lolo"])))
+        );
+        assert_eq!(
+            routed(&["language", "which"], &cwd, &store),
+            Some(("language".into(), words(&["which"])))
+        );
         assert!(crate::Cli::try_parse_from(["orb", "validate", "a.lolo", "--simulate"]).is_err());
         assert!(crate::Cli::try_parse_from(["orb", "language", "which"]).is_err());
     }
@@ -575,17 +934,33 @@ orbital EchoOrbital {
         assert_eq!(routed(&["validate", "app.lolo"], &cwd, &store), None);
         assert_eq!(routed(&["behaviors", "catalog"], &cwd, &store), None);
         assert_eq!(routed(&["--help"], &cwd, &store), None);
-        assert_eq!(routed(&["--list"], &cwd, &store), None, "a leading flag names no program");
+        assert_eq!(
+            routed(&["--list"], &cwd, &store),
+            None,
+            "a leading flag names no program"
+        );
         assert_eq!(routed(&[], &cwd, &store), None);
     }
 
     #[test]
     fn the_agent_words_are_not_clap_subcommands() {
         use clap::Parser;
-        for args in [&["orb", "fix", "a.orb"][..], &["orb", "login"], &["orb", "eval", "--all"], &["orb", "trace"], &["orb", "--list"]] {
-            let error = crate::Cli::try_parse_from(args).err().unwrap_or_else(|| panic!("{args:?} parsed"));
+        for args in [
+            &["orb", "fix", "a.orb"][..],
+            &["orb", "login"],
+            &["orb", "eval", "--all"],
+            &["orb", "trace"],
+            &["orb", "--list"],
+        ] {
+            let error = crate::Cli::try_parse_from(args)
+                .err()
+                .unwrap_or_else(|| panic!("{args:?} parsed"));
             assert!(
-                matches!(error.kind(), clap::error::ErrorKind::InvalidSubcommand | clap::error::ErrorKind::UnknownArgument),
+                matches!(
+                    error.kind(),
+                    clap::error::ErrorKind::InvalidSubcommand
+                        | clap::error::ErrorKind::UnknownArgument
+                ),
                 "{args:?}: {:?}",
                 error.kind()
             );
@@ -593,9 +968,35 @@ orbital EchoOrbital {
     }
 
     #[test]
+    fn a_word_no_program_declares_and_clap_lacks_is_a_named_not_installed_error() {
+        let message = not_installed(&words(&["validate", "a.lolo"])).expect("refused");
+        assert!(
+            message.starts_with("ORB_COMMAND_NOT_INSTALLED")
+                && message.contains("`cli-validate`")
+                && message.contains("orb update"),
+            "{message}"
+        );
+        assert_eq!(
+            not_installed(&words(&["update"])),
+            None,
+            "control: a bootloader command reaches clap"
+        );
+        assert_eq!(
+            not_installed(&words(&["--version"])),
+            None,
+            "control: a flag reaches clap"
+        );
+        assert_eq!(
+            not_installed(&[]),
+            None,
+            "control: no words prints the help"
+        );
+    }
+
+    #[test]
     fn control_a_kept_subcommand_still_parses() {
         use clap::Parser;
-        assert!(crate::Cli::try_parse_from(["orb", "validate", "app.lolo"]).is_ok());
+        assert!(crate::Cli::try_parse_from(["orb", "run", "app.lolo"]).is_ok());
         assert!(crate::Cli::try_parse_from(["orb"]).is_ok());
     }
 
@@ -603,8 +1004,14 @@ orbital EchoOrbital {
     fn every_reserved_word_is_a_clap_subcommand_or_flag() {
         use clap::CommandFactory;
         let clap = crate::Cli::command();
-        for word in RESERVED_COMMANDS.iter().filter(|w| !w.starts_with('-') && **w != "help") {
-            assert!(clap.find_subcommand(word).is_some(), "`{word}` is reserved but clap has no such subcommand");
+        for word in RESERVED_COMMANDS
+            .iter()
+            .filter(|w| !w.starts_with('-') && **w != "help")
+        {
+            assert!(
+                clap.find_subcommand(word).is_some(),
+                "`{word}` is reserved but clap has no such subcommand"
+            );
         }
     }
 
@@ -612,10 +1019,22 @@ orbital EchoOrbital {
     fn a_reserved_word_reaches_clap_even_with_a_broken_cli_program() {
         let (cwd, store) = project("reserved-broken", "cli");
         with_broken_program(&cwd);
-        let lines: [&[&str]; 6] =
-            [&["update"], &["add", "@x/y"], &["remove", "@x/y"], &["list"], &["--version"], &["--help"]];
+        let lines: [&[&str]; 6] = [
+            &["update"],
+            &["add", "@x/y"],
+            &["remove", "@x/y"],
+            &["list"],
+            &["--version"],
+            &["--help"],
+        ];
         for args in lines {
-            assert_eq!(resolve_program_command(&words(args), &cwd, &store).unwrap().map(|c| c.command), None, "{args:?}");
+            assert_eq!(
+                resolve_program_command(&words(args), &cwd, &store)
+                    .unwrap()
+                    .map(|c| c.command),
+                None,
+                "{args:?}"
+            );
         }
     }
 
@@ -623,31 +1042,47 @@ orbital EchoOrbital {
     fn control_a_non_reserved_word_with_a_broken_cli_program_surfaces_the_error() {
         let (cwd, store) = project("nonreserved-broken", "cli");
         with_broken_program(&cwd);
-        let error = resolve_program_command(&words(&["fix"]), &cwd, &store).unwrap_err().to_string();
+        let error = resolve_program_command(&words(&["fix"]), &cwd, &store)
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("fake-broken.lolo"), "{error}");
     }
 
     #[test]
     fn a_program_declaring_a_reserved_word_is_refused() {
         let (cwd, store) = project("reserved-declared", "cli");
-        with_programs(&cwd, &["cli-validate"]);
+        with_programs(&cwd, &["cli-update"]);
         assert_eq!(
             routed(&["echo", "hi"], &cwd, &store),
             Some(("echo".into(), words(&["hi"]))),
             "other commands still resolve"
         );
-        let error = resolve_program_command(&words(&["nope"]), &cwd, &store).unwrap_err().to_string();
-        assert!(error.contains("`cli-validate`") && error.contains("`validate` is a reserved"), "{error}");
-        assert_eq!(routed(&["validate", "a.lolo"], &cwd, &store), None, "the reserved word itself still reaches clap");
+        let error = resolve_program_command(&words(&["nope"]), &cwd, &store)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("`cli-update`") && error.contains("`update` is a reserved"),
+            "{error}"
+        );
+        assert_eq!(
+            routed(&["update"], &cwd, &store),
+            None,
+            "the reserved word itself still reaches clap"
+        );
     }
 
     #[test]
     fn a_hook_under_a_reserved_word_is_reserved_and_a_lookalike_is_not() {
-        assert_eq!(reserved_word_of("cli-validate"), Some("validate"));
+        assert_eq!(reserved_word_of("cli-update"), Some("update"));
+        assert_eq!(
+            reserved_word_of("cli-validate"),
+            None,
+            "validate is a std program now"
+        );
         assert_eq!(reserved_word_of("cli-list-foo"), Some("list"));
         assert_eq!(reserved_word_of("cli-lister"), None);
         assert_eq!(reserved_word_of("cli-status"), None);
-        assert_eq!(reserved_word_of("validate"), None);
+        assert_eq!(reserved_word_of("update"), None);
     }
 
     const LISTENER: &str = r#"app fake-listener [
@@ -695,7 +1130,9 @@ orbital ListenerOrbital {
 "#;
 
     fn run_fixture(name: &str, source: &str) -> PathBuf {
-        orbital_compiler::loader::register_source_lowerer(|path, _, _| crate::lower_lolo_file(path));
+        orbital_compiler::loader::register_source_lowerer(|path, _, _| {
+            crate::lower_lolo_file(path)
+        });
         let dir = std::env::temp_dir().join(format!("orb-run-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -705,9 +1142,21 @@ orbital ListenerOrbital {
     }
 
     fn bound_port(runtime: &orbital_shell_rust::host::Host) -> u16 {
-        let emits: Vec<_> = runtime.trace().into_iter().flat_map(|t| t.outcomes).flat_map(|o| o.emits).collect();
-        let bound = emits.iter().find(|e| e.event == "BOUND").unwrap_or_else(|| panic!("no BOUND emit in {emits:?}"));
-        bound.payload["port"].as_f64().filter(|p| p.fract() == 0.0 && (1.0..=65535.0).contains(p)).map(|p| p as u16).expect("a port")
+        let emits: Vec<_> = runtime
+            .trace()
+            .into_iter()
+            .flat_map(|t| t.outcomes)
+            .flat_map(|o| o.emits)
+            .collect();
+        let bound = emits
+            .iter()
+            .find(|e| e.event == "BOUND")
+            .unwrap_or_else(|| panic!("no BOUND emit in {emits:?}"));
+        bound.payload["port"]
+            .as_f64()
+            .filter(|p| p.fract() == 0.0 && (1.0..=65535.0).contains(p))
+            .map(|p| p as u16)
+            .expect("a port")
     }
 
     #[test]
@@ -733,23 +1182,39 @@ orbital ListenerOrbital {
     fn run_holds_a_listening_program_body() {
         let program = run_fixture("listener", LISTENER);
         let runtime = boot_run(&program, true).unwrap();
-        assert_eq!(runtime.open_calls(), vec!["listener".to_string()], "{}", serde_json::to_string(&runtime.trace()).unwrap());
+        assert_eq!(
+            runtime.open_calls(),
+            vec!["listener".to_string()],
+            "{}",
+            serde_json::to_string(&runtime.trace()).unwrap()
+        );
         let port = bound_port(&runtime);
         let (stop, stopped) = std::sync::mpsc::channel();
         let held = std::thread::spawn({
             let runtime = runtime.clone();
             move || hold(&runtime, &stopped)
         });
-        let _conn = std::net::TcpStream::connect(("127.0.0.1", port)).expect("the listener accepts");
+        let _conn =
+            std::net::TcpStream::connect(("127.0.0.1", port)).expect("the listener accepts");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while runtime.get_state("Listen", RUN_ENTITY).map(|s| s.current_state) != Some("serving".to_string()) {
-            assert!(std::time::Instant::now() < deadline, "the accepted connection reached the program");
+        while runtime
+            .get_state("Listen", RUN_ENTITY)
+            .map(|s| s.current_state)
+            != Some("serving".to_string())
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the accepted connection reached the program"
+            );
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         assert!(!held.is_finished(), "an open listener keeps the run alive");
         stop.send(()).unwrap();
         assert_eq!(held.join().unwrap(), RunEnd::Stopped);
-        assert!(runtime.open_calls().is_empty(), "stopping cancels the open stream");
+        assert!(
+            runtime.open_calls().is_empty(),
+            "stopping cancels the open stream"
+        );
     }
 
     #[test]
@@ -766,7 +1231,11 @@ orbital ListenerOrbital {
 
     /// `relay: false` is G-ORB-472: `SplitCli` handles `cli-split` while only `SplitEngine` emits its answer.
     fn split_program(relay: bool) -> String {
-        let relay_arm = if relay { "\n      RELAYED -> ready\n        (emit SPLIT_ANSWERED { status: @payload.status, body: @payload.body })" } else { "" };
+        let relay_arm = if relay {
+            "\n      RELAYED -> ready\n        (emit SPLIT_ANSWERED { status: @payload.status, body: @payload.body })"
+        } else {
+            ""
+        };
         let relay_listen = if relay {
             "\n      SplitEngine.SPLIT_ANSWERED -> RELAYED\n      RELAYED { status : number!  body : string! }"
         } else {
@@ -835,12 +1304,23 @@ orbital SplitOrbital {{
     fn a_command_whose_answer_only_a_sibling_trait_emits_answers_unanswered_instead_of_hanging() {
         bounded(|| {
             let program = run_fixture("split", &split_program(false));
-            let CommandAnswer { code, body: out, .. } = run_command_program(&program, "split", &[], Path::new(".")).unwrap();
+            let CommandAnswer {
+                code, body: out, ..
+            } = run_command_program(&program, "split", &[], Path::new(".")).unwrap();
             assert_eq!(code, 1, "{out}");
-            let body: serde_json::Value = serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}: {out}"));
+            let body: serde_json::Value =
+                serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}: {out}"));
             assert_eq!(
-                (body["code"].as_str(), body["trait"].as_str(), body["event"].as_str()),
-                (Some("inbound-unanswered"), Some("SplitCli"), Some("SPLIT_CALLED"))
+                (
+                    body["code"].as_str(),
+                    body["trait"].as_str(),
+                    body["event"].as_str()
+                ),
+                (
+                    Some("inbound-unanswered"),
+                    Some("SplitCli"),
+                    Some("SPLIT_CALLED")
+                )
             );
         });
     }
@@ -849,7 +1329,9 @@ orbital SplitOrbital {{
     fn control_a_command_that_relays_its_engines_answer_answers_it() {
         bounded(|| {
             let program = run_fixture("split-relay", &split_program(true));
-            let CommandAnswer { code, body: out, .. } = run_command_program(&program, "split", &[], Path::new(".")).unwrap();
+            let CommandAnswer {
+                code, body: out, ..
+            } = run_command_program(&program, "split", &[], Path::new(".")).unwrap();
             assert_eq!((code, out.as_str()), (0, "engine done"));
         });
     }

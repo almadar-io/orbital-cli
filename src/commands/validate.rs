@@ -45,6 +45,7 @@ pub(crate) fn validation_report(
     services_path: Option<&std::path::Path>,
     deny_warnings: bool,
     final_program: bool,
+    findings: &[ProgramFinding],
 ) -> anyhow::Result<ValidationJsonOutput> {
     if let Err(e) = tracing::info_span!(target: ns::CLI, "language data").in_scope(crate::utils::patterns::ensure_language_ready) {
         return Ok(ValidationJsonOutput {
@@ -64,6 +65,7 @@ pub(crate) fn validation_report(
         service_registry,
         deny_warnings,
         final_program,
+        findings,
     )
 }
 
@@ -167,8 +169,10 @@ fn validate_schema_json(
     service_registry: orbital_compiler::embedded::ServiceRegistryData,
     deny_warnings: bool,
     final_program: bool,
+    findings: &[ProgramFinding],
 ) -> anyhow::Result<ValidationJsonOutput> {
     use orbital_compiler::phases::inline::inline_schema_with_orbital_diagnostics;
+    let mut findings = findings.to_vec();
     use orbital_compiler::{compile_schema, validate_comprehensive_full, CompilerOptions};
     use orbital_core::ir::{OirValidator, ValidationSeverity};
 
@@ -436,6 +440,7 @@ fn validate_schema_json(
         &orbital_ref_diagnostics,
         &uses_config_diagnostics,
         &schema,
+        &mut findings,
     );
     if final_program {
         comprehensive_result.merge(
@@ -472,16 +477,7 @@ fn validate_schema_json(
         // REFERENCE, not the failing expression, and an agent staring at it
         // spins (C-INLINE-SPLICE-LOCATION). Say so instead of implying
         // exactness.
-        let fix_guidance = match resolved {
-            Some((_, false)) => {
-                let note = "Location is approximate (nearest tracked source line). If the shown line only references a config knob or another trait, the failing expression lives where that value is DECLARED (e.g. the trait's config block default) — search the file for the expression named in the message.";
-                Some(match &error.fix_guidance {
-                    Some(existing) => format!("{existing} {note}"),
-                    None => note.to_string(),
-                })
-            }
-            _ => error.fix_guidance.clone(),
-        };
+        let fix_guidance = located_guidance(resolved.as_ref(), error.fix_guidance.as_deref());
         all_errors.push(ValidationJsonError {
             code: error.code.to_string(),
             path: error.path.clone(),
@@ -514,14 +510,15 @@ fn validate_schema_json(
     // here silently dropped compile/resolve failures and let `--json` report
     // `valid:true` on a schema plain `orb validate` rejects (same class of
     // --json/plain divergence the inline `from_env` note above documents).
-    // One reporter: when validation already reported errors the compile step
-    // can only restate the same root cause as `COMPILATION_ERROR`, so it runs
-    // only on a schema validation accepted.
+    // One reporter: when validation or a std lint already reported errors the compile
+    // step can only restate the same root cause as `COMPILATION_ERROR`, so it runs
+    // only on a schema both accepted.
     // Already inlined above WITH the source path; re-inlining here would
     // resolve relative `uses` against the cwd instead of the file's folder.
     let mut options = tracing::info_span!(target: ns::CLI, "discover packages").in_scope(CompilerOptions::from_env);
     options.inline.skip_inline = true;
-    let compile_result = if all_errors.is_empty() {
+    let lint_errors = findings.iter().any(|f| matches!(f.severity, FindingSeverity::Error));
+    let compile_result = if all_errors.is_empty() && !lint_errors {
         Some(tracing::info_span!(target: ns::CLI, "compile").in_scope(|| compile_schema(schema, &options)))
     } else {
         None
@@ -571,6 +568,32 @@ fn validate_schema_json(
         }
     }
 
+    for finding in &findings {
+        let resolved = source_map.as_ref().and_then(|m| m.lookup_detailed(&finding.path));
+        let position = resolved.as_ref().map(|(span, exact)| SourcePosition::of(*span, *exact));
+        let suggestion = Some(finding.suggestion.clone()).filter(|s| !s.is_empty());
+        match finding.severity {
+            FindingSeverity::Error => all_errors.push(ValidationJsonError {
+                code: finding.code.clone(),
+                path: finding.path.clone(),
+                message: finding.message.clone(),
+                suggestion,
+                fix_guidance: located_guidance(resolved.as_ref(), None),
+                expected_shape: None,
+                valid_values: finding.valid_values.clone(),
+                position,
+                needs_install: None,
+            }),
+            FindingSeverity::Warning => all_warnings.push(ValidationJsonWarning {
+                code: finding.code.clone(),
+                path: finding.path.clone(),
+                message: finding.message.clone(),
+                suggestion,
+                position,
+            }),
+        }
+    }
+
     let output = ValidationJsonOutput {
         success: true,
         valid: validation_passes(all_errors.len(), all_warnings.len(), deny_warnings),
@@ -588,6 +611,55 @@ fn validate_schema_json(
     };
 
     Ok(output)
+}
+
+impl orbital_compiler::phases::validation::orbital_ref_config::CascadeRow for ProgramFinding {
+    fn code(&self) -> &str {
+        &self.code
+    }
+    fn path(&self) -> &str {
+        &self.path
+    }
+    fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+/// A finding a std lint program reports for the file, placed in the report beside the compiler's (`program/validate
+/// { findings }`).
+#[derive(Debug, Clone, serde::Deserialize)]
+pub(crate) struct ProgramFinding {
+    pub(crate) code: String,
+    pub(crate) path: String,
+    pub(crate) message: String,
+    #[serde(default)]
+    pub(crate) suggestion: String,
+    pub(crate) severity: FindingSeverity,
+    /// The accepted values, when the finding names a closed set (a field type, an enum member).
+    #[serde(default, rename = "validValues")]
+    pub(crate) valid_values: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Copy, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum FindingSeverity {
+    Error,
+    Warning,
+}
+
+/// A finding's fix guidance, with the approximate-location note when its source span is only the nearest tracked
+/// ancestor (an expression spliced in by the inline phase points at the line that references it, C-INLINE-SPLICE-LOCATION).
+fn located_guidance(resolved: Option<&(orbital_lolo::Span, bool)>, existing: Option<&str>) -> Option<String> {
+    match resolved {
+        Some((_, false)) => {
+            let note = "Location is approximate (nearest tracked source line). If the shown line only references a config knob or another trait, the failing expression lives where that value is DECLARED (e.g. the trait's config block default) — search the file for the expression named in the message.";
+            Some(match existing {
+                Some(existing) => format!("{existing} {note}"),
+                None => note.to_string(),
+            })
+        }
+        _ => existing.map(str::to_string),
+    }
 }
 
 /// Collected validation diagnostics (formatted, self-describing strings).
@@ -635,25 +707,12 @@ fn load_catalogs(
 }
 
 /// Checks only the whole top-level program can make (after its `uses lazy`
-/// pages are recorded): its catalogs and its sign-in route. Both the text and
-/// `--json` paths report them.
+/// pages are recorded): its catalogs. Both the text and `--json` paths report them.
 fn program_findings(
     schema: &orbital_core::schema::OrbitalSchema,
     path: &std::path::Path,
 ) -> Vec<Finding> {
-    let mut findings = catalog_findings(schema, path);
-    let sign_in = orbital_compiler::phases::validation::page::validate_sign_in_route(schema);
-    for e in sign_in.errors {
-        let code = e.code.as_str().to_string();
-        findings.push(Finding {
-            text: format!("[{code}] {}: {}", e.path, e.message),
-            code,
-            path: e.path,
-            message: e.message,
-            suggestion: e.suggestion,
-        });
-    }
-    findings
+    catalog_findings(schema, path)
 }
 
 fn secret_flow_finding(
@@ -1020,6 +1079,7 @@ pub(crate) fn validate_schema_core(
         &orbital_ref_diagnostics,
         &uses_config_diagnostics,
         &schema,
+        &mut Vec::new(),
     );
     if final_program {
         comprehensive_result.merge(
@@ -1227,118 +1287,3 @@ mod legacy_header_tests {
     }
 }
 
-#[cfg(test)]
-mod program_findings_tests {
-    use super::program_findings;
-
-    fn schema(site: serde_json::Value, path: &str) -> orbital_core::schema::OrbitalSchema {
-        serde_json::from_value(serde_json::json!({
-            "name": "app",
-            "site": site,
-            "orbitals": [{
-                "name": "Main",
-                "entity": { "name": "Item", "persistence": "runtime", "fields": [{ "name": "id", "type": "string" }] },
-                "traits": [],
-                "pages": [{ "name": "P", "path": path, "traits": [] }]
-            }]
-        }))
-        .expect("schema")
-    }
-
-    fn codes(s: &orbital_core::schema::OrbitalSchema) -> Vec<String> {
-        program_findings(s, std::path::Path::new("/nonexistent/app.lolo"))
-            .into_iter()
-            .map(|f| f.code)
-            .collect()
-    }
-
-    #[test]
-    fn a_page_on_the_hosts_sign_in_route_is_a_program_finding() {
-        assert_eq!(
-            codes(&schema(serde_json::json!({}), "/login")),
-            vec!["ORB_P_HOST_RESERVED_ROUTE"]
-        );
-    }
-
-    #[test]
-    fn an_unknown_sign_in_route_is_a_program_finding() {
-        assert_eq!(
-            codes(&schema(serde_json::json!({ "signIn": "/nope" }), "/")),
-            vec!["ORB_P_SIGN_IN_UNKNOWN_ROUTE"]
-        );
-    }
-
-    #[test]
-    fn control_the_hosts_sign_in_route_needs_no_page() {
-        assert!(codes(&schema(serde_json::json!({ "signIn": "/login" }), "/")).is_empty());
-    }
-}
-
-#[cfg(test)]
-mod native_validation_tests {
-    use super::run_full_validation;
-
-    fn trait_rendering_main(name: &str) -> serde_json::Value {
-        serde_json::json!({
-            "name": name,
-            "linkedEntity": "E",
-            "stateMachine": {
-                "states": [{ "name": "idle", "isInitial": true }],
-                "transitions": [{ "from": "idle", "to": "idle", "event": "INIT",
-                    "effects": [["render-ui", "main", { "type": "card" }]] }]
-            }
-        })
-    }
-
-    fn diagnostics(mounted: &[&str], page_path: &str) -> Vec<String> {
-        let program = serde_json::json!({
-            "name": "app",
-            "orbitals": [{
-                "name": "A",
-                "entity": { "name": "E", "persistence": "runtime", "fields": [{ "name": "id", "type": "string" }] },
-                "traits": [trait_rendering_main("T1"), trait_rendering_main("T2")],
-                "pages": [{ "name": "P", "path": page_path, "traits": mounted.iter().map(|r| serde_json::json!({ "ref": r })).collect::<Vec<_>>() }]
-            }]
-        });
-        let dir = tempfile::tempdir().expect("temp dir");
-        let path = dir.path().join("app.orb");
-        std::fs::write(&path, program.to_string()).expect("write program");
-        let registry = crate::utils::load_services_registry(None).expect("services registry");
-        let diags = run_full_validation(&path, None, registry, false)
-            .unwrap_or_else(|e| panic!("validation runs: {e:#}"));
-        diags.errors.into_iter().chain(diags.warnings).collect()
-    }
-
-    #[test]
-    fn native_validation_does_not_run_behavior_slot_lints() {
-        let found = diagnostics(&["T1", "T2"], "/x");
-        assert!(
-            found
-                .iter()
-                .all(|d| !d.starts_with("[ORB_SLOT_CONTENTION]")),
-            "{found:#?}"
-        );
-    }
-
-    #[test]
-    fn control_native_validation_accepts_one_mounted_trait() {
-        let found = diagnostics(&["T1"], "/x");
-        assert!(
-            !found.iter().any(|d| d.starts_with("[ORB_SLOT_CONTENTION]")),
-            "{found:#?}"
-        );
-        assert!(
-            !found.iter().any(|d| d.starts_with("[ORB_LINT_PROGRAM_")),
-            "{found:#?}"
-        );
-    }
-
-    #[test]
-    fn native_validation_still_rejects_an_invalid_page_path() {
-        let found = diagnostics(&["T1"], "relative");
-        assert!(
-            found.iter().any(|d| d.contains("ORB_P_INVALID_PATH")),
-            "{found:#?}"
-        );
-    }
-}

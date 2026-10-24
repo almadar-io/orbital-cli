@@ -10,7 +10,7 @@ use orbital_compiler::phases::inline::{
     OrbitalRefDiagnostic, TraitRefConfigDiagnostic, UsesConfigDiagnostic,
 };
 use orbital_compiler::phases::validation::orbital_ref_config::{
-    suppress_cascaded_by_orbital_ref, validate_orbital_ref_diagnostics,
+    suppress_cascaded_with, validate_orbital_ref_diagnostics,
     validate_uses_config_diagnostics,
 };
 use orbital_compiler::phases::validation::orbital_ref_extend::validate_orbital_ref_extend_diagnostics;
@@ -24,13 +24,14 @@ use orbital_core::schema::OrbitalSchema;
 /// out-of-orbital entity, every other validator's independent rediscovery of
 /// the SAME entity under the SAME orbital is the identical root cause, not a
 /// second finding — dropped, with the count folded into the root row's
-/// message.
+/// message. The std lint `findings` merged into the report are held to the same rule.
 pub(crate) fn merge_post_inline_diagnostics(
     result: &mut ValidationResult,
     trait_ref_diagnostics: &[TraitRefConfigDiagnostic],
     orbital_ref_diagnostics: &[OrbitalRefDiagnostic],
     uses_config_diagnostics: &[UsesConfigDiagnostic],
     schema: &OrbitalSchema,
+    findings: &mut Vec<crate::commands::validate::ProgramFinding>,
 ) {
     result.merge(validate_trait_ref_config_diagnostics(trait_ref_diagnostics));
     result.merge(validate_orbital_ref_diagnostics(
@@ -41,5 +42,5 @@ pub(crate) fn merge_post_inline_diagnostics(
     result.merge(validate_orbital_ref_extend_diagnostics(
         orbital_ref_diagnostics,
     ));
-    suppress_cascaded_by_orbital_ref(result, orbital_ref_diagnostics, schema);
+    suppress_cascaded_with(result, findings, orbital_ref_diagnostics, schema);
 }

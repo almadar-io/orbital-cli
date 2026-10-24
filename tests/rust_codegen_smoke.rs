@@ -85,18 +85,16 @@ fn rust_shell_emits_complete_scaffold() {
         "compile --shell rust exited non-zero. stderr:\n{stderr}"
     );
 
-    // The thin runtime scaffold + the bespoke server-side codegen + the bundled schemas.
+    // The thin host (v18: the server is the composed std-http-server program, no bespoke codegen) + the bundled schemas.
     for required in [
         "Cargo.toml",
         "src/main.rs",
-        "src/lib.rs",
-        "src/server.rs",
-        "src/entities/mod.rs",
-        "src/effects/mod.rs",
-        "src/traits/mod.rs",
         "src/bin/desktop.rs",
+        "src/bin/game.rs",
+        "src/bin/terminal.rs",
         "schema.orb",   // source reference copy
-        "resolved.orb", // the fully-resolved bundle the runtime actually loads
+        "resolved.orb", // the fully-resolved bundle the clients load
+        "program.orb",  // the app composed with std-http-server, which the server host runs
     ] {
         assert!(
             out.join(required).exists(),
@@ -107,13 +105,22 @@ fn rust_shell_emits_complete_scaffold() {
 
     // The runtime must load the RESOLVED schema — reading the raw `schema.orb` 404s every
     // event ("Trait not found: X.traits.Y") for any `uses:`-based organism.
-    for entry in ["src/server.rs", "src/bin/desktop.rs"] {
+    for entry in [
+        "src/bin/desktop.rs",
+        "src/bin/game.rs",
+        "src/bin/terminal.rs",
+    ] {
         let src = std::fs::read_to_string(out.join(entry)).unwrap();
         assert!(
             src.contains("resolved.orb"),
             "{entry} must load resolved.orb (loading raw schema.orb 404s on uses:-based schemas)"
         );
     }
+    let server = std::fs::read_to_string(out.join("src/main.rs")).unwrap();
+    assert!(
+        server.contains("program.orb"),
+        "the server host runs the composed program.orb"
+    );
 }
 
 #[test]
@@ -124,7 +131,7 @@ fn emitted_rust_is_syntactically_valid() {
 
     let files = rust_files(&out);
     assert!(
-        files.len() >= 8,
+        files.len() >= 4,
         "suspiciously few generated .rs files: {}",
         files.len()
     );
@@ -139,4 +146,3 @@ fn emitted_rust_is_syntactically_valid() {
         }
     }
 }
-

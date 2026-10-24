@@ -685,6 +685,10 @@ fn field_of(
             tier: None,
             forwarded_from: None,
         };
+    // `items` of a field reference is the value type it names, never a list element, and the entity is unknown here.
+    if def.field_type == orbital_core::schema::FieldType::Field {
+        return Ok(bare("field".to_string(), None, None));
+    }
     if let Some(items) = &def.items {
         let element = field_of("", items, events)?;
         return Ok(bare(
@@ -710,7 +714,9 @@ fn knob_field(
     cf: &orbital_core::schema::ConfigField,
     vocab: &EventVocab<'_>,
 ) -> anyhow::Result<KnobField> {
-    let (ty, values, properties) = if let Some(items) = &cf.items {
+    let (ty, values, properties) = if cf.field_type == "field" {
+        ("field".to_string(), None, None)
+    } else if let Some(items) = &cf.items {
         let element = field_of("", items, vocab.member)?;
         (
             format!("[{}]", element.ty),

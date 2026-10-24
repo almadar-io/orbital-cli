@@ -306,6 +306,12 @@ pub(crate) fn orb_json(source: &str, source_path: &str) -> Result<String> {
     canonical_orb_json(&parse_any_syntax_with_prior(source, None, source_path)?)
 }
 
+/// The lowered program of `source` as a value, keys in declaration order (the canonical sorted form is only for `.orb` files).
+pub(crate) fn orb_value(source: &str, source_path: &str) -> Result<serde_json::Value> {
+    serde_json::to_value(parse_any_syntax_with_prior(source, None, source_path)?)
+        .map_err(|e| anyhow!("Failed to serialize schema: {}", e))
+}
+
 /// What `orb emit lolo` writes for `source`: the program as `.lolo` text.
 pub(crate) fn lolo_text(source: &str, source_path: &str) -> Result<String> {
     let schema = parse_any_syntax(source, source_path)?;

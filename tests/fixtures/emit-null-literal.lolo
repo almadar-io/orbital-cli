@@ -7,7 +7,7 @@ orbital NullOrbital {
     id : string!
   }
 
-  trait NullEmitter -> NullCall [integration, instance] {
+  trait NullEmitter -> NullCall {
     initial: idle
 
     state idle {

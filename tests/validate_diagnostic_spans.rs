@@ -71,14 +71,14 @@ fn errors(v: &serde_json::Value) -> Vec<serde_json::Value> {
 /// The note block, with `render` as INIT's render tree and `rename` as RENAME's effects.
 fn note(render: &str, rename: &str) -> String {
     format!(
-        r#"app note "1.0.0"
+        r#"app note [ version: "1.0.0" ]
 orbital NoteOrbital {{
   entity Note [runtime] {{
     id : string!
     name : string
   }}
 
-  trait NoteView -> Note [interaction, instance] {{
+  trait NoteView -> Note {{
     initial: idle
     state idle {{
       INIT -> idle
@@ -239,7 +239,7 @@ fn a_trait_bound_to_a_missing_entity_sits_on_the_entity_name() {
         "<Typography content={@entity.name} />",
         "(set @entity.name ?name)",
     )
-    .replace("trait NoteView -> Note [", "trait NoteView -> ⟦Nope⟧ [");
+    .replace("trait NoteView -> Note {", "trait NoteView -> ⟦Nope⟧ {");
     assert_span("linked-entity", &src, "ORB_E_INVALID_RELATION");
 }
 
@@ -250,8 +250,8 @@ fn edge_a_rebindable_binding_sits_on_the_entity_name_not_the_marker() {
         "(set @entity.name ?name)",
     )
     .replace(
-        "trait NoteView -> Note [",
-        "trait NoteView -> @rebindable ⟦Nope⟧ [",
+        "trait NoteView -> Note {",
+        "trait NoteView -> @rebindable ⟦Nope⟧ {",
     );
     assert_span("linked-entity-rebindable", &src, "ORB_E_INVALID_RELATION");
 }

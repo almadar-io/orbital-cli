@@ -29,17 +29,17 @@ fn temp_path(name: &str, ext: &str) -> PathBuf {
     ))
 }
 
-const ENGLISH_LOLO: &str = r#"app probe "0.1.0"
+const ENGLISH_LOLO: &str = r#"app probe [ version: "0.1.0" ]
 orbital Probe {
   entity Item [runtime, shared] {
     id : string!
     count : int = 0
     active : boolean = true
   }
-  trait Counter -> Item [lifecycle, instance] {
+  trait Counter -> Item {
     initial: idle
     state idle {
-      INIT -> idle
+      INIT -> idle (render-ui main { type: "typography", content: "probe" })
       BUMP -> idle when (< @entity.count 10) (set @entity.count (+ @entity.count 1))
       RESET -> idle (set @entity.count 0) (emit CLEARED { at: now })
     }

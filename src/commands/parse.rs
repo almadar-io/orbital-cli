@@ -4,10 +4,10 @@ use crate::utils::{detect_syntax, InputSyntax};
 
 /// What `orb resolve` prints for `path`; with `output`, also written there with its catalogs and
 /// lazy behaviors. Without `output`, a program with lazy behaviors or locales is refused.
-pub(crate) fn resolved_text(
+/// The program at `path` resolved as `orb resolve` resolves it, with the lazy behaviors it splits off.
+pub(crate) fn resolved_program(
     path: &std::path::Path,
-    output: Option<&std::path::Path>,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<(orbital_core::schema::OrbitalSchema, Vec<orbital_compiler::phases::lazy::ResolvedLazy>)> {
     use crate::utils::parse_schema_auto;
     use orbital_compiler::{resolve_schema_with_path, CompilerOptions};
 
@@ -25,6 +25,28 @@ pub(crate) fn resolved_text(
         .map_err(|e| anyhow::anyhow!("Failed to resolve {}: {}", path.display(), e))?;
     orbital_compiler::phases::reflect::fold_program(&mut resolved, &mut lazy, Some(path))
         .map_err(|e| anyhow::anyhow!("Failed to resolve {}: {}", path.display(), e))?;
+    Ok((resolved, lazy))
+}
+
+/// The resolved program at `path` and each `uses lazy` behavior split off it, as `{ program, lazy: [{ orbital, program }] }`,
+/// keys in declaration order; nothing is written, so a program with lazy behaviors or locales is not refused.
+pub(crate) fn resolved_value(path: &std::path::Path) -> anyhow::Result<serde_json::Value> {
+    let (resolved, lazy) = resolved_program(path)?;
+    let value = |schema: &orbital_core::schema::OrbitalSchema| -> anyhow::Result<serde_json::Value> {
+        serde_json::from_str(&resolved_json(schema)?).map_err(|e| anyhow::anyhow!("{e}"))
+    };
+    let lazy = lazy
+        .iter()
+        .map(|child| Ok(serde_json::json!({ "orbital": child.orbital, "program": value(&child.schema)? })))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    Ok(serde_json::json!({ "program": value(&resolved)?, "lazy": lazy }))
+}
+
+pub(crate) fn resolved_text(
+    path: &std::path::Path,
+    output: Option<&std::path::Path>,
+) -> anyhow::Result<String> {
+    let (resolved, lazy) = resolved_program(path)?;
     let json = resolved_json(&resolved)?;
 
     match output {

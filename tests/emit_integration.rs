@@ -558,6 +558,21 @@ fn emit_orb_the_manifest_hash_and_stamp_keep_an_authored_null_and_the_hash_is_st
 
 // --- the compile gate: a program that fails `orb validate` is never compiled ----
 
+/// `orb compile` (std-orb-compile over `program/eval { generate }`) prints the op's report lines and writes the project.
+#[test]
+fn compile_prints_the_generate_report_and_writes_the_project() {
+    let lolo = fixtures_dir().join("emit-null-literal.lolo");
+    let out = tempfile::tempdir().expect("tempdir");
+    let target = out.path().join("app");
+    let (stdout, stderr, ok) = run_orb(&["compile", lolo.to_str().unwrap(), "--shell", "typescript", "-o", target.to_str().unwrap()]);
+    assert!(ok, "compile exited non-zero. stderr:\n{stderr}");
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines[0], format!("Compiling schema: {}", lolo.display()), "{stdout}");
+    assert!(lines.contains(&"Target shell: Typescript") && lines.contains(&"Mode: Full"), "{stdout}");
+    assert!(lines.iter().any(|l| l.starts_with("✅ Generated ") && l.ends_with(" files")), "{stdout}");
+    assert!(target.join("schema.orb").is_file(), "the project is written");
+}
+
 #[test]
 fn compile_refuses_a_program_that_fails_validate_and_writes_nothing() {
     let lolo = fixtures_dir().join("compile-invalid.lolo");
