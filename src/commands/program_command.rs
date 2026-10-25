@@ -55,8 +55,11 @@ fn reserved_word_of(hook: &str) -> Option<&'static str> {
     })
 }
 
+/// What bare `orb` runs: the program declaring `cli-launchpad`, else `orb`'s help.
+const BARE_COMMAND: &str = "launchpad";
+
 /// The commands `args` (argv after the binary) may name, in the order they are tried: `w1 w2 …` is `w1-w2` with
-/// `…`, then `w1` with `w2 …`; a leading flag names none.
+/// `…`, then `w1` with `w2 …`; a leading flag names none; no words name [`BARE_COMMAND`].
 fn command_candidates(args: &[String]) -> Vec<(String, &[String])> {
     let is_word = |a: &String| !a.starts_with('-');
     match args {
@@ -67,6 +70,7 @@ fn command_candidates(args: &[String]) -> Vec<(String, &[String])> {
             ]
         }
         [first, rest @ ..] if is_word(first) => vec![(first.clone(), rest)],
+        [] => vec![(BARE_COMMAND.to_string(), args)],
         _ => Vec::new(),
     }
 }
@@ -723,6 +727,15 @@ orbital EchoOrbital {
         );
         assert!(crate::Cli::try_parse_from(["orb", "validate", "a.lolo", "--simulate"]).is_err());
         assert!(crate::Cli::try_parse_from(["orb", "language", "which"]).is_err());
+    }
+
+    #[test]
+    fn a_bare_orb_runs_the_program_declaring_the_launchpad_hook() {
+        let (cwd, store) = project("bare-launchpad", "cli");
+        with_programs(&cwd, &["cli-launchpad"]);
+        assert_eq!(routed(&[], &cwd, &store), Some(("launchpad".to_string(), Vec::new())));
+        assert_eq!(routed(&["launchpad"], &cwd, &store), Some(("launchpad".to_string(), Vec::new())), "control: the word names it too");
+        assert_eq!(routed(&["--help"], &cwd, &store), None, "control: a flag alone still reaches clap");
     }
 
     #[test]

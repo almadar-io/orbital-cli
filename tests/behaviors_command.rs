@@ -662,10 +662,10 @@ fn validate_json_without_installed_core_needs_install() {
         .output()
         .expect("spawn orb");
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(!output.status.success(), "with no std installed `orb validate` has no program to run");
+    assert!(!output.status.success(), "with no language installed `orb validate` has nothing to run");
     assert!(
-        stderr.contains("ORB_COMMAND_NOT_INSTALLED") && stderr.contains("`cli-validate`") && stderr.contains("orb update"),
-        "{stderr}"
+        stderr.contains("ORB_LANGUAGE_DATA_NOT_INSTALLED") && stderr.contains("@almadar/core is not installed") && stderr.contains("orb update"),
+        "the typed preflight names the missing language before any command is resolved: {stderr}"
     );
     assert!(output.stdout.is_empty(), "nothing is printed on stdout");
 }
