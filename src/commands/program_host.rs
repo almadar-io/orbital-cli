@@ -30,7 +30,7 @@ fn from_json(value: serde_json::Value) -> Result<Value, SubstrateFailure> {
 
 /// The `program/read` modes `options` turns on, in the order they are documented.
 fn read_modes(options: Option<&Value>) -> Vec<&'static str> {
-    ["stamp", "inspect", "embeds", "resolve"].into_iter().filter(|mode| option_flag(options, mode) == Some(true)).collect()
+    ["stamp", "inspect", "embeds", "resolve", "references"].into_iter().filter(|mode| option_flag(options, mode) == Some(true)).collect()
 }
 
 /// A boolean option of an op's options argument; absent or not a boolean is `None`.
@@ -272,6 +272,51 @@ fn stamp_and_validate(
 }
 
 /// The issues of a validation report, as the `{ code, message, path?, line?, column? }` findings both hosts answer.
+/// The shell's prebuilt web client copied to `<output>/web-client` with the program's runtime files (the client-mode
+/// `packages/client/public` and `locales/`) laid over it: the folder `orb serve` serves.
+fn copy_web_client(built: Option<&Path>, output: &Path) -> Result<PathBuf, SubstrateFailure> {
+    let built = built.ok_or_else(|| {
+        failure("program/eval: the typescript shell ships no prebuilt web client: run `orb update` (in a shell checkout, build it with `node tooling/scripts/build-web-client.mjs`)")
+    })?;
+    if !built.join("index.html").is_file() {
+        return Err(failure(format!("program/eval: {} holds no index.html: it is not a built web client", built.display())));
+    }
+    fn copy(from: &Path, to: &Path) -> std::io::Result<()> {
+        std::fs::create_dir_all(to)?;
+        for entry in std::fs::read_dir(from)? {
+            let entry = entry?;
+            let target = to.join(entry.file_name());
+            if entry.file_type()?.is_dir() {
+                copy(&entry.path(), &target)?;
+            } else {
+                std::fs::copy(entry.path(), target)?;
+            }
+        }
+        Ok(())
+    }
+    let public = output.join("packages/client/public");
+    if !public.join("client.json").is_file() {
+        return Err(failure("program/eval: the client-mode generate wrote no client.json for the web client to read: generate with `mode: client`"));
+    }
+    let target = output.join("web-client");
+    let copied = copy(built, &target)
+        .and_then(|()| copy(&public, &target))
+        .and_then(|()| if output.join("locales").is_dir() { copy(&output.join("locales"), &target.join("locales")) } else { Ok(()) });
+    copied.map_err(|e| failure(format!("program/eval: laying out the web client in {}: {e}", target.display())))?;
+    Ok(target)
+}
+
+/// `webClient` is the copied prebuilt web client, null when the generate asked for none.
+fn generate_answer(report: &crate::commands::compile::CompileReport, web_client: Option<&Path>) -> serde_json::Value {
+    serde_json::json!({
+        "lines": report.lines,
+        "files": report.files,
+        "warnings": report.warnings,
+        "nextSteps": report.next_steps,
+        "webClient": web_client.map(|dir| dir.display().to_string()),
+    })
+}
+
 fn issues(report: &serde_json::Value, key: &str) -> Vec<serde_json::Value> {
     report
         .get(key)
@@ -378,6 +423,19 @@ impl ProgramHost {
         from_json(serde_json::json!({ "program": program, "text": text }))
     }
 
+    /// `program/read { references: true, path }`: `{ program, references }`, the program at the absolute `path` as it
+    /// reads before resolution and each trait or orbital reference it resolves through, as
+    /// `{ kind, alias, name, path, callSite, declaration }` (the reference as written, and the upstream declaration it resolved to).
+    fn read_references(options: &serde_json::Value) -> Result<Value, SubstrateFailure> {
+        let options = Options::of("program/read", options)?;
+        options.only("references", &["references", "path"])?;
+        let path = options.absolute("path", "references")?;
+        let (program, references) = crate::commands::parse::referenced_program(&path)
+            .map_err(|e| failure(format!("program/read: {e}")))?;
+        let references = serde_json::to_value(references).map_err(|e| failure(e.to_string()))?;
+        from_json(serde_json::json!({ "program": program, "references": references }))
+    }
+
     /// `program/print { target, path, section?, format?, only?, map?, output?, inspectSource?, documentVersion?, unit?,
     /// out?, signKey?, keyId? }`: what `orb emit <target> <path>` prints, as `{ text, stderr }`; the files `orb emit`
     /// writes (`output`, the source map, `out`) are written.
@@ -424,8 +482,8 @@ impl ProgramHost {
     }
 
     /// `program/eval { generate: { path, output, shell, mode?, frontend?, backend?, backendUrl?, patterns?, devLogs?,
-    /// host?, listenHost?, port?, emitOrb? } }`: what `orb compile` does and prints, as `{ lines, files, warnings,
-    /// nextSteps }`. The program is validated before anything is generated, as the command does.
+    /// host?, listenHost?, port?, emitOrb?, webClient?, source? } }`: what `orb compile` does and prints, as `{ lines, files,
+    /// warnings, nextSteps, webClient }`; `webClient: true` also copies the shell's prebuilt web client into the output. The program is validated before anything is generated, as the command does.
     fn eval_generate(options: &serde_json::Value) -> Result<Value, SubstrateFailure> {
         use crate::commands::compile::{compile_run, CompileRequest};
         let op = "program/eval";
@@ -436,9 +494,16 @@ impl ProgramHost {
             "generate",
             &[
                 "path", "output", "shell", "mode", "frontend", "backend", "backendUrl", "patterns", "devLogs", "host",
-                "emitOrb",
+                "emitOrb", "webClient", "source",
             ],
         )?;
+        let web_client = g.flag("webClient")?;
+        let source = match g.path("source")? {
+            Some(source) if !source.is_absolute() => {
+                return Err(failure(format!("{op}: `generate` needs an absolute `source`, not {}", source.display())))
+            }
+            source => source,
+        };
         let path = g.absolute("path", "generate")?;
         let output = g.absolute("output", "generate")?;
         let shell: crate::ShellType = g
@@ -457,14 +522,16 @@ impl ProgramHost {
             dev_logs: g.flag("devLogs")?,
             host: g.choice("host")?.unwrap_or_default(),
             emit_orb: emit_orb.as_deref(),
+            source: source.as_deref(),
         })
         .map_err(|e| failure(format!("{op}: {e}")))?;
-        from_json(serde_json::json!({
-            "lines": report.lines,
-            "files": report.files,
-            "warnings": report.warnings,
-            "nextSteps": report.next_steps,
-        }))
+        let web_client = if web_client {
+            let shell_program = crate::utils::shell_programs::locate(shell.program()).map_err(|e| failure(format!("{op}: {e}")))?;
+            Some(copy_web_client(shell_program.description.web_client.as_deref(), &output)?)
+        } else {
+            None
+        };
+        from_json(generate_answer(&report, web_client.as_deref()))
     }
 
     fn read(&self, text: &str) -> Result<Value, SubstrateFailure> {
@@ -1210,7 +1277,7 @@ impl SubstrateHandler for ProgramHost {
         match op {
             "program/read" => match args.first() {
                 Some(Value::String(_)) if read_modes(args.get(1)).len() > 1 => Err(failure(format!(
-                    "program/read: unsupported option \"{}\" with `{}`: one of inspect, embeds, resolve, stamp per call",
+                    "program/read: unsupported option \"{}\" with `{}`: one of inspect, embeds, resolve, stamp, references per call",
                     read_modes(args.get(1))[1],
                     read_modes(args.get(1))[0]
                 ))),
@@ -1225,6 +1292,9 @@ impl SubstrateHandler for ProgramHost {
                 }
                 Some(Value::String(_)) if option_flag(args.get(1), "resolve") == Some(true) => {
                     Self::read_resolved(&to_json(&args[1]))
+                }
+                Some(Value::String(_)) if option_flag(args.get(1), "references") == Some(true) => {
+                    Self::read_references(&to_json(&args[1]))
                 }
                 Some(Value::String(_)) if option_flag(args.get(1), "stamp") == Some(true) => {
                     Self::read_stamped(&to_json(&args[1]))
@@ -1430,6 +1500,64 @@ orbital O {
         assert_eq!(read(main(false))["lazy"], serde_json::json!([]), "control: no lazy import, no children");
     }
 
+    const REFERENCED_ATOM: &str = r#"{ "name": "atom", "version": "1.0.0", "orbitals": [ { "name": "AtomOrbital",
+      "entity": { "name": "Widget", "persistence": "persistent", "fields": [ { "name": "id", "type": "string", "required": true }, { "name": "n", "type": "number" } ] },
+      "traits": [ { "name": "Widget", "linkedEntity": "Widget", "category": "interaction",
+        "config": { "k": { "type": "number", "default": 0 } },
+        "stateMachine": { "states": [ { "name": "idle", "isInitial": true } ], "events": [ { "key": "LOAD" } ],
+          "transitions": [ { "from": "idle", "to": "idle", "event": "LOAD", "effects": [ ["set", "@entity.n", "@config.k"] ] } ] } } ] } ] }"#;
+
+    const REFERENCED_CONSUMER: &str = r#"{ "name": "consumer", "version": "1.0.0", "orbitals": [ { "name": "Composer",
+      "uses": [ { "from": "./atom.orb", "as": "Up" } ],
+      "entity": { "name": "Rec", "persistence": "runtime", "fields": [ { "name": "id", "type": "string", "required": true } ] },
+      "traits": [ { "ref": "Up.traits.Widget", "name": "T", "linkedEntity": "Rec", "config": { "k": { "type": "number", "default": 1 } } } ] } ] }"#;
+
+    #[test]
+    fn read_with_references_answers_the_unresolved_program_and_each_reference_with_its_declaration() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("atom.orb"), REFERENCED_ATOM).unwrap();
+        let file = dir.path().join("consumer.orb");
+        std::fs::write(&file, REFERENCED_CONSUMER).unwrap();
+        let options = from_json(serde_json::json!({ "references": true, "path": file.display().to_string() })).unwrap();
+        let answer = json(&ProgramHost.run("program/read", &[Value::String(String::new()), options]).expect("answers"));
+        assert_eq!(answer["program"]["name"], "consumer", "{answer}");
+        assert_eq!(answer["program"]["orbitals"][0]["traits"][0]["ref"], "Up.traits.Widget", "the program is unresolved: {answer}");
+        let references = answer["references"].as_array().expect("a list");
+        assert_eq!(references.len(), 1, "{answer}");
+        let pair = &references[0];
+        assert_eq!(pair["kind"], "trait");
+        assert_eq!(pair["alias"], "Up");
+        assert_eq!(pair["name"], "Widget");
+        assert_eq!(pair["path"], "orbitals[name=Composer].traits[0]");
+        assert_eq!(pair["callSite"]["config"]["k"]["default"], 1);
+        assert_eq!(pair["declaration"]["name"], "Widget");
+        assert!(pair["declaration"].to_string().contains("@config.k"), "{}", pair["declaration"]);
+    }
+
+    #[test]
+    fn control_read_with_references_answers_none_for_a_program_without_uses() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("atom.orb");
+        std::fs::write(&file, REFERENCED_ATOM).unwrap();
+        let options = from_json(serde_json::json!({ "references": true, "path": file.display().to_string() })).unwrap();
+        let answer = json(&ProgramHost.run("program/read", &[Value::String(String::new()), options]).expect("answers"));
+        assert_eq!(answer["references"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn control_read_with_references_refuses_a_relative_path_an_unknown_option_and_a_second_mode() {
+        let read = |options: serde_json::Value| {
+            ProgramHost
+                .run("program/read", &[Value::String(String::new()), from_json(options).unwrap()])
+                .unwrap_err()
+                .message
+        };
+        assert!(read(serde_json::json!({ "references": true, "path": "note.orb" })).contains("absolute `path`"));
+        assert!(read(serde_json::json!({ "references": true, "path": "/x/note.orb", "bogus": true })).contains("unsupported option \"bogus\""));
+        assert!(read(serde_json::json!({ "references": true, "stamp": true, "path": "/x/note.orb" })).contains("one of inspect, embeds, resolve, stamp, references per call"));
+        assert!(read(serde_json::json!({ "references": true, "path": "/nowhere/note.orb" })).contains("Failed to read"));
+    }
+
     #[test]
     fn read_with_resolve_refuses_a_relative_path() {
         let options = from_json(serde_json::json!({ "resolve": true, "path": "note.lolo" })).unwrap();
@@ -1524,12 +1652,53 @@ orbital O {
     }
 
     #[test]
+    fn a_shells_prebuilt_web_client_is_copied_into_the_output_with_its_nested_assets() {
+        let shell = tempfile::tempdir().expect("tempdir");
+        let built = shell.path().join("almadar-web-client");
+        std::fs::create_dir_all(built.join("assets/fonts")).unwrap();
+        std::fs::write(built.join("index.html"), "<html></html>").unwrap();
+        std::fs::write(built.join("assets/fonts/a.woff2"), "font").unwrap();
+        let out = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(out.path().join("packages/client/public")).unwrap();
+        std::fs::write(out.path().join("packages/client/public/client.json"), "{}").unwrap();
+        std::fs::write(out.path().join("packages/client/public/program.client.orb"), "{\"name\":\"app\"}").unwrap();
+        std::fs::create_dir_all(out.path().join("locales")).unwrap();
+        std::fs::write(out.path().join("locales/en.json"), "{\"hi\":\"Hi\"}").unwrap();
+        let copied = copy_web_client(Some(&built), out.path()).expect("copies");
+        assert_eq!(copied, out.path().join("web-client"));
+        assert_eq!(std::fs::read_to_string(copied.join("index.html")).unwrap(), "<html></html>");
+        assert_eq!(std::fs::read_to_string(copied.join("assets/fonts/a.woff2")).unwrap(), "font");
+        assert_eq!(std::fs::read_to_string(copied.join("program.client.orb")).unwrap(), "{\"name\":\"app\"}");
+        assert_eq!(std::fs::read_to_string(copied.join("locales/en.json")).unwrap(), "{\"hi\":\"Hi\"}");
+        let report = crate::commands::compile::CompileReport { files: 3, ..Default::default() };
+        let answer = generate_answer(&report, Some(&copied));
+        assert_eq!(answer["webClient"], copied.display().to_string());
+        assert!(generate_answer(&report, None).get("webClient").is_some_and(serde_json::Value::is_null));
+    }
+
+    #[test]
+    fn control_no_built_client_or_no_client_mode_files_is_refused() {
+        let out = tempfile::tempdir().expect("tempdir");
+        let none = copy_web_client(None, out.path()).unwrap_err().message;
+        assert!(none.contains("ships no prebuilt web client"), "{none}");
+        let shell = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(shell.path().join("assets")).unwrap();
+        let unbuilt = copy_web_client(Some(shell.path()), out.path()).unwrap_err().message;
+        assert!(unbuilt.contains("holds no index.html"), "{unbuilt}");
+        assert!(!out.path().join("web-client").exists());
+        std::fs::write(shell.path().join("index.html"), "<html></html>").unwrap();
+        let unprojected = copy_web_client(Some(shell.path()), out.path()).unwrap_err().message;
+        assert!(unprojected.contains("wrote no client.json"), "{unprojected}");
+    }
+
+    #[test]
     fn control_eval_with_generate_refuses_a_relative_path_an_unknown_option_and_a_missing_shell() {
         let refusal = |options: serde_json::Value| generate_with(options).unwrap_err().message;
         assert!(refusal(serde_json::json!({ "generate": { "path": "n.lolo", "output": "/o", "shell": "typescript" } })).contains("absolute `path`"));
         assert!(refusal(serde_json::json!({ "generate": { "path": "/n.lolo", "output": "o", "shell": "typescript" } })).contains("absolute `output`"));
         assert!(refusal(serde_json::json!({ "generate": { "path": "/n.lolo", "output": "/o", "shell": "typescript", "verbose": true } })).contains("unsupported option \"verbose\""));
         assert!(refusal(serde_json::json!({ "generate": { "path": "/n.lolo", "output": "/o" } })).contains("needs the `shell`"));
+        assert!(refusal(serde_json::json!({ "generate": { "path": "/n.orb", "output": "/o", "shell": "typescript", "source": "app.lolo" } })).contains("absolute `source`"));
         assert!(refusal(serde_json::json!({ "generate": { "path": "/n.lolo", "output": "/o", "shell": "cobol" } })).contains("not one of the accepted values"));
         assert!(refusal(serde_json::json!({ "generate": { "path": "/n.lolo", "output": "/o", "shell": "typescript" }, "final": true })).contains("unsupported option \"final\""));
         assert!(refusal(serde_json::json!({ "generate": { "path": "/nowhere/n.lolo", "output": "/o", "shell": "typescript" } })).contains("program/eval:"));

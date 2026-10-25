@@ -57,6 +57,8 @@ pub enum ShellType {
     Ios,
     /// Chrome extension (Manifest V3) hosting the program in its service worker
     ChromeExtension,
+    /// Orbital OS: an seL4 root task running the program on the kernel, booted on QEMU's aarch64 virt board
+    Os,
 }
 
 impl ShellType {
@@ -69,6 +71,7 @@ impl ShellType {
             ShellType::Android => "android",
             ShellType::Ios => "ios",
             ShellType::ChromeExtension => "chrome",
+            ShellType::Os => "os",
         }
     }
 }

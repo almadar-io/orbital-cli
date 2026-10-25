@@ -931,7 +931,6 @@ fn borrowed_entities(
         &mut probe,
         &options.inline,
         Some(&probe_path),
-        &mut Vec::new(),
         &mut orbital_ref,
         &mut Vec::new(),
     )

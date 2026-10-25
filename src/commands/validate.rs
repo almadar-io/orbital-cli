@@ -231,7 +231,7 @@ fn validate_schema_json(
         }
     };
 
-    let (mut schema, source_map, replaced_ids) =
+    let (mut schema, source_map) =
         match tracing::info_span!(target: ns::CLI, "lower").in_scope(|| parse_schema_auto_typed_with_map(&content_raw, &path.display().to_string())) {
             Ok(s) => s,
             Err(e) => {
@@ -286,7 +286,6 @@ fn validate_schema_json(
     // phase resolves external refs via the embedded std loader and
     // filesystem — same path `orb compile` uses. Validation-only mode used
     // to skip this and produced false positives on every multi-use schema.
-    let mut trait_ref_config_diagnostics = Vec::new();
     let mut orbital_ref_diagnostics = Vec::new();
     let mut uses_config_diagnostics = Vec::new();
     // from_env, NOT default: the plain-text validate path resolves imports
@@ -304,7 +303,6 @@ fn validate_schema_json(
         &mut schema,
         &inline_config,
         Some(path.as_path()),
-        &mut trait_ref_config_diagnostics,
         &mut orbital_ref_diagnostics,
         &mut uses_config_diagnostics,
     )) {
@@ -429,14 +427,8 @@ fn validate_schema_json(
         service_registry,
         inline_config.loader_config.packages.clone(),
     ));
-    comprehensive_result.merge(
-        orbital_compiler::phases::validation::id_integrity::authored_ids_replaced_on_load(
-            &replaced_ids,
-        ),
-    );
     merge_post_inline_diagnostics(
         &mut comprehensive_result,
-        &trait_ref_config_diagnostics,
         &orbital_ref_diagnostics,
         &uses_config_diagnostics,
         &schema,
@@ -865,10 +857,10 @@ pub(crate) fn run_full_validation(
         Some(lang) if lang != "en" => SchemaLanguage::NonLatin(lang),
         _ => SchemaLanguage::English,
     };
-    let (schema, source_map, replaced_ids) = tracing::info_span!(target: ns::CLI, "lower")
+    let (schema, source_map) = tracing::info_span!(target: ns::CLI, "lower")
         .in_scope(|| parse_schema_auto_with_map(&content_raw, &path.display().to_string()))?;
 
-    let mut core = validate_schema_core(
+    let core = validate_schema_core(
         schema,
         true,
         source_map.as_ref(),
@@ -878,20 +870,6 @@ pub(crate) fn run_full_validation(
         service_registry,
         &default_opts,
         final_program,
-    );
-    core.warnings.extend(
-        orbital_compiler::phases::validation::id_integrity::authored_ids_replaced_on_load(
-            &replaced_ids,
-        )
-        .warnings
-        .into_iter()
-        .map(|w| Finding {
-            text: format!("[{}] {}: {}", w.code, w.path, w.message),
-            code: w.code.to_string(),
-            path: w.path,
-            message: w.message,
-            suggestion: w.suggestion,
-        }),
     );
     Ok(ValidationDiagnostics {
         errors: core.errors.into_iter().map(|f| f.text).collect(),
@@ -1007,7 +985,6 @@ pub(crate) fn validate_schema_core(
     // Inline + enrich before validation so `uses`-based trait/entity/page refs
     // resolve (otherwise validate_comprehensive_full false-positives on every
     // multi-use schema). Mirrors the `orb validate` path.
-    let mut trait_ref_config_diagnostics = Vec::new();
     let mut orbital_ref_diagnostics = Vec::new();
     let mut uses_config_diagnostics = Vec::new();
     // An inline failure is FATAL for this run: validators index Inline traits
@@ -1021,7 +998,6 @@ pub(crate) fn validate_schema_core(
         &mut schema,
         &inline_opts,
         Some(path),
-        &mut trait_ref_config_diagnostics,
         &mut orbital_ref_diagnostics,
         &mut uses_config_diagnostics,
     )) {
@@ -1075,7 +1051,6 @@ pub(crate) fn validate_schema_core(
     ));
     merge_post_inline_diagnostics(
         &mut comprehensive_result,
-        &trait_ref_config_diagnostics,
         &orbital_ref_diagnostics,
         &uses_config_diagnostics,
         &schema,

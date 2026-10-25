@@ -415,7 +415,7 @@ mod outcome_report_tests {
             entity_data: orbital_core::runtime::shared_entity::SharedEntity::null(),
             linked_entity: "Doc".into(),
             event: fired_arm.map(|_| "KEY".to_string()),
-            payload: Value::Null,
+            payload: std::sync::Arc::new(Value::Null),
             entry: None,
             fired_arm,
             transition_index: None,

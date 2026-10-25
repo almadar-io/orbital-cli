@@ -86,6 +86,9 @@ pub(crate) struct CompileRequest<'a> {
     pub dev_logs: bool,
     pub host: HostArg,
     pub emit_orb: Option<&'a std::path::Path>,
+    /// The program file whose folder holds its `locales/` and `public/`, when `path` was written elsewhere (a composed
+    /// program); `None` reads them beside `path`.
+    pub source: Option<&'a std::path::Path>,
 }
 
 /// The one compile pipeline: validates, generates, writes the project, and reports what `orb compile` prints.
@@ -102,6 +105,7 @@ pub(crate) fn compile_run(request: CompileRequest) -> anyhow::Result<CompileRepo
         dev_logs,
         host,
         emit_orb,
+        source,
     } = request;
     // Handle mixed compilation (--frontend + --backend)
     if frontend.is_some() || backend.is_some() {
@@ -215,7 +219,7 @@ pub(crate) fn compile_run(request: CompileRequest) -> anyhow::Result<CompileRepo
     }
 
     refuse_invalid(path, path)?;
-    let response = shell_programs::generate(shell.program(), &compile_path, path, output, &options, shell_options)?;
+    let response = shell_programs::generate(shell.program(), &compile_path, source.unwrap_or(path), output, &options, shell_options)?;
     for file in response.files.iter().filter(|f| f.ends_with(".orb")) {
         refuse_invalid(&output.join(file), path)?;
     }
@@ -353,6 +357,7 @@ fn compile_mixed(
             Some(ShellType::Android) => "http://localhost:8000",
             Some(ShellType::Ios) => "http://localhost:8000",
             Some(ShellType::ChromeExtension) => "http://localhost:8000",
+            Some(ShellType::Os) => "http://localhost:8000",
             None => "http://localhost:8000",
         };
 
@@ -374,6 +379,7 @@ fn compile_mixed(
                 format!("# API URL for backend server\nAPI_URL={}\n", backend_url)
             }
             Some(ShellType::ChromeExtension) => String::new(),
+            Some(ShellType::Os) => String::new(),
             None => String::new(),
         };
 
@@ -446,6 +452,9 @@ fn generate_docker_compose(frontend: Option<ShellType>, backend: Option<ShellTyp
             ShellType::ChromeExtension => {
                 // A chrome extension has no backend component
             }
+            ShellType::Os => {
+                // An Orbital OS image has no backend component
+            }
         }
     }
 
@@ -458,6 +467,7 @@ fn generate_docker_compose(frontend: Option<ShellType>, backend: Option<ShellTyp
             Some(ShellType::Android) => "http://localhost:8000",
             Some(ShellType::Ios) => "http://localhost:8000",
             Some(ShellType::ChromeExtension) => "http://localhost:8000",
+            Some(ShellType::Os) => "http://localhost:8000",
             None => "http://localhost:8000",
         };
 
@@ -507,6 +517,9 @@ fn generate_docker_compose(frontend: Option<ShellType>, backend: Option<ShellTyp
                 compose.push_str(
                     "  # Chrome extension - build with: pnpm build, then load dist/ unpacked\n",
                 );
+            }
+            ShellType::Os => {
+                compose.push_str("  # Orbital OS image - build with ./build.sh in the seL4 container, boot with ./run-qemu.sh\n");
             }
             ShellType::Ios => {
                 compose.push_str("  # iOS app - run locally with:\n");

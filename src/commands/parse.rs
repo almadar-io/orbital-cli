@@ -42,6 +42,33 @@ pub(crate) fn resolved_value(path: &std::path::Path) -> anyhow::Result<serde_jso
     Ok(serde_json::json!({ "program": value(&resolved)?, "lazy": lazy }))
 }
 
+/// The program at `path` as it reads before resolution, and every trait and orbital reference the resolution
+/// of it resolves, each paired with the upstream declaration it resolved to (`program/read { references: true }`).
+pub(crate) fn referenced_program(
+    path: &std::path::Path,
+) -> anyhow::Result<(serde_json::Value, Vec<orbital_compiler::phases::inline::ReferencePair>)> {
+    use crate::utils::parse_schema_auto;
+    use orbital_compiler::{resolve_schema_with_path, CompilerOptions};
+
+    let mut options = CompilerOptions::from_env();
+    let session = orbital_compiler::phases::inline::InlineSession::default();
+    session.collect_references();
+    options.inline.session = Some(session.clone());
+
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("Failed to read {}: {}", path.display(), e))?;
+    let mut schema = parse_schema_auto(&content, &path.display().to_string())
+        .map_err(|e| anyhow::anyhow!("Failed to parse {}: {}", path.display(), e))?;
+    let unresolved = serde_json::to_value(&schema)
+        .map_err(|e| anyhow::anyhow!("Failed to serialize {}: {}", path.display(), e))?;
+    orbital_compiler::phases::lazy::split_lazy_and_resolve(&mut schema, &options, Some(path))
+        .map_err(|e| anyhow::anyhow!("Failed to resolve {}: {}", path.display(), e))?;
+    session.take_references();
+    resolve_schema_with_path(schema, &options, Some(path))
+        .map_err(|e| anyhow::anyhow!("Failed to resolve {}: {}", path.display(), e))?;
+    Ok((orbital_core::util::canonical_json(&unresolved), session.take_references()))
+}
+
 pub(crate) fn resolved_text(
     path: &std::path::Path,
     output: Option<&std::path::Path>,
