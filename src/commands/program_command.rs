@@ -343,6 +343,16 @@ pub(crate) fn run_program(program: &Path) -> anyhow::Result<()> {
 /// The behavior `orb serve` composes beside the app.
 const SERVER_BEHAVIOR: &str = "std/behaviors/std-http-server";
 
+/// Whether the program declares an endpoint the server side serves (a page whose protocol is served by the server,
+/// `http` today), so it is served as written instead of composed with std-http-server.
+pub(crate) fn declares_server_endpoint(schema: &orbital_core::OrbitalSchema) -> bool {
+    schema.orbitals.iter().flat_map(|o| o.pages.iter().flatten()).any(|page| match page {
+        orbital_core::schema::PageRef::Inline(page) => page.protocol.as_deref().and_then(orbital_core::protocols::protocol)
+            .is_some_and(|spec| spec.side == orbital_core::protocols::ProtocolSide::Server),
+        _ => false,
+    })
+}
+
 /// The `std-http1` host and port with their listen grant, whether the `PORT` environment variable replaces the port
 /// (with the `env PORT` listen grant on the host), and a client directory (relative to the server's working directory)
 /// with its read grant.
@@ -616,6 +626,19 @@ orbital EchoOrbital {
         std::fs::write(dir.join("fake-echo.lolo"), ECHO).unwrap();
         std::fs::create_dir_all(root.join("store")).unwrap();
         (root.join("project"), root.join("store"))
+    }
+
+    #[test]
+    fn a_program_with_an_http_page_declares_its_server_and_a_routes_only_program_does_not() {
+        let program = |pages: serde_json::Value| -> orbital_core::OrbitalSchema {
+            serde_json::from_value(serde_json::json!({ "name": "p", "orbitals": [{ "name": "O", "entity": { "name": "E", "fields": [] }, "traits": [], "pages": pages }] })).unwrap()
+        };
+        let http = program(serde_json::json!([{ "name": "Api", "path": "", "protocol": "http", "address": { "host": "127.0.0.1", "port": 8080, "path": "/" }, "traits": [{ "ref": "T" }] }]));
+        assert!(declares_server_endpoint(&http));
+        let routes = program(serde_json::json!([{ "name": "Home", "path": "/", "traits": [{ "ref": "T" }] }]));
+        assert!(!declares_server_endpoint(&routes), "control: a route is the client's");
+        let boot = program(serde_json::json!([{ "name": "Start", "path": "", "protocol": "boot", "traits": [{ "ref": "T" }] }]));
+        assert!(!declares_server_endpoint(&boot), "control: a boot page is not a server endpoint");
     }
 
     fn server_source() -> serde_json::Value {

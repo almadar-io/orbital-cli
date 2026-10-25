@@ -436,7 +436,7 @@ impl ProgramHost {
             "generate",
             &[
                 "path", "output", "shell", "mode", "frontend", "backend", "backendUrl", "patterns", "devLogs", "host",
-                "listenHost", "port", "emitOrb",
+                "emitOrb",
             ],
         )?;
         let path = g.absolute("path", "generate")?;
@@ -444,12 +444,6 @@ impl ProgramHost {
         let shell: crate::ShellType = g
             .choice("shell")?
             .ok_or_else(|| failure(format!("{op}: `generate` needs the `shell` to generate for")))?;
-        let port = match g.number("port")? {
-            Some(n) => u16::try_from(n).map_err(|_| failure(format!("{op}: `port` must be a port number")))?,
-            None => 3030,
-        };
-        let listen_host = g.text("listenHost")?.unwrap_or_else(|| "127.0.0.1".to_string());
-        let address = crate::utils::shell_programs::ServedAddress { host: &listen_host, port };
         let (patterns, emit_orb) = (g.path("patterns")?, g.path("emitOrb")?);
         let report = compile_run(CompileRequest {
             path: &path,
@@ -462,7 +456,6 @@ impl ProgramHost {
             patterns_path: patterns.as_deref(),
             dev_logs: g.flag("devLogs")?,
             host: g.choice("host")?.unwrap_or_default(),
-            address: &address,
             emit_orb: emit_orb.as_deref(),
         })
         .map_err(|e| failure(format!("{op}: {e}")))?;

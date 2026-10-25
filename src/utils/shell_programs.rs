@@ -63,15 +63,6 @@ fn request(
     }
 }
 
-/// The client a compiled server serves, relative to the project root the server runs from.
-const SERVED_CLIENT_DIR: &str = "packages/client/dist";
-
-/// Where a compiled server listens: the `std-http1` host and port knobs; `PORT` in its environment replaces the port.
-pub(crate) struct ServedAddress<'a> {
-    pub host: &'a str,
-    pub port: u16,
-}
-
 /// Compile `compile_path` (lowered from `source_path`) and have the `name` shell write the project.
 pub(crate) fn generate(
     name: &str,
@@ -80,7 +71,6 @@ pub(crate) fn generate(
     output: &Path,
     options: &GenerateOptions,
     shell_options: BTreeMap<String, Value>,
-    address: &ServedAddress,
 ) -> anyhow::Result<GenerateResponse> {
     let shell = locate(name)?;
     let resolved = if shell.description.needs_resolved || shell.description.needs_served {
@@ -88,11 +78,13 @@ pub(crate) fn generate(
     } else {
         None
     };
+    // A server is the program's own declaration: compile never composes one beside it.
     let served = match (&resolved, shell.description.needs_served && options.mode != orbital_compiler::ShellMode::Client) {
-        (Some(app), true) => Some(crate::commands::program_command::served_schema(
-            app,
-            &crate::commands::program_command::server_overrides(address.host, address.port, true, Some(SERVED_CLIENT_DIR)),
-        )?),
+        (Some(app), true) if crate::commands::program_command::declares_server_endpoint(app) => Some(app.clone()),
+        (Some(_), true) => anyhow::bail!(
+            "{} declares no http endpoint, so there is no server to compile: compose one in the program (`orbital Api = Server.orbitals.HttpServerOrbital {{ config {{ host: …, port: … }} }}`) or compile `--mode client`",
+            source_path.display()
+        ),
         _ => None,
     };
     let resolved = resolved.filter(|_| shell.description.needs_resolved);

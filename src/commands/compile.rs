@@ -85,7 +85,6 @@ pub(crate) struct CompileRequest<'a> {
     pub patterns_path: Option<&'a std::path::Path>,
     pub dev_logs: bool,
     pub host: HostArg,
-    pub address: &'a shell_programs::ServedAddress<'a>,
     pub emit_orb: Option<&'a std::path::Path>,
 }
 
@@ -102,12 +101,11 @@ pub(crate) fn compile_run(request: CompileRequest) -> anyhow::Result<CompileRepo
         patterns_path,
         dev_logs,
         host,
-        address,
         emit_orb,
     } = request;
     // Handle mixed compilation (--frontend + --backend)
     if frontend.is_some() || backend.is_some() {
-        return compile_mixed(path, output, frontend, backend, address);
+        return compile_mixed(path, output, frontend, backend);
     }
 
     let mut lines = vec![
@@ -217,7 +215,7 @@ pub(crate) fn compile_run(request: CompileRequest) -> anyhow::Result<CompileRepo
     }
 
     refuse_invalid(path, path)?;
-    let response = shell_programs::generate(shell.program(), &compile_path, path, output, &options, shell_options, address)?;
+    let response = shell_programs::generate(shell.program(), &compile_path, path, output, &options, shell_options)?;
     for file in response.files.iter().filter(|f| f.ends_with(".orb")) {
         refuse_invalid(&output.join(file), path)?;
     }
@@ -252,7 +250,6 @@ fn compile_mixed(
     output: &PathBuf,
     frontend: Option<ShellType>,
     backend: Option<ShellType>,
-    address: &shell_programs::ServedAddress,
 ) -> anyhow::Result<CompileReport> {
     for shell in [frontend, backend].into_iter().flatten() {
         if let ShellType::ChromeExtension = shell {
@@ -319,7 +316,7 @@ fn compile_mixed(
             );
         }
         let options = generate_options(orbital_compiler::ShellMode::Client)?;
-        let response = shell_programs::generate(frontend_shell.program(), &compile_path, path, &frontend_output, &options, shell_options, address)?;
+        let response = shell_programs::generate(frontend_shell.program(), &compile_path, path, &frontend_output, &options, shell_options)?;
         for file in response.files.iter().filter(|f| f.ends_with(".orb")) {
             refuse_invalid(&frontend_output.join(file), path)?;
         }
@@ -330,7 +327,7 @@ fn compile_mixed(
         let backend_output = output.join("backend");
         lines.push(format!("  Backend: {:?} -> {}", backend_shell, backend_output.display()));
         let options = generate_options(orbital_compiler::ShellMode::Server)?;
-        let response = shell_programs::generate(backend_shell.program(), &compile_path, path, &backend_output, &options, BTreeMap::new(), address)?;
+        let response = shell_programs::generate(backend_shell.program(), &compile_path, path, &backend_output, &options, BTreeMap::new())?;
         for file in response.files.iter().filter(|f| f.ends_with(".orb")) {
             refuse_invalid(&backend_output.join(file), path)?;
         }
