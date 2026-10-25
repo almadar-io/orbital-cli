@@ -288,7 +288,6 @@ pub(crate) fn run_command_program_anchored(
     };
     let runtime = orbital_shell_rust::host::boot::boot_file_with(
         &resolved,
-        false,
         &std::env::vars().collect(),
         false,
         config,
@@ -319,7 +318,6 @@ pub(crate) fn boot_run(
     ));
     let runtime = orbital_shell_rust::host::boot::boot_file(
         &resolved,
-        false,
         &std::env::vars().collect(),
         trace,
         Some(host),
@@ -340,9 +338,6 @@ pub(crate) fn run_program(program: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The behavior `orb serve` composes beside the app.
-const SERVER_BEHAVIOR: &str = "std/behaviors/std-http-server";
-
 /// Whether the program declares an endpoint the server side serves (a page whose protocol is served by the server,
 /// `http` today), so it is served as written instead of composed with std-http-server.
 pub(crate) fn declares_server_endpoint(schema: &orbital_core::OrbitalSchema) -> bool {
@@ -353,175 +348,8 @@ pub(crate) fn declares_server_endpoint(schema: &orbital_core::OrbitalSchema) -> 
     })
 }
 
-/// The `std-http1` host and port with their listen grant, whether the `PORT` environment variable replaces the port
-/// (with the `env PORT` listen grant on the host), and a client directory (relative to the server's working directory)
-/// with its read grant.
-pub(crate) fn server_overrides(
-    host: &str,
-    port: u16,
-    port_from_env: bool,
-    client_dir: Option<&str>,
-) -> serde_json::Value {
-    let mut overrides = serde_json::json!({
-        "Http1.host": host,
-        "Http1.port": port,
-        "Http1.portFromEnv": port_from_env,
-        "grants": { "net": [{ "target": format!("{host}:{port}"), "kinds": ["listen"] }], "anchored": {} },
-    });
-    if port_from_env {
-        overrides["grants"]["anchored"]["net"] = serde_json::json!([{
-            "host": { "literal": host },
-            "port": { "anchor": { "env": "PORT" } },
-            "kinds": ["listen"],
-        }]);
-    }
-    if let Some(relative) = client_dir {
-        overrides["ServerStatic.clientDir"] = serde_json::json!(relative);
-        overrides["grants"]["anchored"]["fs"] = serde_json::json!([{ "anchor": "cwd", "glob": format!("{relative}/**"), "modes": ["read"] }]);
-    }
-    overrides
-}
-
-/// Sets each `Trait.knob` override on the server source: a knob the trait forwards from its orbital (`@config.<name>`)
-/// sets that orbital knob's default and keeps the forward, any other knob becomes the trait's call-site config.
-fn set_server_knobs(
-    source: &mut serde_json::Value,
-    overrides: &serde_json::Value,
-) -> anyhow::Result<()> {
-    for (key, value) in overrides
-        .as_object()
-        .into_iter()
-        .flatten()
-        .filter(|(k, _)| k.as_str() != "grants")
-    {
-        let (trait_name, knob) = key
-            .split_once('.')
-            .ok_or_else(|| anyhow::anyhow!("serve override {key} is not <Trait>.<knob>"))?;
-        let kind = match value {
-            serde_json::Value::String(_) => "string",
-            serde_json::Value::Number(_) => "number",
-            serde_json::Value::Bool(_) => "boolean",
-            _ => {
-                return Err(anyhow::anyhow!(
-                    "serve override {key}: only a text, number or boolean knob can be set"
-                ))
-            }
-        };
-        let orbital = source
-            .get_mut("orbitals")
-            .and_then(serde_json::Value::as_array_mut)
-            .into_iter()
-            .flatten()
-            .find(|o| {
-                o.get("traits")
-                    .and_then(serde_json::Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .any(|t| t.get("name").and_then(serde_json::Value::as_str) == Some(trait_name))
-            })
-            .ok_or_else(|| {
-                anyhow::anyhow!("serve override {key}: {SERVER_BEHAVIOR} has no trait {trait_name}")
-            })?;
-        let forwarded = orbital["traits"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .find(|t| t.get("name").and_then(serde_json::Value::as_str) == Some(trait_name))
-            .and_then(|t| t.pointer(&format!("/config/{knob}/default")))
-            .and_then(serde_json::Value::as_str)
-            .and_then(|d| d.strip_prefix("@config."))
-            .map(str::to_string);
-        if let Some(name) = forwarded {
-            let declared = orbital
-                .pointer_mut(&format!("/config/{name}"))
-                .and_then(serde_json::Value::as_object_mut)
-                .ok_or_else(|| anyhow::anyhow!("serve override {key}: {trait_name} forwards @config.{name}, which its orbital does not declare"))?;
-            declared.insert("default".to_string(), value.clone());
-            continue;
-        }
-        let found = orbital["traits"]
-            .as_array_mut()
-            .into_iter()
-            .flatten()
-            .find(|t| t.get("name").and_then(serde_json::Value::as_str) == Some(trait_name))
-            .ok_or_else(|| {
-                anyhow::anyhow!("serve override {key}: {SERVER_BEHAVIOR} has no trait {trait_name}")
-            })?;
-        let config = found
-            .as_object_mut()
-            .ok_or_else(|| {
-                anyhow::anyhow!("serve override {key}: trait {trait_name} is not an object")
-            })?
-            .entry("config")
-            .or_insert_with(|| serde_json::json!({}));
-        config[knob] = serde_json::json!({ "type": kind, "default": value });
-    }
-    Ok(())
-}
-
-/// `std-http-server` resolved with the serve options' knobs set as call-site config on its traits (`Trait.knob`), so the
-/// resolver substitutes them where the program reads them; a key naming no trait of the server is refused.
-fn resolved_server(overrides: &serde_json::Value) -> anyhow::Result<std::path::PathBuf> {
-    let source_path = crate::commands::behaviors_catalog::behavior_source_path(SERVER_BEHAVIOR)?;
-    let mut source = crate::commands::behaviors_catalog::source(SERVER_BEHAVIOR)?;
-    set_server_knobs(&mut source, overrides)?;
-    let schema: orbital_core::OrbitalSchema =
-        serde_json::from_value(source).map_err(|e| anyhow::anyhow!("{SERVER_BEHAVIOR}: {e}"))?;
-    crate::commands::dev::resolve_schema_to_temp(schema, &source_path)
-}
-
-/// The app and `std-http-server` (its knobs set from `overrides`), the programs `program/compose` joins, with the app's
-/// name.
-fn served_programs(
-    app: serde_json::Value,
-    overrides: &serde_json::Value,
-) -> anyhow::Result<(Vec<orbital_core::Value>, String)> {
-    let app_name = app
-        .get("name")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| anyhow::anyhow!("the program to serve names no app"))?
-        .to_string();
-    let server_path = resolved_server(overrides)?;
-    let server: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(&server_path)
-            .map_err(|e| anyhow::anyhow!("read {}: {e}", server_path.display()))?,
-    )
-    .map_err(|e| anyhow::anyhow!("{}: {e}", server_path.display()))?;
-    let programs = [app, server]
-        .into_iter()
-        .map(|p| {
-            serde_json::from_value(p).map_err(|e| anyhow::anyhow!("the program to compose: {e}"))
-        })
-        .collect::<anyhow::Result<Vec<orbital_core::Value>>>()?;
-    Ok((programs, app_name))
-}
-
-fn grants_only(overrides: &serde_json::Value) -> serde_json::Value {
-    serde_json::json!({ "grants": overrides["grants"].clone() })
-}
-
-/// The resolved `app` composed with `std-http-server` as `orb serve` composes it, for a compiled server to run.
-pub(crate) fn served_schema(
-    app: &orbital_core::OrbitalSchema,
-    overrides: &serde_json::Value,
-) -> anyhow::Result<orbital_core::OrbitalSchema> {
-    let app =
-        serde_json::to_value(app).map_err(|e| anyhow::anyhow!("the program to serve: {e}"))?;
-    let (programs, app_name) = served_programs(app, overrides)?;
-    let host = orbital_shell_rust::host::SubstratePort(std::sync::Arc::new(
-        crate::commands::program_host::ProgramHost,
-    ));
-    orbital_shell_rust::host::boot::compose(
-        programs,
-        &app_name,
-        Some(grants_only(overrides)),
-        &host,
-    )
-}
-
 /// Run the program a cli command handed back (`orb-run` in its answer's headers), as the bootloader runs every program.
-/// `orb-run: server` boots the composed app in the body as `orb serve` does: catalogs beside `orb-app`, the mock store
-/// under `orb-mock: on`, `INIT` mounted on the server side, held until a signal.
+/// `orb-run: server` boots the composed app in the body as `orb serve` does: catalogs beside `orb-app`, `INIT` mounted on the server side, held until a signal.
 pub(crate) fn run_handoff(answer: &CommandAnswer) -> anyhow::Result<()> {
     let header = |name: &str| answer.headers.get(name).map(String::as_str);
     match header("orb-run") {
@@ -530,11 +358,6 @@ pub(crate) fn run_handoff(answer: &CommandAnswer) -> anyhow::Result<()> {
             anyhow::bail!("orb-run: no hand-off named {other:?}; the bootloader runs `server`")
         }
     }
-    let mock = match header("orb-mock") {
-        Some("on") => true,
-        Some("off") => false,
-        other => anyhow::bail!("orb-run: server needs orb-mock on|off, got {other:?}"),
-    };
     let app = header("orb-app").ok_or_else(|| {
         anyhow::anyhow!("orb-run: server needs orb-app, the resolved app beside its catalogs")
     })?;
@@ -550,7 +373,6 @@ pub(crate) fn run_handoff(answer: &CommandAnswer) -> anyhow::Result<()> {
         schema,
         host,
         catalogs,
-        mock,
         &std::env::vars().collect(),
         false,
     )?;
@@ -639,54 +461,6 @@ orbital EchoOrbital {
         assert!(!declares_server_endpoint(&routes), "control: a route is the client's");
         let boot = program(serde_json::json!([{ "name": "Start", "path": "", "protocol": "boot", "traits": [{ "ref": "T" }] }]));
         assert!(!declares_server_endpoint(&boot), "control: a boot page is not a server endpoint");
-    }
-
-    fn server_source() -> serde_json::Value {
-        serde_json::json!({ "orbitals": [{
-            "name": "HttpServerOrbital",
-            "config": { "port": { "type": "number", "default": 3000 } },
-            "traits": [{ "name": "Http1", "config": { "port": { "type": "unknown", "default": "@config.port" } } }]
-        }] })
-    }
-
-    #[test]
-    fn a_knob_its_trait_forwards_is_set_on_the_orbital_and_the_forward_kept() {
-        let mut source = server_source();
-        set_server_knobs(&mut source, &serde_json::json!({ "Http1.port": 4100 })).unwrap();
-        let orbital = &source["orbitals"][0];
-        assert_eq!(orbital["config"]["port"]["default"], 4100, "{source}");
-        assert_eq!(
-            orbital["traits"][0]["config"]["port"]["default"], "@config.port",
-            "{source}"
-        );
-    }
-
-    #[test]
-    fn control_a_knob_with_no_forward_is_set_on_the_trait() {
-        let mut source = server_source();
-        set_server_knobs(
-            &mut source,
-            &serde_json::json!({ "Http1.portFromEnv": true }),
-        )
-        .unwrap();
-        let orbital = &source["orbitals"][0];
-        assert_eq!(
-            orbital["traits"][0]["config"]["portFromEnv"],
-            serde_json::json!({ "type": "boolean", "default": true })
-        );
-        assert_eq!(
-            orbital["config"]["port"]["default"], 3000,
-            "the orbital's knob is untouched"
-        );
-    }
-
-    #[test]
-    fn a_forward_to_a_knob_the_orbital_does_not_declare_is_refused() {
-        let mut source = server_source();
-        source["orbitals"][0]["config"] = serde_json::json!({});
-        let error =
-            set_server_knobs(&mut source, &serde_json::json!({ "Http1.port": 4100 })).unwrap_err();
-        assert!(error.to_string().contains("@config.port"), "{error}");
     }
 
     #[test]

@@ -233,7 +233,7 @@ pub(crate) fn run_cascade_with(path: &Path, steps: &serde_json::Value, live: boo
             clock: Some(clock.clone()),
             ..orbital_shell_rust::host::HostConfig::default()
         };
-        let host = orbital_shell_rust::host::boot::boot_file_with(&program, false, &std::env::vars().collect(), false, config)?;
+        let host = orbital_shell_rust::host::boot::boot_file_with(&program, &std::env::vars().collect(), false, config)?;
         (Some(host), files)
     } else {
         (None, None)

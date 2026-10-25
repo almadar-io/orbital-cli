@@ -680,9 +680,13 @@ impl ProgramHost {
             ));
         };
         let exposure = strings("exposure").unwrap_or_default();
+        let started = std::time::Instant::now();
         let entries = catalog_with(&paths, &exposure, vectors, user_dir)
             .map_err(|e| failure(format!("behavior/catalog: {e}")))?;
-        from_json(serde_json::to_value(entries).map_err(|e| failure(e.to_string()))?)
+        let listed = started.elapsed().as_millis() as u64;
+        let answer = from_json(serde_json::to_value(entries).map_err(|e| failure(e.to_string()))?);
+        tracing::debug!(target: orbital_core::logging::ns::CLI, listed_ms = listed, total_ms = started.elapsed().as_millis() as u64, "behavior/catalog answered");
+        answer
     }
 
     /// `behavior/describe`: `options.knobVectors: true` attaches a trait's knob vectors as `orb behaviors describe
@@ -1195,7 +1199,7 @@ impl ProgramHost {
                     request["event"].as_str().unwrap_or_default(),
                     payload,
                     target,
-                    |s, _| orbital_core::client::render_probe::seeded_kernel(s),
+                    |s, _| orbital_core::client::render_probe::probe_kernel(s),
                 )
                 .map_err(|e| failure(format!("{op}: render: {e}")))?;
                 result["rendered"] =
