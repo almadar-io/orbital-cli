@@ -605,6 +605,12 @@ pub(crate) fn typed_parse_error_to_json(
                         "declare a sibling field named {sibling:?} in the same struct, typed `event`"
                     )),
                 ),
+                TypeError::AmbiguousUnion { types, .. } => (
+                    "ELOLO_T_AMBIGUOUS_UNION",
+                    Some(format!(
+                        "a union of types names only types ({types} …); quote the enum words (`\"a\" | \"b\"`) or split them into their own alias"
+                    )),
+                ),
                 TypeError::EventRefPosition { .. } => (
                     "ELOLO_T_EVENT_REF_POSITION",
                     Some(
