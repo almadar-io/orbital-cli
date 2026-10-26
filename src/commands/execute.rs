@@ -429,6 +429,7 @@ mod outcome_report_tests {
             consumed_emits: Vec::new(),
             failure: None,
             callsite_payload: None,
+            written: Default::default(),
             cascade_dropped: Vec::new(),
             cascade_cut: None,
         }

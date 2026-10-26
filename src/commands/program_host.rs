@@ -743,16 +743,19 @@ impl ProgramHost {
         let packages = super::npm_project::discover_from(&cwd)
             .map_err(|e| failure(format!("behavior/packages: {e}")))?;
         let mut out = Vec::new();
-        for pkg in &packages {
+        for (i, pkg) in packages.iter().enumerate() {
             let vectors = crate::commands::sidecar_fetch::resolve_vectors(
                 pkg,
                 &crate::commands::sidecar_fetch::UreqFetcher,
             )
             .map_err(|e| failure(format!("behavior/packages: {e}")))?;
+            let fingerprint = crate::commands::behaviors_index::fingerprint(&packages, i)
+                .map_err(|e| failure(format!("behavior/packages: {e}")))?;
             out.push(serde_json::json!({
                 "root": pkg.root.to_string_lossy(),
                 "prefix": pkg.prefix,
                 "vectors": vectors.map(|v| v.to_string_lossy().into_owned()),
+                "fingerprint": fingerprint,
             }));
         }
         from_json(serde_json::Value::Array(out))
@@ -2180,6 +2183,22 @@ orbital O {
             }
         }
         assert!(entries.iter().any(|e| e["prefix"] == "almadar-std"));
+    }
+
+    #[test]
+    fn packages_carry_the_index_fingerprint_their_catalog_is_cached_under() {
+        let listed = json(&ProgramHost::packages().expect("packages"));
+        let cwd = std::env::current_dir().unwrap();
+        let installed = crate::commands::npm_project::discover_from(&cwd).unwrap();
+        let entries = listed.as_array().unwrap();
+        for (i, entry) in entries.iter().enumerate() {
+            let expected = crate::commands::behaviors_index::fingerprint(&installed, i).unwrap();
+            assert_eq!(entry["fingerprint"], expected.as_str(), "{}", entry["prefix"]);
+            assert_eq!(expected.len(), 64);
+        }
+        let distinct: std::collections::HashSet<&str> =
+            entries.iter().filter_map(|e| e["fingerprint"].as_str()).collect();
+        assert_eq!(distinct.len(), entries.len(), "control: each package has its own fingerprint");
     }
 
     #[test]

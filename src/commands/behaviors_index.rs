@@ -515,7 +515,7 @@ fn feed(hasher: &mut Sha256, label: &str, bytes: &[u8]) {
 /// What the derived index of `packages[pi]` depends on: the rules, this binary, the installed language
 /// data, and the contents of the package's tree, its `.lolo` mirror and its hand-authored lists, plus
 /// every other package's unless it is the substrate (std never composes from another package).
-fn fingerprint(packages: &[BehaviorPackage], pi: usize) -> anyhow::Result<String> {
+pub(crate) fn fingerprint(packages: &[BehaviorPackage], pi: usize) -> anyhow::Result<String> {
     let mut hasher = Sha256::new();
     feed(&mut hasher, "rules", INDEX_RULES.as_bytes());
     let exe = std::env::current_exe()?;
