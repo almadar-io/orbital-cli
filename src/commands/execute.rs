@@ -255,7 +255,7 @@ pub(crate) fn run_cascade_with(path: &Path, steps: &serde_json::Value, live: boo
     };
     kernel.set_record_entity_after(true);
 
-    let known = kernel.trait_snapshot(Some("singleton"));
+    let known = kernel.trait_snapshot(None);
     let mut reports = Vec::with_capacity(steps.len());
     for (i, step) in steps.iter().enumerate() {
         let field = |key: &str| {
