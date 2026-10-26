@@ -151,10 +151,10 @@ impl PrintSource {
         };
         match (&self.node, &self.nodes) {
             (Some(path), _) if path.contains("[*]") => Err(failure("program/print: `node` names one construct; use `nodes` for a `[*]` path")),
-            (Some(path), _) => Ok(Value::String(at(path)?.remove(0))),
+            (Some(path), _) => Ok(Value::string(at(path)?.remove(0))),
             (None, Some(path)) => from_json(serde_json::Value::from(at(path)?)),
             (None, None) => crate::commands::parse::formatted_text(&self.source, "source")
-                .map(Value::String)
+                .map(Value::string)
                 .map_err(|e| failure(format!("program/print: {e}"))),
         }
     }
@@ -572,7 +572,7 @@ impl ProgramHost {
         let text = program.to_string();
         let path = scratch.write("program.orb", &text)?;
         crate::emit::lolo_text(&text, &path.display().to_string())
-            .map(Value::String)
+            .map(Value::string)
             .map_err(|e| failure(format!("program/print: {e}")))
     }
 
@@ -1419,7 +1419,7 @@ orbital O {
   }
 }
 "#;
-        let read = |text: &str| serde_json::to_string(&json(&ProgramHost.run("program/read", &[Value::String(text.to_string())]).expect("reads"))).unwrap();
+        let read = |text: &str| serde_json::to_string(&json(&ProgramHost.run("program/read", &[Value::String(text.to_string().into())]).expect("reads"))).unwrap();
         let text = read(probe);
         let (z, a, m) = (text.find("\"zeta\"").unwrap(), text.find("\"alpha\"").unwrap(), text.find("\"mid\"").unwrap());
         assert!(z < a && a < m, "author order zeta, alpha, mid: {text}");
@@ -1433,7 +1433,7 @@ orbital O {
         orbital_compiler::loader::register_source_lowerer(|path, _, _| crate::lower_lolo_file(path));
         let host = ProgramHost;
         let program = host
-            .run("program/read", &[Value::String(NOTE.to_string())])
+            .run("program/read", &[Value::String(NOTE.to_string().into())])
             .expect("reads");
         let as_json = json(&program);
         assert_eq!(as_json["name"], "note-pad");
@@ -1458,10 +1458,10 @@ orbital O {
     fn read_with_embeds_lists_each_inline_embed_and_control_none_without_one() {
         let source = "app a [version: \"1.0.0\"]\norbital O {\n  uses Button from \"std/behaviors/std-button\"\n  entity E [runtime] {\n    id : string!\n  }\n  trait V -> E {\n    initial: idle\n    state idle {\n      INIT -> idle\n        (render-ui main <Button.traits.ButtonRender label={\"Go\"} />)\n    }\n  }\n}\n";
         let options = from_json(serde_json::json!({ "embeds": true })).unwrap();
-        let embeds = json(&ProgramHost.run("program/read", &[Value::String(source.into()), options.clone()]).expect("reads"));
+        let embeds = json(&ProgramHost.run("program/read", &[Value::string(source), options.clone()]).expect("reads"));
         assert_eq!(embeds.as_array().map(Vec::len), Some(1), "{embeds}");
         assert_eq!(embeds[0]["behavior"], "Button.traits.ButtonRender");
-        let none = json(&ProgramHost.run("program/read", &[Value::String(NOTE.into()), options]).expect("reads"));
+        let none = json(&ProgramHost.run("program/read", &[Value::string(NOTE), options]).expect("reads"));
         assert_eq!(none, serde_json::json!([]));
     }
 
@@ -1472,7 +1472,7 @@ orbital O {
         let file = dir.path().join("note.lolo");
         std::fs::write(&file, NOTE).unwrap();
         let options = from_json(serde_json::json!({ "resolve": true, "path": file.display().to_string() })).unwrap();
-        let answer = json(&ProgramHost.run("program/read", &[Value::String(String::new()), options]).expect("resolves"));
+        let answer = json(&ProgramHost.run("program/read", &[Value::String(String::new().into()), options]).expect("resolves"));
         let expected = crate::commands::parse::resolved_text(&file, None).expect("orb resolve");
         assert_eq!(answer["text"], serde_json::Value::String(expected.clone()));
         assert_eq!(answer["program"], serde_json::from_str::<serde_json::Value>(&expected).unwrap());
@@ -1487,7 +1487,7 @@ orbital O {
         let read = |extra: serde_json::Value| {
             let mut options = serde_json::json!({ "resolve": true, "path": file.display().to_string() });
             options.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
-            ProgramHost.run("program/read", &[Value::String(String::new()), from_json(options).unwrap()])
+            ProgramHost.run("program/read", &[Value::String(String::new().into()), from_json(options).unwrap()])
         };
         let answer = json(&read(serde_json::json!({ "text": false })).expect("answers the program"));
         assert_eq!(answer["program"]["name"], "note-pad", "{answer}");
@@ -1512,7 +1512,7 @@ orbital O {
             let file = dir.path().join("main.lolo");
             std::fs::write(&file, text).unwrap();
             let options = from_json(serde_json::json!({ "resolve": true, "text": false, "path": file.display().to_string() })).unwrap();
-            json(&ProgramHost.run("program/read", &[Value::String(String::new()), options]).expect("answers"))
+            json(&ProgramHost.run("program/read", &[Value::String(String::new().into()), options]).expect("answers"))
         };
         let with = read(main(true));
         let lazy = with["lazy"].as_array().expect("lazy list");
@@ -1541,7 +1541,7 @@ orbital O {
         let file = dir.path().join("consumer.orb");
         std::fs::write(&file, REFERENCED_CONSUMER).unwrap();
         let options = from_json(serde_json::json!({ "references": true, "path": file.display().to_string() })).unwrap();
-        let answer = json(&ProgramHost.run("program/read", &[Value::String(String::new()), options]).expect("answers"));
+        let answer = json(&ProgramHost.run("program/read", &[Value::String(String::new().into()), options]).expect("answers"));
         assert_eq!(answer["program"]["name"], "consumer", "{answer}");
         assert_eq!(answer["program"]["orbitals"][0]["traits"][0]["ref"], "Up.traits.Widget", "the program is unresolved: {answer}");
         let references = answer["references"].as_array().expect("a list");
@@ -1562,7 +1562,7 @@ orbital O {
         let file = dir.path().join("atom.orb");
         std::fs::write(&file, REFERENCED_ATOM).unwrap();
         let options = from_json(serde_json::json!({ "references": true, "path": file.display().to_string() })).unwrap();
-        let answer = json(&ProgramHost.run("program/read", &[Value::String(String::new()), options]).expect("answers"));
+        let answer = json(&ProgramHost.run("program/read", &[Value::String(String::new().into()), options]).expect("answers"));
         assert_eq!(answer["references"], serde_json::json!([]));
     }
 
@@ -1570,7 +1570,7 @@ orbital O {
     fn control_read_with_references_refuses_a_relative_path_an_unknown_option_and_a_second_mode() {
         let read = |options: serde_json::Value| {
             ProgramHost
-                .run("program/read", &[Value::String(String::new()), from_json(options).unwrap()])
+                .run("program/read", &[Value::String(String::new().into()), from_json(options).unwrap()])
                 .unwrap_err()
                 .message
         };
@@ -1583,7 +1583,7 @@ orbital O {
     #[test]
     fn read_with_resolve_refuses_a_relative_path() {
         let options = from_json(serde_json::json!({ "resolve": true, "path": "note.lolo" })).unwrap();
-        let error = ProgramHost.run("program/read", &[Value::String(String::new()), options]).unwrap_err();
+        let error = ProgramHost.run("program/read", &[Value::String(String::new().into()), options]).unwrap_err();
         assert!(error.message.contains("absolute `path`"), "{}", error.message);
     }
 
@@ -1641,7 +1641,7 @@ orbital O {
         let orb = dir.path().join("note.orb");
         std::fs::write(&orb, crate::emit::orb_json(NOTE, "note.lolo").unwrap()).unwrap();
         let options = from_json(serde_json::json!({ "stamp": true, "path": orb.display().to_string() })).unwrap();
-        let answer = json(&ProgramHost.run("program/read", &[Value::String(String::new()), options]).expect("stamps"));
+        let answer = json(&ProgramHost.run("program/read", &[Value::String(String::new().into()), options]).expect("stamps"));
         let expected = crate::commands::stamp::stamped_json(&orb, None, None).expect("orb stamp");
         assert_eq!(answer["text"], serde_json::Value::String(expected.clone()));
         assert_eq!(answer["program"], serde_json::from_str::<serde_json::Value>(&expected).unwrap());
@@ -1650,7 +1650,7 @@ orbital O {
             "stamp": true, "path": orb.display().to_string(), "prior": orb.display().to_string(), "output": out.display().to_string()
         }))
         .unwrap();
-        let written = json(&ProgramHost.run("program/read", &[Value::String(String::new()), options]).expect("stamps"));
+        let written = json(&ProgramHost.run("program/read", &[Value::String(String::new().into()), options]).expect("stamps"));
         assert_eq!(std::fs::read_to_string(&out).unwrap(), text_of(&written, "text"), "--output writes the stamped text");
         let with_prior = crate::commands::stamp::stamped_json(&orb, Some(&orb), None).unwrap();
         assert_eq!(text_of(&written, "text"), with_prior, "--prior anchors the ids");
@@ -1660,7 +1660,7 @@ orbital O {
     fn control_read_with_stamp_refuses_a_relative_path_an_unknown_option_and_a_missing_file() {
         let read = |options: serde_json::Value| {
             ProgramHost
-                .run("program/read", &[Value::String(String::new()), from_json(options).unwrap()])
+                .run("program/read", &[Value::String(String::new().into()), from_json(options).unwrap()])
                 .unwrap_err()
                 .message
         };
@@ -1730,7 +1730,7 @@ orbital O {
     fn step_with_a_raw_report_is_what_orb_execute_steps_prints() {
         orbital_compiler::loader::register_source_lowerer(|path, _, _| crate::lower_lolo_file(path));
         let source = NOTE.to_string();
-        let program = ProgramHost.run("program/read", &[Value::String(source)]).expect("reads");
+        let program = ProgramHost.run("program/read", &[Value::String(source.into())]).expect("reads");
         let steps = serde_json::json!([{ "trait": "NoteView", "event": "INIT" }]);
         let raw = from_json(serde_json::json!({ "report": "raw" })).unwrap();
         let answer = json(&ProgramHost.run("program/step", &[program.clone(), from_json(steps.clone()).unwrap(), raw]).expect("steps"));
@@ -1745,7 +1745,7 @@ orbital O {
     #[test]
     fn control_a_reshaped_step_still_needs_its_from_and_report_takes_only_raw() {
         let source = NOTE.to_string();
-        let program = ProgramHost.run("program/read", &[Value::String(source)]).expect("reads");
+        let program = ProgramHost.run("program/read", &[Value::String(source.into())]).expect("reads");
         let steps = from_json(serde_json::json!([{ "orbital": "NoteOrbital", "trait": "NoteView", "event": "INIT" }])).unwrap();
         let error = ProgramHost.run("program/step", &[program.clone(), steps.clone()]).unwrap_err();
         assert!(error.message.contains("needs a from"), "{}", error.message);
@@ -1774,7 +1774,7 @@ orbital O {
         orbital_compiler::loader::register_source_lowerer(|path, _, _| crate::lower_lolo_file(path));
         let dir = tempfile::tempdir().expect("tempdir");
         let orb = dir.path().join("note.orb");
-        let program = ProgramHost.run("program/read", &[Value::String(NOTE.to_string())]).expect("reads");
+        let program = ProgramHost.run("program/read", &[Value::String(NOTE.to_string().into())]).expect("reads");
         std::fs::write(&orb, json(&program).to_string()).unwrap();
         let spec = orb.display().to_string();
         let value = from_json(serde_json::json!({ "behavior": spec })).unwrap();
@@ -1912,7 +1912,7 @@ orbital O {
         orbital_compiler::loader::register_source_lowerer(|path, _, _| crate::lower_lolo_file(path));
         let host = ProgramHost;
         let program = host
-            .run("program/read", &[Value::String(NOTE.to_string())])
+            .run("program/read", &[Value::String(NOTE.to_string().into())])
             .unwrap();
         let report = json(
             &host
@@ -2250,7 +2250,7 @@ orbital O {
             &host
                 .run(
                     "program/compose",
-                    &[Value::Array(vec![program.clone()]), options],
+                    &[Value::Array(vec![program.clone()].into()), options],
                 )
                 .expect("compose"),
         );
@@ -2267,7 +2267,7 @@ orbital O {
         );
         let bad = from_json(serde_json::json!({ "appName": "X", "layout": "grid" })).unwrap();
         assert!(
-            host.run("program/compose", &[Value::Array(vec![program]), bad])
+            host.run("program/compose", &[Value::Array(vec![program].into()), bad])
                 .unwrap_err()
                 .message
                 .contains("layout must be one of"),
@@ -2281,7 +2281,7 @@ orbital O {
         let host = ProgramHost;
         let program = json(
             &host
-                .run("program/read", &[Value::String(NOTE.to_string())])
+                .run("program/read", &[Value::String(NOTE.to_string().into())])
                 .unwrap(),
         );
         let project = std::env::temp_dir().join(format!("orb-eval-{}", std::process::id()));
@@ -2316,7 +2316,7 @@ orbital O {
         orbital_compiler::loader::register_source_lowerer(|path, _, _| crate::lower_lolo_file(path));
         let host = ProgramHost;
         let program = host
-            .run("program/read", &[Value::String(NOTE.to_string())])
+            .run("program/read", &[Value::String(NOTE.to_string().into())])
             .unwrap();
         let requests = from_json(serde_json::json!([{ "orbital": "NoteOrbital", "trait": "NoteView", "from": "idle", "event": "INIT", "payload": {} }])).unwrap();
         let played = json(
