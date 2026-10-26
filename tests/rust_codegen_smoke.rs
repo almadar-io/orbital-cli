@@ -19,8 +19,9 @@ fn orb_bin() -> PathBuf {
     common::orb()
 }
 
+/// std-modal composed with the std HTTP server: a server compile needs the program to declare its own endpoint.
 fn fixture() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/std-modal.orb")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/std-modal-served.lolo")
 }
 
 /// A unique output dir under cargo's per-test-target tmp dir (auto-located, no collisions).

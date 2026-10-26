@@ -346,7 +346,7 @@ pub(crate) fn run_program(program: &Path) -> anyhow::Result<()> {
 /// `http` today), so it is served as written instead of composed with std-http-server.
 pub(crate) fn declares_server_endpoint(schema: &orbital_core::OrbitalSchema) -> bool {
     schema.orbitals.iter().flat_map(|o| o.pages.iter().flatten()).any(|page| match page {
-        orbital_core::schema::PageRef::Inline(page) => page.protocol.as_deref().and_then(orbital_core::protocols::protocol)
+        orbital_core::schema::PageRef::Inline(page) => page.protocol.as_deref().and_then(orbital_core::protocols::protocol_after_preflight)
             .is_some_and(|spec| spec.side == orbital_core::protocols::ProtocolSide::Server),
         _ => false,
     })

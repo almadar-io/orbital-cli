@@ -88,24 +88,18 @@ fn emit_ts_contains_expected_exports() {
     }
 }
 
+// The Python shell runs the served program on the native kernel: no entity model, state enum or trait class is generated, so `emit py` has no file to print.
 #[test]
-fn emit_py_contains_expected_classes() {
+fn emit_py_matches_no_file_under_the_kernel_host() {
     let orb = std_modal_orb();
-    if !orb.exists() {
-        return;
-    }
     let (stdout, stderr, ok) = run_orb(&["emit", "py", orb.to_str().unwrap()]);
     assert!(ok, "emit py failed. stderr:\n{}", stderr);
-    for needle in [
-        "class ModalRecord(BaseModel)",
-        "class ModalRecordModalState(Enum)",
-        "class ModalRecordModal",
-    ] {
-        assert!(
-            stdout.contains(needle),
-            "expected Python output to contain {:?}",
-            needle
-        );
+    assert!(
+        stderr.contains("matched zero generated files"),
+        "expected the zero-match warning. stderr:\n{stderr}"
+    );
+    for absent in ["class ModalRecord(BaseModel)", "class ModalRecordModalState(Enum)", "class ModalRecordModal"] {
+        assert!(!stdout.contains(absent), "unexpected {absent:?} in:\n{stdout}");
     }
 }
 
@@ -153,25 +147,15 @@ fn emit_ts_section_entities_excludes_reducers() {
 }
 
 #[test]
-fn emit_py_section_entities_name_filter() {
+fn emit_py_section_entities_name_filter_matches_no_file_under_the_kernel_host() {
     let orb = std_modal_orb();
-    if !orb.exists() {
-        return;
-    }
-    let (stdout, _, ok) = run_orb(&[
-        "emit",
-        "py",
-        orb.to_str().unwrap(),
-        "--section",
-        "entities.ModalRecord",
-    ]);
-    assert!(ok);
+    let (stdout, stderr, ok) = run_orb(&["emit", "py", orb.to_str().unwrap(), "--section", "entities.ModalRecord"]);
+    assert!(ok, "emit py failed. stderr:\n{}", stderr);
     assert!(
-        stdout.contains("class ModalRecord(BaseModel)"),
-        "entity-by-name section should contain the entity class"
+        stderr.contains("matched zero generated files"),
+        "expected the zero-match warning. stderr:\n{stderr}"
     );
-    // Python backend's state machine class must NOT appear.
-    assert!(!stdout.contains("class ModalRecordModalState(Enum)"));
+    assert!(!stdout.contains("class ModalRecord(BaseModel)"), "no entity class is generated:\n{stdout}");
 }
 
 // --- Phase 2: composition of --section with --only ------------------------
@@ -313,6 +297,9 @@ fn emit_lolo_from_orb_reemits_to_the_same_orb() {
                             k != "id"
                                 && k != "ledger"
                                 && k != "schemaVersion"
+                                // spelling-dependent provenance: the printed source hashes differently and a nested self-reference gains its projection mark
+                                && k != "sourceDeclaration"
+                                && k != "projectedFrom"
                                 && !k.ends_with("Id")
                                 && !k.ends_with("Ids")
                                 && !v.is_null()
@@ -480,9 +467,12 @@ fn compile_keeps_an_authored_null_payload_literal_and_leaves_unset_schema_fields
         let payload = find_emit(&json, "NULL_FAILED").unwrap_or_else(|| panic!("{file}: the emit effect is missing"));
         assert_eq!(payload.get("code"), Some(&serde_json::Value::Null), "{file}: the authored `code: null` was dropped: {payload}");
         assert_eq!(payload["message"], "nothing to do", "{file}");
+        // The composed std server and the client's protocol table carry nulls of their own; the fixture's orbital is the unit under test.
         let mut nulls = Vec::new();
-        null_keys(&json, &mut nulls);
-        assert_eq!(nulls, vec!["code".to_string()], "{file}: a null other than the authored one is in the output");
+        for orbital in json["orbitals"].as_array().expect("orbitals[]").iter().filter(|o| o["name"] == "NullOrbital") {
+            null_keys(orbital, &mut nulls);
+        }
+        assert_eq!(nulls, vec!["code".to_string()], "{file}: a null other than the authored one is in NullOrbital");
     }
 }
 

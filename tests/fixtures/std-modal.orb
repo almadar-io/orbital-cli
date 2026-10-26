@@ -107,17 +107,20 @@
         "fields": [
           {
             "name": "id",
+            "nullable": false,
             "type": "string"
           },
           {
             "description": "A user-facing identifier for the modal.",
             "name": "name",
+            "nullable": false,
             "synonyms": "title, label, identifier",
             "type": "string"
           },
           {
             "description": "A textual explanation of the modal's content or function.",
             "name": "description",
+            "nullable": false,
             "synonyms": "details, explanation, notes, summary",
             "type": "string"
           },
@@ -125,6 +128,7 @@
             "default": "active",
             "description": "Current operational state of the record.",
             "name": "status",
+            "nullable": false,
             "synonyms": "state, condition, flag",
             "type": "string",
             "values": [
@@ -137,6 +141,10 @@
             "description": "The row an edit-mode OPEN pre-fills from when its payload carries no row. Stashed by SEED — hosts route the surface's loaded event here (e.g. a document look's RecordItemLoaded) so scalar-only action events ({ id }) can still open a fully seeded settings form.",
             "intrinsic": true,
             "name": "seedRow",
+            "nullable": false,
+            "projectedFrom": {
+              "type": "ModalRecord"
+            },
             "relation": {
               "cardinality": "one",
               "entity": "ModalRecord",
@@ -146,6 +154,7 @@
           },
           {
             "name": "createdAt",
+            "nullable": false,
             "type": "string"
           }
         ],
@@ -170,12 +179,12 @@
       ],
       "traits": [
         {
-          "category": "interaction",
           "config": {
             "detailPattern": {
               "default": "stack",
               "description": "Pattern used to arrange the form body",
               "label": "Layout pattern",
+              "nullable": false,
               "tier": "internal",
               "type": "pattern"
             },
@@ -183,6 +192,7 @@
               "default": "modal",
               "description": "UI slot the modal renders into",
               "label": "Render slot",
+              "nullable": false,
               "tier": "internal",
               "type": "slot"
             },
@@ -190,24 +200,32 @@
               "default": [],
               "description": "Per-field label/placeholder/hint overrides, keyed by field name. Types, options and required-ness stay entity-schema-driven (declare once on the entity); override only display copy the entity's @description doesn't fit.",
               "items": {
+                "nullable": false,
+                "projectedFrom": {
+                  "type": "ModalFieldOverride"
+                },
                 "properties": {
                   "hint": {
                     "name": "hint",
+                    "nullable": false,
                     "required": false,
                     "type": "string"
                   },
                   "label": {
                     "name": "label",
+                    "nullable": false,
                     "required": false,
                     "type": "string"
                   },
                   "name": {
                     "name": "name",
+                    "nullable": false,
                     "required": true,
                     "type": "string"
                   },
                   "placeholder": {
                     "name": "placeholder",
+                    "nullable": false,
                     "required": false,
                     "type": "string"
                   }
@@ -215,6 +233,7 @@
                 "type": "object"
               },
               "label": "Any per-field display copy overrides?",
+              "nullable": false,
               "synonyms": "field labels, custom labels, help text overrides, placeholder text",
               "tier": "presentation",
               "type": "[ModalFieldOverride]"
@@ -223,9 +242,11 @@
               "default": [],
               "description": "Entity fields rendered as inputs inside the modal form.",
               "items": {
+                "nullable": false,
                 "type": "string"
               },
               "label": "Which fields appear in the form?",
+              "nullable": false,
               "synonyms": "form fields, inputs, editable fields, field list",
               "tier": "domain",
               "type": "[string]"
@@ -234,6 +255,7 @@
               "default": "layout-panel-top",
               "description": "Lucide icon name shown next to the modal title.",
               "label": "Which icon appears in the modal header?",
+              "nullable": false,
               "synonyms": "header icon, modal icon, title icon",
               "tier": "presentation",
               "type": "string"
@@ -242,6 +264,7 @@
               "default": "create",
               "description": "create = blank form; edit = pre-filled from the selected row.",
               "label": "Is this for creating or editing?",
+              "nullable": false,
               "synonyms": "form mode, create or edit, new or update, add or modify",
               "tier": "internal",
               "type": "string",
@@ -254,6 +277,7 @@
               "default": "Details",
               "description": "Heading displayed at the top of the modal.",
               "label": "What should the modal heading say?",
+              "nullable": false,
               "synonyms": "modal title, dialog heading, panel title, form title",
               "tier": "presentation",
               "type": "string"
@@ -290,6 +314,7 @@
               "payloadSchema": [
                 {
                   "name": "data",
+                  "nullable": false,
                   "required": true,
                   "type": "@entity"
                 }
@@ -311,10 +336,12 @@
               "payloadSchema": [
                 {
                   "name": "error",
+                  "nullable": false,
                   "type": "string"
                 },
                 {
                   "name": "code",
+                  "nullable": false,
                   "type": "string"
                 }
               ],
@@ -329,22 +356,35 @@
               "payloadSchema": [
                 {
                   "entity": "ModalRecord",
+                  "items": {
+                    "name": "",
+                    "nullable": false,
+                    "projectedFrom": {
+                      "type": "ModalRecord"
+                    },
+                    "type": "ModalRecord"
+                  },
                   "name": "data",
+                  "nullable": false,
                   "properties": [
                     {
                       "name": "id",
+                      "nullable": false,
                       "type": "string"
                     },
                     {
                       "name": "name",
+                      "nullable": false,
                       "type": "string"
                     },
                     {
                       "name": "description",
+                      "nullable": false,
                       "type": "string"
                     },
                     {
                       "name": "status",
+                      "nullable": false,
                       "type": "string",
                       "values": [
                         "active",
@@ -354,10 +394,12 @@
                     },
                     {
                       "name": "seedRow",
+                      "nullable": false,
                       "type": "ModalRecord"
                     },
                     {
                       "name": "createdAt",
+                      "nullable": false,
                       "type": "string"
                     }
                   ],
@@ -383,7 +425,10 @@
           "linkedEntity": "ModalRecord",
           "linkedEntityId": "ent_GD994ZGGF587JV1863FT3VRYVQ",
           "name": "ModalRecordModal",
-          "scope": "instance",
+          "sourceDeclaration": {
+            "fingerprint": "b165114e6469c47002839d55eb36e24a6ba44a0a97b743b4c54d9cac0ca14f5f",
+            "traitId": "trt_4P0ZPV9K5BSJNPMMEYSNVMJRT2"
+          },
           "stateMachine": {
             "events": [
               {
@@ -400,10 +445,12 @@
                 "payloadSchema": [
                   {
                     "name": "error",
+                    "nullable": false,
                     "type": "string"
                   },
                   {
                     "name": "code",
+                    "nullable": false,
                     "type": "string"
                   }
                 ],
@@ -420,21 +467,29 @@
                   {
                     "entity": "ModalRecord",
                     "name": "row",
+                    "nullable": false,
+                    "projectedFrom": {
+                      "type": "ModalRecord"
+                    },
                     "properties": [
                       {
                         "name": "id",
+                        "nullable": false,
                         "type": "string"
                       },
                       {
                         "name": "name",
+                        "nullable": false,
                         "type": "string"
                       },
                       {
                         "name": "description",
+                        "nullable": false,
                         "type": "string"
                       },
                       {
                         "name": "status",
+                        "nullable": false,
                         "type": "string",
                         "values": [
                           "active",
@@ -444,10 +499,12 @@
                       },
                       {
                         "name": "seedRow",
+                        "nullable": false,
                         "type": "ModalRecord"
                       },
                       {
                         "name": "createdAt",
+                        "nullable": false,
                         "type": "string"
                       }
                     ],
@@ -466,26 +523,35 @@
                 "payloadSchema": [
                   {
                     "name": "id",
+                    "nullable": false,
                     "type": "string"
                   },
                   {
                     "entity": "ModalRecord",
                     "name": "row",
+                    "nullable": false,
+                    "projectedFrom": {
+                      "type": "ModalRecord"
+                    },
                     "properties": [
                       {
                         "name": "id",
+                        "nullable": false,
                         "type": "string"
                       },
                       {
                         "name": "name",
+                        "nullable": false,
                         "type": "string"
                       },
                       {
                         "name": "description",
+                        "nullable": false,
                         "type": "string"
                       },
                       {
                         "name": "status",
+                        "nullable": false,
                         "type": "string",
                         "values": [
                           "active",
@@ -495,10 +561,12 @@
                       },
                       {
                         "name": "seedRow",
+                        "nullable": false,
                         "type": "ModalRecord"
                       },
                       {
                         "name": "createdAt",
+                        "nullable": false,
                         "type": "string"
                       }
                     ],
@@ -525,6 +593,7 @@
                 "payloadSchema": [
                   {
                     "name": "data",
+                    "nullable": false,
                     "required": true,
                     "type": "@entity"
                   }
@@ -540,22 +609,35 @@
                 "payloadSchema": [
                   {
                     "entity": "ModalRecord",
+                    "items": {
+                      "name": "",
+                      "nullable": false,
+                      "projectedFrom": {
+                        "type": "ModalRecord"
+                      },
+                      "type": "ModalRecord"
+                    },
                     "name": "data",
+                    "nullable": false,
                     "properties": [
                       {
                         "name": "id",
+                        "nullable": false,
                         "type": "string"
                       },
                       {
                         "name": "name",
+                        "nullable": false,
                         "type": "string"
                       },
                       {
                         "name": "description",
+                        "nullable": false,
                         "type": "string"
                       },
                       {
                         "name": "status",
+                        "nullable": false,
                         "type": "string",
                         "values": [
                           "active",
@@ -565,10 +647,12 @@
                       },
                       {
                         "name": "seedRow",
+                        "nullable": false,
                         "type": "ModalRecord"
                       },
                       {
                         "name": "createdAt",
+                        "nullable": false,
                         "type": "string"
                       }
                     ],
@@ -806,19 +890,23 @@
         "ModalFieldOverride": [
           {
             "name": "name",
+            "nullable": false,
             "required": true,
             "type": "string"
           },
           {
             "name": "label",
+            "nullable": false,
             "type": "string"
           },
           {
             "name": "placeholder",
+            "nullable": false,
             "type": "string"
           },
           {
             "name": "hint",
+            "nullable": false,
             "type": "string"
           }
         ]
@@ -826,5 +914,6 @@
     }
   ],
   "schemaVersion": 1,
+  "typeContractVersion": 1,
   "version": "1.0.0"
 }

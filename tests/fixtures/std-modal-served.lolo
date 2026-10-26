@@ -1,0 +1,192 @@
+app std-modal-served [
+  version: "1.0.0",
+  env: ["CORS_ORIGIN", "PORT", "VAPID_PUBLIC_KEY", "ORB_TICK_INVOKER", "ALMADAR_API_KEY_SALT", "NODE_ENV", "AUTH_PROVIDER", "OIDC_ISSUER_URL", "OIDC_AUDIENCE", "FIREBASE_PROJECT_ID", "FIREBASE_SERVICE_ACCOUNT_PATH", "FIREBASE_AUTH_EMULATOR_HOST", "FIRESTORE_EMULATOR_HOST", "ALMADAR_INTEGRATIONS_MODE"],
+  egress: ["https://www.googleapis.com"],
+  fs: { cwd: "dist/client/**": [read] },
+  net: { "127.0.0.1:3000": [listen], "127.0.0.1", env PORT: [listen] },
+  description: "std-modal composed with the std HTTP server, so the program declares the endpoint a server compile needs"
+]
+
+uses Server from "std/behaviors/std-http-server"
+;;
+;; Modal-only trait: renders ONLY to the `modal` slot. The parent molecule's
+;; layout/browse trait is responsible for the `main` slot (the list, the
+;; trigger buttons, etc.). Consumers configure icon/title/fields/mode at
+;; the trait-ref call site via `config: { ... }`. Side effects (persist,
+;; notify) belong in a sibling coordinator trait that
+;; `listens { ModalTrait SAVE -> DO_PERSIST }`.
+orbital ModalRecordOrbital {
+    type ModalFieldOverride = {
+      name : string!
+      label : string
+      placeholder : string
+      hint : string
+    }
+
+    type ModalRecordLoaded = Event { data : [ModalRecord] }
+
+    type ModalRecordLoadFailed = Event { error : string, code : string }
+
+  entity ModalRecord [runtime] {
+    id : string
+    name : string @description "A user-facing identifier for the modal." @synonyms "title, label, identifier"
+    description : string @description "A textual explanation of the modal's content or function." @synonyms "details, explanation, notes, summary"
+    status : "active" | "inactive" | "pending" @description "Current operational state of the record." @synonyms "state, condition, flag" = active
+    seedRow : ModalRecord @intrinsic @description "The row an edit-mode OPEN pre-fills from when its payload carries no row. Stashed by SEED — hosts route the surface's loaded event here (e.g. a document look's RecordItemLoaded) so scalar-only action events ({ id }) can still open a fully seeded settings form."
+    createdAt : string
+  }
+
+  trait ModalRecordModal -> @rebindable ModalRecord {
+    initial: closed
+
+    state closed {
+      INIT -> closed
+        (fetch ModalRecord {
+          emit: { failure: ModalRecordLoadFailed, success: ModalRecordLoaded }
+        })
+      ModalRecordLoadFailed -> closed
+        (notify error (str/concat "Couldn't load the record — " ?error))
+      ;; stash only — a SEED never opens anything; OPEN reads it on demand
+      SEED -> closed
+        (set @entity.seedRow (object/merge ?row {}))
+      ;; Mode-aware guard: in create mode the modal opens unconditionally
+      ;; (no row exists yet); in edit mode the row must be present — on the
+      ;; OPEN payload or already stashed by SEED — or the OPEN is rejected
+      ;; (no silent first-row fallback). The @config.mode literal is
+      ;; substituted at molecule inline time — atoms validate this with
+      ;; @config allowed-but-unresolved.
+      OPEN -> open when (or (= @config.mode create) (validate/required ?row) (!= (str/default (object/get @entity.seedRow id) "") ""))
+        (set @entity.id ?id)
+        (render-ui @config.detailSlot {
+          children: [{
+            children: [{ name: @config.icon, size: lg, type: icon }, {
+              content: @config.title
+              type: typography
+              variant: h3
+            }]
+            direction: horizontal
+            gap: sm
+            type: stack
+          }, { type: divider }, {
+            cancelEvent: CLOSE
+            entity: (object/merge @entity.seedRow (object/merge ?row {}))
+            fieldOverrides: @config.fieldOverrides
+            fields: @config.fields
+            mode: @config.mode
+            submitEvent: SAVE
+            type: form-section
+          }]
+          direction: vertical
+          gap: md
+          type: @config.detailPattern
+        })
+    }
+
+    state open {
+      INIT -> closed
+        (render-ui @config.detailSlot null)
+      ;; a refetch echo while the modal is open refreshes the stash in place
+      SEED -> open
+        (set @entity.seedRow (object/merge ?row {}))
+      CLOSE -> closed
+        (render-ui @config.detailSlot null)
+        (notify info Cancelled)
+      SAVE -> closed
+        (render-ui @config.detailSlot null)
+    }
+
+    emits {
+      SAVE {
+        data : @entity!
+      }
+        @description "Indicates a successful data save operation."
+        @synonyms "submit, persist, confirm"
+        @tier "domain"
+      CLOSE
+        @description "Indicates the modal window is being closed."
+        @synonyms "dismiss, hide, cancel"
+        @tier "domain"
+      ModalRecordLoadFailed
+        @description "Indicates a failure to load the record data."
+        @synonyms "error, failure, problem, unsuccessful"
+        @tier "internal"
+      ModalRecordLoaded
+        @description "Signals that the modal's data has been successfully loaded."
+        @synonyms "loaded, data ready, populated"
+        @tier "internal"
+    }
+
+    listens {
+      OPEN {
+        id : string
+        row : ModalRecord
+      }
+        @description "A request to display the modal window."
+        @synonyms "show, display, present, reveal"
+        @tier "domain"
+      SEED {
+        row : ModalRecord
+      }
+        @description "Stash the row an edit-mode OPEN will pre-fill from. Hosts route the owning surface's loaded event here (e.g. RecordItemLoaded from a document look) so an OPEN carrying only { id } still opens a fully seeded form."
+        @synonyms "preload row, stash record, seed form, prefill"
+        @tier "domain"
+      SAVE {
+        data : @entity!
+      }
+        @description "Indicates a successful data submission or confirmation."
+        @synonyms "submit, confirm, accept, persist"
+        @tier "domain"
+      ModalRecordLoadFailed {
+        error : string
+        code : string
+      }
+        @description "Indicates a failure to load the record data."
+        @synonyms "error, failure, problem, unsuccessful"
+        @tier "internal"
+    }
+
+    config {
+      icon : string = layout-panel-top
+        @label "Which icon appears in the modal header?"
+        @description "Lucide icon name shown next to the modal title."
+        @synonyms "header icon, modal icon, title icon"
+        @tier "presentation"
+      title : string = Details
+        @label "What should the modal heading say?"
+        @description "Heading displayed at the top of the modal."
+        @synonyms "modal title, dialog heading, panel title, form title"
+        @tier "presentation"
+      fields : [string] = []
+        @label "Which fields appear in the form?"
+        @description "Entity fields rendered as inputs inside the modal form."
+        @synonyms "form fields, inputs, editable fields, field list"
+        @tier "domain"
+      fieldOverrides : [ModalFieldOverride] = []
+        @label "Any per-field display copy overrides?"
+        @description "Per-field label/placeholder/hint overrides, keyed by field name. Types, options and required-ness stay entity-schema-driven (declare once on the entity); override only display copy the entity's @description doesn't fit."
+        @synonyms "field labels, custom labels, help text overrides, placeholder text"
+        @tier "presentation"
+      mode : "create" | "edit" = create
+        @label "Is this for creating or editing?"
+        @description "create = blank form; edit = pre-filled from the selected row."
+        @synonyms "form mode, create or edit, new or update, add or modify"
+        @tier "internal"
+      detailSlot : slot = modal
+        @label "Render slot"
+        @description "UI slot the modal renders into"
+        @tier "internal"
+      detailPattern : pattern = stack
+        @label "Layout pattern"
+        @description "Pattern used to arrange the form body"
+        @tier "internal"
+    }
+  }
+
+  ;; consumer: a sibling coordinator trait listens for SAVE to run (persist create|update ...)
+  ;; For edit mode, OPEN's payload.id seeds @entity.id so form-section
+  ;; pre-fills the target row AND carries that id into the SAVE payload
+  ;; (so (persist update X @payload.data) can find the right row).
+  page "/modalrecords/modal" as ModalRecordModalPage -> ModalRecordModal
+}
+
+orbital Api = Server.orbitals.HttpServerOrbital {}

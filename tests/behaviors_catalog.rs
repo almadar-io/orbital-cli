@@ -1151,12 +1151,12 @@ const DOOR_ORB: &str = r#"{"name":"door","orbitals":[{"name":"DoorOrbital","enti
 
 const PORCH_ORB: &str = r#"{"name":"porch","orbitals":[{"name":"PorchOrbital","uses":[{"from":"./door","as":"Door"}],"entity":{"name":"Porch","persistence":"runtime","fields":[]},"traits":[{"ref":"Door.traits.DoorLife","name":"FrontDoor","events":{"OPEN":"UNLOCK"}}]}]}"#;
 
-const TAGGED_DOOR_ORB: &str = r#"{"name":"door","orbitals":[{"name":"DoorOrbital","entity":{"name":"Door","persistence":"runtime","fields":[{"name":"open","type":"boolean","default":false}]},"traits":[{"name":"DoorLife","linkedEntity":"Door","capabilities":["hinged","lockable"],"stateMachine":{"states":[{"name":"closed","isInitial":true}],"transitions":[{"from":"closed","to":"closed","event":"INIT"}]}}]}]}"#;
+const DOOR_ATOM_ORB: &str = r#"{"name":"door","orbitals":[{"name":"DoorOrbital","entity":{"name":"Door","persistence":"runtime","fields":[{"name":"open","type":"boolean","default":false}]},"traits":[{"name":"DoorLife","linkedEntity":"Door","stateMachine":{"states":[{"name":"closed","isInitial":true}],"transitions":[{"from":"closed","to":"closed","event":"INIT"}]}}]}]}"#;
 
 #[test]
-fn describe_reports_each_traits_composed_ref_and_capabilities() {
+fn describe_reports_each_traits_composed_ref() {
     let p = project("m1");
-    write(&p.path().join("orbitals/door.orb"), TAGGED_DOOR_ORB);
+    write(&p.path().join("orbitals/door.orb"), DOOR_ATOM_ORB);
     write(&p.path().join("orbitals/porch.orb"), PORCH_ORB);
 
     let porch = json(&orb(
@@ -1166,22 +1166,14 @@ fn describe_reports_each_traits_composed_ref_and_capabilities() {
     let front = &porch["orbitals"][0]["traits"][0];
     assert_eq!(front["trait"], "FrontDoor");
     assert_eq!(front["ref"], "Door.traits.DoorLife");
-    assert_eq!(
-        front["capabilities"],
-        serde_json::json!(["hinged", "lockable"])
-    );
 
-    // Control: the atom defines its own trait, so it composes nothing and keeps its tags.
+    // Control: the atom defines its own trait, so it composes nothing.
     let door = json(&orb(
         p.path(),
         &["behaviors", "describe", "--json", "./orbitals/door"],
     ));
     let life = &door["orbitals"][0]["traits"][0];
     assert!(life.get("ref").is_none(), "{life}");
-    assert_eq!(
-        life["capabilities"],
-        serde_json::json!(["hinged", "lockable"])
-    );
 }
 
 const LIB_ORB: &str = r#"{"name":"lib","orbitals":[{"name":"ItemOrbital","entity":{"name":"Item","fields":[{"name":"id","type":"string","required":true},{"name":"note","type":"relation","relation":{"entity":"Note","cardinality":"one"}}]},"traits":[],"pages":[]},{"name":"NoteOrbital","entity":{"name":"Note","fields":[{"name":"id","type":"string","required":true}]},"traits":[],"pages":[]}]}"#;

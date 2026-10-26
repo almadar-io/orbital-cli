@@ -1,7 +1,13 @@
 app emit-null-literal [
   version: "1.0.0",
+  env: ["CORS_ORIGIN", "PORT", "VAPID_PUBLIC_KEY", "ORB_TICK_INVOKER", "ALMADAR_API_KEY_SALT", "NODE_ENV", "AUTH_PROVIDER", "OIDC_ISSUER_URL", "OIDC_AUDIENCE", "FIREBASE_PROJECT_ID", "FIREBASE_SERVICE_ACCOUNT_PATH", "FIREBASE_AUTH_EMULATOR_HOST", "FIRESTORE_EMULATOR_HOST", "ALMADAR_INTEGRATIONS_MODE"],
+  egress: ["https://www.googleapis.com"],
+  fs: { cwd: "dist/client/**": [read] },
+  net: { "127.0.0.1:3000": [listen], "127.0.0.1", env PORT: [listen] },
   description: "A trait that emits a payload carrying an authored null literal."
 ]
+
+uses Server from "std/behaviors/std-http-server"
 orbital NullOrbital {
   entity NullCall [runtime] {
     id : string!
@@ -12,6 +18,7 @@ orbital NullOrbital {
 
     state idle {
       INIT -> idle
+        (render-ui main { type: typography, content: "Null literal", variant: h3 })
 
       NULL_GO -> idle
         (emit NULL_FAILED { code: null, message: "nothing to do" })
@@ -30,3 +37,5 @@ orbital NullOrbital {
 
   page "/null" as NullPage -> NullEmitter
 }
+
+orbital Api = Server.orbitals.HttpServerOrbital {}

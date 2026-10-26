@@ -535,6 +535,7 @@ fn fingerprint(packages: &[BehaviorPackage], pi: usize) -> anyhow::Result<String
         ("services", &data.services),
         ("binding", &data.binding_rules),
         ("types", &data.program_types),
+        ("protocols", &data.protocols),
     ] {
         feed(&mut hasher, label, text.as_bytes());
     }
