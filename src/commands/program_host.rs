@@ -787,7 +787,22 @@ impl ProgramHost {
         let resolved = crate::commands::dev::resolve_to_temp(&path)
             .map_err(|e| failure(format!("behavior/resolve: {e}")))?;
         let text = std::fs::read_to_string(&resolved).map_err(|e| failure(e.to_string()))?;
-        from_json(serde_json::from_str(&text).map_err(|e| failure(e.to_string()))?)
+        let mut program: serde_json::Value = serde_json::from_str(&text).map_err(|e| failure(e.to_string()))?;
+        with_client_metadata(&mut program);
+        from_json(program)
+    }
+}
+
+/// A resolved program is mounted by a browser kernel, which has no installed core: it carries the client metadata
+/// (`orbital_core::effects::runs_on::client_program_metadata`) beside whatever `_metadata` it already has.
+fn with_client_metadata(program: &mut serde_json::Value) {
+    let metadata = orbital_core::effects::runs_on::client_program_metadata(program.get("orbitals").unwrap_or(&serde_json::Value::Null));
+    let Some(root) = program.as_object_mut() else {
+        return;
+    };
+    let slot = root.entry("_metadata").or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    if let Some(existing) = slot.as_object_mut() {
+        existing.extend(metadata);
     }
 }
 
@@ -1945,6 +1960,29 @@ orbital O {
             host.run("behavior/source", &[missing]).is_err(),
             "control: an unknown behavior fails"
         );
+    }
+
+    #[test]
+    fn a_resolved_behavior_carries_the_client_metadata_a_browser_kernel_registers_it_with() {
+        orbital_compiler::loader::register_source_lowerer(|path, _, _| crate::lower_lolo_file(path));
+        let value = from_json(serde_json::json!({ "behavior": "almadar-std/std-retry" })).unwrap();
+        let resolved = json(&ProgramHost.run("behavior/resolve", &[value]).expect("resolve"));
+        let metadata = &resolved["_metadata"];
+        assert!(metadata["protocols"].as_array().is_some_and(|rows| !rows.is_empty()), "{metadata}");
+        assert!(metadata.get("dispatchFacts").is_some(), "{metadata}");
+        assert_eq!(
+            metadata.as_object().unwrap().iter().filter(|(k, _)| ["operatorSites", "dispatchFacts", "protocols"].contains(&k.as_str())).count(),
+            orbital_core::effects::runs_on::client_program_metadata(&resolved["orbitals"]).len(),
+            "the same metadata the served client program carries"
+        );
+    }
+
+    #[test]
+    fn edge_a_resolved_program_keeps_the_metadata_it_already_carries() {
+        let mut program = serde_json::json!({ "name": "P", "orbitals": [], "_metadata": { "provenance": "kept" } });
+        with_client_metadata(&mut program);
+        assert_eq!(program["_metadata"]["provenance"], "kept");
+        assert!(program["_metadata"].get("protocols").is_some());
     }
 
     #[test]
