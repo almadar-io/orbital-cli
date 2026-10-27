@@ -13,11 +13,9 @@ pub(crate) fn resolve_to_temp(path: &std::path::Path) -> anyhow::Result<PathBuf>
 /// [`resolve_to_temp`] for a program already parsed: `path` is where it was read from, so its relative imports resolve.
 pub(crate) fn resolve_schema_to_temp(schema: orbital_core::OrbitalSchema, path: &std::path::Path) -> anyhow::Result<PathBuf> {
     let options = orbital_compiler::CompilerOptions::from_env();
-    let (mut resolved, mut lazy) =
+    let (resolved, lazy) =
         orbital_compiler::phases::lazy::resolve_program_with_path(without_proven(schema)?, &options, Some(path))
             .map_err(|e| anyhow::anyhow!("resolve {}: {e}", path.display()))?;
-    orbital_compiler::phases::validation::effect::mark_proven_program(&mut resolved);
-    mark_proven_lazy(&mut lazy);
     // One directory per call: programs resolved concurrently in one process (the runner, its tests) never share files.
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -38,16 +36,9 @@ pub(crate) fn resolve_schema_to_temp(schema: orbital_core::OrbitalSchema, path: 
 /// `schema` with every `proven` mark removed, wherever it is written: a program is resolved from its own code, never
 /// trusted for what an earlier resolve proved (G-CROSS-335).
 fn without_proven(schema: orbital_core::OrbitalSchema) -> anyhow::Result<orbital_core::OrbitalSchema> {
-    let mut code: orbital_core::schema::SExpression = serde_json::from_value(serde_json::to_value(&schema)?)?;
-    code.strip_proven();
-    Ok(serde_json::from_value(serde_json::to_value(&code)?)?)
-}
-
-fn mark_proven_lazy(lazy: &mut [orbital_compiler::phases::lazy::ResolvedLazy]) {
-    for item in lazy {
-        orbital_compiler::phases::validation::effect::mark_proven_program(&mut item.schema);
-        mark_proven_lazy(&mut item.lazy);
-    }
+    let mut code = serde_json::to_value(&schema)?;
+    orbital_core::schema::SExpression::strip_proven_json(&mut code);
+    Ok(serde_json::from_value(code)?)
 }
 
 /// [`resolve_to_temp`] for a command program: one std ships is resolved once per state of what it depends on and
@@ -335,13 +326,26 @@ mod tests {
             }], "pages": [] }] })
         };
         let schema: orbital_core::OrbitalSchema =
-            serde_json::from_value(forged(serde_json::json!(["set", "@entity.n", ["proven", [0], ["str/upper", "@payload.x"]]]))).unwrap();
+            serde_json::from_value(forged(serde_json::json!(["set", "@entity.n", ["proven", [0], "str/upper", "@payload.x"]]))).unwrap();
         let expected: orbital_core::OrbitalSchema =
             serde_json::from_value(forged(serde_json::json!(["set", "@entity.n", ["str/upper", "@payload.x"]]))).unwrap();
         assert_eq!(
             serde_json::to_value(without_proven(schema).unwrap()).unwrap(),
             serde_json::to_value(expected).unwrap()
         );
+    }
+
+    #[test]
+    fn stripping_keeps_integer_fields_integers() {
+        let schema: orbital_core::OrbitalSchema = serde_json::from_value(serde_json::json!({
+            "name": "App", "typeContractVersion": 1,
+            "orbitals": [{ "name": "O",
+                "entity": { "name": "E", "persistence": "runtime", "fields": [{ "name": "id", "type": "string", "required": true }] },
+                "traits": [], "pages": [] }]
+        }))
+        .unwrap();
+        let stripped = serde_json::to_value(without_proven(schema).unwrap()).unwrap();
+        assert_eq!(stripped["typeContractVersion"], serde_json::json!(1));
     }
 
     #[test]
