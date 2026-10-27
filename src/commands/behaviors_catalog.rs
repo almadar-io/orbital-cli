@@ -46,6 +46,9 @@ struct BehaviorValueOut {
 pub(crate) struct CatalogEntryOut {
     behavior: String,
     package: String,
+    /// The registry prefix the behavior is listed under (`behavior` is `<prefix>/<name>`); its topic rows carry it.
+    #[serde(skip)]
+    prefix: String,
     topic: String,
     level: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -55,11 +58,42 @@ pub(crate) struct CatalogEntryOut {
     pattern: Option<String>,
     description: String,
     capabilities: Vec<String>,
-    traits: Vec<TraitValueOut>,
+    /// Absent in a listing asked for without traits (`behavior/catalog` `traits: false`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    traits: Option<Vec<TraitValueOut>>,
     /// The behavior as a value ready to embed or store (`behavior` typed).
     value: BehaviorValueOut,
     vectors: BTreeMap<String, Vec<f64>>,
     model: String,
+}
+
+impl CatalogEntryOut {
+    /// This entry without its traits, for a listing that shows entries and fetches a behavior when it is opened.
+    pub(crate) fn without_traits(self) -> Self {
+        Self { traits: None, ..self }
+    }
+}
+
+/// One package and topic of a listing and how many of its entries fall in it (`behavior/catalog` `topics: true`).
+#[derive(Serialize)]
+pub(crate) struct CatalogTopicOut {
+    package: String,
+    /// The registry folder of the topic is `<prefix>/<topic>`.
+    prefix: String,
+    topic: String,
+    count: usize,
+}
+
+/// The topics of `entries`, each once in the order it first appears, with its count.
+pub(crate) fn topics_of(entries: &[CatalogEntryOut]) -> Vec<CatalogTopicOut> {
+    let mut topics: Vec<CatalogTopicOut> = Vec::new();
+    for entry in entries {
+        match topics.iter_mut().find(|t| t.package == entry.package && t.topic == entry.topic) {
+            Some(topic) => topic.count += 1,
+            None => topics.push(CatalogTopicOut { package: entry.package.clone(), prefix: entry.prefix.clone(), topic: entry.topic.clone(), count: 1 }),
+        }
+    }
+    topics
 }
 
 struct Scope {
@@ -119,12 +153,26 @@ pub(crate) fn run_catalog(
     exposure: Vec<String>,
     json: bool,
     no_vectors: bool,
+    no_traits: bool,
+    topics: bool,
 ) -> anyhow::Result<()> {
     let out = if no_vectors {
         catalog_with(&paths, &exposure, Vectors::Omit, None)?
     } else {
         catalog(&paths, &exposure)?
     };
+    if topics {
+        let topics = topics_of(&out);
+        if json {
+            println!("{}", serde_json::to_string_pretty(&topics)?);
+        } else {
+            for t in topics {
+                println!("{:<24} {:<24} {}", t.package, t.topic, t.count);
+            }
+        }
+        return Ok(());
+    }
+    let out: Vec<CatalogEntryOut> = if no_traits { out.into_iter().map(CatalogEntryOut::without_traits).collect() } else { out };
     if json {
         println!("{}", serde_json::to_string_pretty(&out)?);
     } else {
@@ -241,13 +289,14 @@ pub(crate) fn catalog_with(
                     },
                     behavior: key,
                     package: pkg.name.clone(),
+                    prefix: pkg.prefix.clone(),
                     topic: entry.topic.clone(),
                     level: entry.level.clone(),
                     exposure: entry.exposure.clone(),
                     pattern: entry.pattern.clone(),
                     description: entry.description.clone(),
                     capabilities: capability_phrases(entry.capabilities.as_deref()),
-                    traits,
+                    traits: Some(traits),
                     vectors: BTreeMap::new(),
                     model: String::new(),
                 },
@@ -1541,5 +1590,55 @@ mod uses_of_tests {
             { "name": "A", "entity": { "name": "A", "fields": [] }, "traits": [], "pages": [] }
         ] }));
         assert!(uses_of(&s).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod listing_shape_tests {
+    use super::*;
+
+    fn entry(behavior: &str, package: &str, topic: &str) -> CatalogEntryOut {
+        CatalogEntryOut {
+            behavior: behavior.to_string(),
+            package: package.to_string(),
+            prefix: format!("{package}-prefix"),
+            topic: topic.to_string(),
+            level: "atom".to_string(),
+            exposure: None,
+            pattern: None,
+            description: String::new(),
+            capabilities: Vec::new(),
+            traits: Some(vec![TraitValueOut { behavior: behavior.to_string(), trait_name: "T".to_string() }]),
+            value: BehaviorValueOut { behavior: behavior.to_string() },
+            vectors: BTreeMap::new(),
+            model: String::new(),
+        }
+    }
+
+    #[test]
+    fn topics_count_each_package_and_topic_once_in_first_appearance_order() {
+        let entries = [entry("a", "std", "ui/core"), entry("b", "std", "net"), entry("c", "std", "ui/core"), entry("d", "app", "ui/core")];
+        let topics = serde_json::to_value(topics_of(&entries)).unwrap();
+        assert_eq!(
+            topics,
+            serde_json::json!([
+                { "package": "std", "prefix": "std-prefix", "topic": "ui/core", "count": 2 },
+                { "package": "std", "prefix": "std-prefix", "topic": "net", "count": 1 },
+                { "package": "app", "prefix": "app-prefix", "topic": "ui/core", "count": 1 }
+            ]),
+            "a topic of another package is its own row"
+        );
+        assert_eq!(serde_json::to_value(topics_of(&[])).unwrap(), serde_json::json!([]), "control: no entries, no topics");
+    }
+
+    #[test]
+    fn an_entry_without_traits_omits_the_field_and_keeps_the_rest() {
+        let full = serde_json::to_value(entry("a", "std", "net")).unwrap();
+        let bare = serde_json::to_value(entry("a", "std", "net").without_traits()).unwrap();
+        assert!(full.get("traits").is_some(), "control: a full entry carries its traits");
+        assert!(bare.get("traits").is_none(), "the traits are omitted");
+        let mut without = full.as_object().unwrap().clone();
+        without.remove("traits");
+        assert_eq!(serde_json::Value::Object(without), bare, "everything else is unchanged");
     }
 }

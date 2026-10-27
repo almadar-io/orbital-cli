@@ -199,6 +199,12 @@ enum BehaviorsCommand {
         /// Leave out the vectors (and the embedding model): no vector store or provider is read.
         #[arg(long)]
         no_vectors: bool,
+        /// Leave out each entry's trait values (`behavior/catalog` `traits: false`).
+        #[arg(long)]
+        no_traits: bool,
+        /// Print each package and topic once with how many entries it holds (`CatalogTopic[]`), not the entries.
+        #[arg(long)]
+        topics: bool,
     },
     /// The texts an installed package embeds, one `{ key, text, hash }` each: the organism
     /// text, its `<name>#capabilities` text and every knob text, in embed order.
@@ -359,7 +365,9 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
                 exposure,
                 json,
                 no_vectors,
-            } => commands::run_catalog(paths, exposure, json, no_vectors),
+                no_traits,
+                topics,
+            } => commands::run_catalog(paths, exposure, json, no_vectors, no_traits, topics),
             BehaviorsCommand::Texts { paths, kind, json: _ } => commands::run_texts(paths, kind),
             BehaviorsCommand::Describe {
                 spec,

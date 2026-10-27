@@ -281,7 +281,7 @@ pub(crate) fn run_command_program_anchored(
     cwd: &Path,
     anchors: Option<orbital_core::runtime::os_host::OsAnchors>,
 ) -> anyhow::Result<CommandAnswer> {
-    let resolved = crate::commands::dev::resolve_to_temp(program)?;
+    let resolved = crate::commands::dev::resolve_command_to_temp(program)?;
     let host = orbital_shell_rust::host::SubstratePort(std::sync::Arc::new(
         crate::commands::program_host::ProgramHost,
     ));

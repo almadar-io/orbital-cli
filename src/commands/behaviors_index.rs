@@ -496,7 +496,7 @@ fn derive(
 // cache
 // ---------------------------------------------------------------------------
 
-fn derived_dir() -> PathBuf {
+pub(crate) fn derived_dir() -> PathBuf {
     match std::env::var_os("ALMADAR_DERIVED_CACHE") {
         Some(d) if !d.is_empty() => PathBuf::from(d),
         _ => PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
@@ -505,19 +505,15 @@ fn derived_dir() -> PathBuf {
     }
 }
 
-fn feed(hasher: &mut Sha256, label: &str, bytes: &[u8]) {
+pub(crate) fn feed(hasher: &mut Sha256, label: &str, bytes: &[u8]) {
     hasher.update((label.len() as u64).to_le_bytes());
     hasher.update(label.as_bytes());
     hasher.update((bytes.len() as u64).to_le_bytes());
     hasher.update(bytes);
 }
 
-/// What the derived index of `packages[pi]` depends on: the rules, this binary, the installed language
-/// data, and the contents of the package's tree, its `.lolo` mirror and its hand-authored lists, plus
-/// every other package's unless it is the substrate (std never composes from another package).
-pub(crate) fn fingerprint(packages: &[BehaviorPackage], pi: usize) -> anyhow::Result<String> {
-    let mut hasher = Sha256::new();
-    feed(&mut hasher, "rules", INDEX_RULES.as_bytes());
+/// What every derived artifact depends on besides its sources: this binary and the installed language data.
+pub(crate) fn feed_toolchain(hasher: &mut Sha256) -> anyhow::Result<()> {
     let exe = std::env::current_exe()?;
     let meta = std::fs::metadata(&exe)?;
     let modified = meta
@@ -525,7 +521,7 @@ pub(crate) fn fingerprint(packages: &[BehaviorPackage], pi: usize) -> anyhow::Re
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    feed(&mut hasher, "exe", format!("{}:{modified}", meta.len()).as_bytes());
+    feed(hasher, "exe", format!("{}:{modified}", meta.len()).as_bytes());
     let data = orbital_core::language_data::language_data()
         .map_err(|e| anyhow::anyhow!("{}: {e}", e.code()))?;
     for (label, text) in [
@@ -537,8 +533,18 @@ pub(crate) fn fingerprint(packages: &[BehaviorPackage], pi: usize) -> anyhow::Re
         ("types", &data.program_types),
         ("protocols", &data.protocols),
     ] {
-        feed(&mut hasher, label, text.as_bytes());
+        feed(hasher, label, text.as_bytes());
     }
+    Ok(())
+}
+
+/// What the derived index of `packages[pi]` depends on: the rules, this binary, the installed language
+/// data, and the contents of the package's tree, its `.lolo` mirror and its hand-authored lists, plus
+/// every other package's unless it is the substrate (std never composes from another package).
+pub(crate) fn fingerprint(packages: &[BehaviorPackage], pi: usize) -> anyhow::Result<String> {
+    let mut hasher = Sha256::new();
+    feed(&mut hasher, "rules", INDEX_RULES.as_bytes());
+    feed_toolchain(&mut hasher)?;
     let substrate = packages[pi].name == STD_PACKAGE;
     for (i, pkg) in packages.iter().enumerate() {
         if i != pi && substrate {

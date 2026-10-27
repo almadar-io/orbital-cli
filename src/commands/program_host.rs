@@ -684,7 +684,14 @@ impl ProgramHost {
         let entries = catalog_with(&paths, &exposure, vectors, user_dir)
             .map_err(|e| failure(format!("behavior/catalog: {e}")))?;
         let listed = started.elapsed().as_millis() as u64;
-        let answer = from_json(serde_json::to_value(entries).map_err(|e| failure(e.to_string()))?);
+        let shaped = if option_flag(options, "topics") == Some(true) {
+            serde_json::to_value(crate::commands::behaviors_catalog::topics_of(&entries))
+        } else if option_flag(options, "traits") == Some(false) {
+            serde_json::to_value(entries.into_iter().map(crate::commands::behaviors_catalog::CatalogEntryOut::without_traits).collect::<Vec<_>>())
+        } else {
+            serde_json::to_value(entries)
+        };
+        let answer = from_json(shaped.map_err(|e| failure(e.to_string()))?);
         tracing::debug!(target: orbital_core::logging::ns::CLI, listed_ms = listed, total_ms = started.elapsed().as_millis() as u64, "behavior/catalog answered");
         answer
     }

@@ -322,7 +322,7 @@ pub(crate) fn run_cascade_with(path: &Path, steps: &serde_json::Value, live: boo
         let viewing = viewer.map(|user| kernel.enter_viewer(user));
         let outcomes = match &live_host {
             Some(host) => {
-                let played = host.dispatch(trait_name, "singleton", event, payload).map_err(|e| e.to_string());
+                let played = host.dispatch(trait_name, orbital_core::RUNTIME_SINGLETON, event, payload).map_err(|e| e.to_string());
                 settle_open_calls(host, settle_ms);
                 played
             }
@@ -374,14 +374,14 @@ pub(crate) fn run_cascade_with(path: &Path, steps: &serde_json::Value, live: boo
             })
             .collect();
         let states: serde_json::Map<String, serde_json::Value> = kernel
-            .trait_snapshot(Some("singleton"))
+            .trait_snapshot(None)
             .into_iter()
             .map(|(name, (state, _))| (name, serde_json::Value::String(state)))
             .collect();
         reports.push(serde_json::json!({ "outcomes": outcomes, "states": states, "entities": entities, "entityAfter": entity_after }));
     }
     let dispatch_modes: serde_json::Map<String, serde_json::Value> = kernel
-        .trait_snapshot(Some("singleton"))
+        .trait_snapshot(None)
         .into_iter()
         .map(|(name, (_, mode))| {
             (
