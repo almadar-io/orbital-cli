@@ -313,12 +313,14 @@ fn run_command(args: &[String]) -> anyhow::Result<i32> {
     if let Some(command) = program {
         let answer = tracing::info_span!(target: ns::CLI, "program", hook = %command.command)
             .in_scope(|| commands::program_command::run_command_program(&command.program, &command.command, &command.argv, &cwd))?;
+        drop(command);
         if answer.headers.contains_key("orb-run") {
             if let Some(text) = answer.stderr.as_deref().filter(|t| !t.is_empty()) {
                 eprintln!("{text}");
             }
-            commands::program_command::run_handoff(&answer)?;
-            return Ok(answer.code);
+            let code = answer.code;
+            commands::program_command::run_handoff(answer)?;
+            return Ok(code);
         }
         answer.write_to(&mut std::io::stdout(), &mut std::io::stderr())?;
         return Ok(answer.code);

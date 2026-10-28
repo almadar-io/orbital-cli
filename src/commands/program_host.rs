@@ -30,7 +30,7 @@ fn from_json(value: serde_json::Value) -> Result<Value, SubstrateFailure> {
 
 /// The `program/read` modes `options` turns on, in the order they are documented.
 fn read_modes(options: Option<&Value>) -> Vec<&'static str> {
-    ["stamp", "inspect", "embeds", "resolve", "references"].into_iter().filter(|mode| option_flag(options, mode) == Some(true)).collect()
+    ["stamp", "inspect", "embeds", "resolve", "references", "findings"].into_iter().filter(|mode| option_flag(options, mode) == Some(true)).collect()
 }
 
 /// A boolean option of an op's options argument; absent or not a boolean is `None`.
@@ -1306,7 +1306,7 @@ impl SubstrateHandler for ProgramHost {
         match op {
             "program/read" => match args.first() {
                 Some(Value::String(_)) if read_modes(args.get(1)).len() > 1 => Err(failure(format!(
-                    "program/read: unsupported option \"{}\" with `{}`: one of inspect, embeds, resolve, stamp, references per call",
+                    "program/read: unsupported option \"{}\" with `{}`: one of inspect, embeds, resolve, stamp, references, findings per call",
                     read_modes(args.get(1))[1],
                     read_modes(args.get(1))[0]
                 ))),
@@ -1318,6 +1318,21 @@ impl SubstrateHandler for ProgramHost {
                     let embeds = orbital_lolo::embeds::inline_embeds(text)
                         .map_err(|e| failure(format!("program/read: {e}")))?;
                     from_json(serde_json::to_value(embeds).map_err(|e| failure(e.to_string()))?)
+                }
+                Some(Value::String(text)) if option_flag(args.get(1), "findings") == Some(true) => {
+                    let found: Vec<serde_json::Value> = crate::commands::validate::source_findings(text)
+                        .into_iter()
+                        .map(|f| {
+                            serde_json::json!({
+                                "code": f.code,
+                                "path": f.path,
+                                "message": f.message,
+                                "suggestion": f.suggestion.unwrap_or_default(),
+                                "severity": "warning",
+                            })
+                        })
+                        .collect();
+                    from_json(serde_json::Value::Array(found))
                 }
                 Some(Value::String(_)) if option_flag(args.get(1), "resolve") == Some(true) => {
                     Self::read_resolved(&to_json(&args[1]))
@@ -1601,8 +1616,23 @@ orbital O {
         };
         assert!(read(serde_json::json!({ "references": true, "path": "note.orb" })).contains("absolute `path`"));
         assert!(read(serde_json::json!({ "references": true, "path": "/x/note.orb", "bogus": true })).contains("unsupported option \"bogus\""));
-        assert!(read(serde_json::json!({ "references": true, "stamp": true, "path": "/x/note.orb" })).contains("one of inspect, embeds, resolve, stamp, references per call"));
+        assert!(read(serde_json::json!({ "references": true, "stamp": true, "path": "/x/note.orb" })).contains("one of inspect, embeds, resolve, stamp, references, findings per call"));
         assert!(read(serde_json::json!({ "references": true, "path": "/nowhere/note.orb" })).contains("Failed to read"));
+    }
+
+    #[test]
+    fn read_with_findings_surfaces_the_l1_warnings_the_lowered_program_loses() {
+        let body = "orbital Foo {\n  entity Bar [runtime] {\n    id : string!\n  }\n}\n";
+        let options = from_json(serde_json::json!({ "findings": true })).unwrap();
+        let read = |text: String| json(&ProgramHost.run("program/read", &[Value::string(text), options.clone()]).expect("reads"));
+        let legacy = read(format!("app Foo \"1.0.0\"\n{body}"));
+        assert_eq!(legacy.as_array().map(Vec::len), Some(1), "{legacy}");
+        assert_eq!(legacy[0]["code"], "ORB_L_APP_HEADER_LEGACY");
+        assert_eq!(legacy[0]["severity"], "warning");
+        assert_eq!(legacy[0]["path"], "app:1");
+        assert_eq!(read(format!("app Foo [version: \"1.0.0\"]\n{body}")), serde_json::json!([]), "control: the bracket header is clean");
+        let report_input = serde_json::json!({ "findings": legacy });
+        assert!(serde_json::from_value::<Vec<crate::commands::validate::ProgramFinding>>(report_input["findings"].clone()).is_ok(), "the list feeds program/validate's `findings` as is");
     }
 
     #[test]

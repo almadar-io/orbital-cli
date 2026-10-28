@@ -281,6 +281,14 @@ pub(crate) fn run_command_program_anchored(
     cwd: &Path,
     anchors: Option<orbital_core::runtime::os_host::OsAnchors>,
 ) -> anyhow::Result<CommandAnswer> {
+    let runtime = boot_command_program(program, anchors)?;
+    Ok(answer_command(&runtime, command, argv, cwd))
+}
+
+fn boot_command_program(
+    program: &Path,
+    anchors: Option<orbital_core::runtime::os_host::OsAnchors>,
+) -> anyhow::Result<std::sync::Arc<orbital_shell_rust::host::Host>> {
     let resolved = crate::commands::dev::resolve_command_to_temp(program)?;
     let host = orbital_shell_rust::host::SubstratePort(std::sync::Arc::new(
         crate::commands::program_host::ProgramHost,
@@ -290,12 +298,20 @@ pub(crate) fn run_command_program_anchored(
         anchors,
         ..orbital_shell_rust::host::HostConfig::default()
     };
-    let runtime = orbital_shell_rust::host::boot::boot_file_with(
+    orbital_shell_rust::host::boot::boot_file_with(
         &resolved,
         &std::env::vars().collect(),
         false,
         config,
-    )?;
+    )
+}
+
+fn answer_command(
+    runtime: &orbital_shell_rust::host::Host,
+    command: &str,
+    argv: &[String],
+    cwd: &Path,
+) -> CommandAnswer {
     let body = serde_json::json!({ "argv": argv, "cwd": cwd.display().to_string() }).to_string();
     let answer = runtime.deliver_inbound_awaiting(
         &hook_name(command),
@@ -303,12 +319,12 @@ pub(crate) fn run_command_program_anchored(
         &body,
         None,
     );
-    Ok(CommandAnswer {
+    CommandAnswer {
         code: exit_code(answer.status),
         body: answer.body,
         stderr: answer.stderr,
         headers: answer.headers.unwrap_or_default(),
-    })
+    }
 }
 
 /// `orb run <program>`, booted: the program on the substrate host, `INIT` mounted on every trait.
@@ -354,8 +370,11 @@ pub(crate) fn declares_server_endpoint(schema: &orbital_core::OrbitalSchema) -> 
 
 /// Run the program a cli command handed back (`orb-run` in its answer's headers), as the bootloader runs every program.
 /// `orb-run: server` boots the composed app in the body as `orb serve` does: catalogs beside `orb-app`, `INIT` mounted on the server side, held until a signal.
-pub(crate) fn run_handoff(answer: &CommandAnswer) -> anyhow::Result<()> {
-    let header = |name: &str| answer.headers.get(name).map(String::as_str);
+/// Takes the answer by value: its body is the whole resolved program as text, freed once parsed rather than held for
+/// the server's lifetime.
+pub(crate) fn run_handoff(answer: CommandAnswer) -> anyhow::Result<()> {
+    let CommandAnswer { body, headers, .. } = answer;
+    let header = |name: &str| headers.get(name).map(String::as_str);
     match header("orb-run") {
         Some("server") => {}
         other => {
@@ -365,8 +384,9 @@ pub(crate) fn run_handoff(answer: &CommandAnswer) -> anyhow::Result<()> {
     let app = header("orb-app").ok_or_else(|| {
         anyhow::anyhow!("orb-run: server needs orb-app, the resolved app beside its catalogs")
     })?;
-    let schema: orbital_core::OrbitalSchema = serde_json::from_str(&answer.body)
+    let schema: orbital_core::OrbitalSchema = serde_json::from_str(&body)
         .map_err(|e| anyhow::anyhow!("orb-run: server: the body is not a program: {e}"))?;
+    drop(body);
     let locales = schema.locales.clone().unwrap_or_default();
     let catalogs = orbital_shell_rust::host::boot::read_catalogs(Path::new(app), &locales)?;
     let host = orbital_shell_rust::host::SubstratePort(std::sync::Arc::new(
@@ -472,6 +492,28 @@ orbital EchoOrbital {
         assert_eq!([200, 201, 299].map(exit_code), [0, 0, 0]);
         assert_eq!([400, 404, 422].map(exit_code), [2, 2, 2]);
         assert_eq!([500, 503, 100, 302].map(exit_code), [1, 1, 1, 1]);
+    }
+
+    #[test]
+    fn a_command_programs_host_is_freed_once_it_has_answered() {
+        let (cwd, store) = project("freed", "cli");
+        let program = find_command_program("echo", &cwd, &store).unwrap().expect("the cli program is found");
+        let runtime = boot_command_program(&program, None).unwrap();
+        let host = std::sync::Arc::downgrade(&runtime);
+        let answer = answer_command(&runtime, "echo", &["hi".into()], &cwd);
+        assert_eq!(answer.body, "hi");
+        drop(runtime);
+        assert!(host.upgrade().is_none(), "nothing may keep the command program's host alive after it answered");
+    }
+
+    #[test]
+    fn control_a_held_command_host_is_still_alive() {
+        let (cwd, store) = project("held", "cli");
+        let program = find_command_program("echo", &cwd, &store).unwrap().expect("the cli program is found");
+        let runtime = boot_command_program(&program, None).unwrap();
+        let host = std::sync::Arc::downgrade(&runtime);
+        answer_command(&runtime, "echo", &["hi".into()], &cwd);
+        assert!(host.upgrade().is_some());
     }
 
     #[test]

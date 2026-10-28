@@ -799,7 +799,7 @@ fn knob_field(
 }
 
 fn knob_fields(
-    config: Option<&HashMap<String, orbital_core::schema::ConfigField>>,
+    config: Option<&orbital_core::collections::IndexMap<String, orbital_core::schema::ConfigField>>,
     vocab: &EventVocab<'_>,
 ) -> anyhow::Result<Vec<KnobField>> {
     let mut keys: Vec<(&String, &orbital_core::schema::ConfigField)> =
@@ -924,7 +924,7 @@ fn uses_of(schema: &orbital_core::schema::OrbitalSchema) -> Vec<String> {
 }
 
 fn declared_config_of(
-    config: Option<&HashMap<String, orbital_core::schema::ConfigField>>,
+    config: Option<&orbital_core::collections::IndexMap<String, orbital_core::schema::ConfigField>>,
 ) -> DeclaredConfigOut {
     config
         .into_iter()
