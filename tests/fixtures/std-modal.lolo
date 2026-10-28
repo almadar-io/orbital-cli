@@ -49,7 +49,7 @@ orbital ModalRecordOrbital {
       ;; (no silent first-row fallback). The @config.mode literal is
       ;; substituted at molecule inline time — atoms validate this with
       ;; @config allowed-but-unresolved.
-      OPEN -> open when (or (= @config.mode create) (validate/required ?row) (!= (str/default (object/get @entity.seedRow id) "") ""))
+      OPEN -> open when (or (= @config.mode create) (validate/required ?row) (!= (default (object/get @entity.seedRow id) "") ""))
         (set @entity.id ?id)
         (render-ui @config.detailSlot {
           children: [{

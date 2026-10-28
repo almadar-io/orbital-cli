@@ -803,7 +803,7 @@
                   [
                     "!=",
                     [
-                      "str/default",
+                      "default",
                       [
                         "object/get",
                         "@entity.seedRow",
