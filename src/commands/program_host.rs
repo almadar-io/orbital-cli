@@ -1486,6 +1486,24 @@ orbital O {
     }
 
     #[test]
+    fn read_with_resolve_answers_a_resolved_orb_as_it_is() {
+        orbital_compiler::loader::register_source_lowerer(|path, _, _| crate::lower_lolo_file(path));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = dir.path().join("note.lolo");
+        std::fs::write(&source, NOTE).unwrap();
+        let resolved_text = crate::commands::parse::resolved_text(&source, None).expect("orb resolve");
+        let resolved_file = dir.path().join("note.orb");
+        std::fs::write(&resolved_file, &resolved_text).unwrap();
+        let read = |file: &std::path::Path| {
+            let options = from_json(serde_json::json!({ "resolve": true, "path": file.display().to_string() })).unwrap();
+            json(&ProgramHost.run("program/read", &[Value::String(String::new().into()), options]).expect("resolves"))
+        };
+        let answer = read(&resolved_file);
+        assert!(answer["program"]["resolved"]["orb"].is_string(), "{answer}");
+        assert_eq!(answer["program"], read(&source)["program"]);
+    }
+
+    #[test]
     fn read_with_resolve_and_no_text_answers_a_program_with_locales() {
         orbital_compiler::loader::register_source_lowerer(|path, _, _| crate::lower_lolo_file(path));
         let dir = tempfile::tempdir().expect("tempdir");

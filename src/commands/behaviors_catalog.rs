@@ -705,7 +705,7 @@ fn field_type_name(t: &orbital_core::schema::FieldType) -> anyhow::Result<String
 }
 
 fn sorted_fields(
-    props: &HashMap<String, orbital_core::schema::FieldDefinition>,
+    props: &orbital_core::collections::IndexMap<String, orbital_core::schema::FieldDefinition>,
     events: &HashSet<String>,
 ) -> anyhow::Result<Vec<KnobField>> {
     let mut keys: Vec<&String> = props.keys().collect();

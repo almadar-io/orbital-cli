@@ -737,7 +737,19 @@ pub(crate) fn validate_schema_core(
     let session = orbital_compiler::phases::inline::InlineSession::default();
     let mut inline_opts = default_opts.inline.clone();
     inline_opts.session = Some(session.clone());
-    if let Err(e) = tracing::info_span!(target: ns::CLI, "inline").in_scope(|| inline_schema_with_orbital_diagnostics(
+    let resolved_input = match orbital_compiler::phases::already_resolved(&schema, Some(path)) {
+        Ok(resolved) => resolved,
+        Err(e) => {
+            errors.push(Finding::new(
+                "ORB_RESOLVED_CONTRACT".to_string(),
+                String::new(),
+                e.to_string(),
+                None,
+            ));
+            return CoreValidation { errors, warnings, inlined: None };
+        }
+    };
+    if !resolved_input { if let Err(e) = tracing::info_span!(target: ns::CLI, "inline").in_scope(|| inline_schema_with_orbital_diagnostics(
         &mut schema,
         &inline_opts,
         Some(path),
@@ -819,6 +831,7 @@ pub(crate) fn validate_schema_core(
         };
     }
     tracing::info_span!(target: ns::CLI, "enrich").in_scope(|| enrich_schema(&mut schema, &default_opts.enrichment));
+    }
 
     errors.extend(used_secret_findings(&session));
 

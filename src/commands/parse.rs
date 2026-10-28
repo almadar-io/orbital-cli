@@ -2,30 +2,33 @@
 
 use crate::utils::{detect_syntax, InputSyntax};
 
-/// What `orb resolve` prints for `path`; with `output`, also written there with its catalogs and
-/// lazy behaviors. Without `output`, a program with lazy behaviors or locales is refused.
+/// The program at `path`, parsed: `.lolo` source, an unresolved `.orb`, or a resolved `.orb` (it carries `resolved`).
+fn parsed_program(path: &std::path::Path) -> anyhow::Result<orbital_core::schema::OrbitalSchema> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("Failed to read {}: {}", path.display(), e))?;
+    crate::utils::parse_schema_auto(&content, &path.display().to_string())
+        .map_err(|e| anyhow::anyhow!("Failed to parse {}: {}", path.display(), e))
+}
+
+/// `schema` (parsed from `path`) resolved as `orb resolve` resolves it, with the lazy behaviors it splits off;
+/// a program already carrying `resolved` is returned as it is.
+fn resolved_from(
+    schema: orbital_core::schema::OrbitalSchema,
+    path: &std::path::Path,
+) -> anyhow::Result<(orbital_core::schema::OrbitalSchema, Vec<orbital_compiler::phases::lazy::ResolvedLazy>)> {
+    orbital_compiler::phases::lazy::resolve_program_with_path(
+        schema,
+        &orbital_compiler::CompilerOptions::from_env(),
+        Some(path),
+    )
+    .map_err(|e| anyhow::anyhow!("Failed to resolve {}: {}", path.display(), e))
+}
+
 /// The program at `path` resolved as `orb resolve` resolves it, with the lazy behaviors it splits off.
 pub(crate) fn resolved_program(
     path: &std::path::Path,
 ) -> anyhow::Result<(orbital_core::schema::OrbitalSchema, Vec<orbital_compiler::phases::lazy::ResolvedLazy>)> {
-    use crate::utils::parse_schema_auto;
-    use orbital_compiler::{resolve_schema_with_path, CompilerOptions};
-
-    let options = CompilerOptions::from_env();
-
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| anyhow::anyhow!("Failed to read {}: {}", path.display(), e))?;
-    let schema = parse_schema_auto(&content, &path.display().to_string())
-        .map_err(|e| anyhow::anyhow!("Failed to parse {}: {}", path.display(), e))?;
-    let mut schema = schema;
-    let mut lazy =
-        orbital_compiler::phases::lazy::split_lazy_and_resolve(&mut schema, &options, Some(path))
-            .map_err(|e| anyhow::anyhow!("Failed to resolve {}: {}", path.display(), e))?;
-    let mut resolved = resolve_schema_with_path(schema, &options, Some(path))
-        .map_err(|e| anyhow::anyhow!("Failed to resolve {}: {}", path.display(), e))?;
-    orbital_compiler::phases::reflect::fold_program(&mut resolved, &mut lazy, Some(path))
-        .map_err(|e| anyhow::anyhow!("Failed to resolve {}: {}", path.display(), e))?;
-    Ok((resolved, lazy))
+    resolved_from(parsed_program(path)?, path)
 }
 
 /// The resolved program at `path` and each `uses lazy` behavior split off it, as `{ program, lazy: [{ orbital, program }] }`,
@@ -73,10 +76,18 @@ pub(crate) fn resolved_text(
     path: &std::path::Path,
     output: Option<&std::path::Path>,
 ) -> anyhow::Result<String> {
-    let (resolved, lazy) = resolved_program(path)?;
+    let schema = parsed_program(path)?;
+    let input_resolved = schema.resolved.is_some();
+    let (resolved, lazy) = resolved_from(schema, path)?;
     let json = resolved_json(&resolved)?;
 
     match output {
+        // A resolved input's catalogs and lazy behaviors were written beside it when it was resolved; only the program text is written.
+        Some(out) if input_resolved => {
+            std::fs::write(out, &json)
+                .map_err(|e| anyhow::anyhow!("Failed to write {}: {}", out.display(), e))?;
+            tracing::info!(target: orbital_core::logging::ns::CLI, path = %out.display(), "wrote resolved schema (input already resolved; catalogs and lazy behaviors not rewritten)");
+        }
         Some(out) => {
             std::fs::write(out, &json)
                 .map_err(|e| anyhow::anyhow!("Failed to write {}: {}", out.display(), e))?;
