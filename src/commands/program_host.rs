@@ -791,10 +791,11 @@ impl ProgramHost {
     fn resolve_behavior(&self, behavior: &str) -> Result<Value, SubstrateFailure> {
         let path = crate::commands::behaviors_catalog::behavior_source_path(behavior)
             .map_err(|e| failure(format!("behavior/resolve: {e}")))?;
-        let resolved = crate::commands::dev::resolve_to_temp(&path)
+        let schema = orbital_compiler::parse_file(&path)
+            .map_err(|e| failure(format!("behavior/resolve: parse {}: {e}", path.display())))?;
+        let (resolved, _lazy) = crate::commands::dev::resolve_in_memory(schema, &path)
             .map_err(|e| failure(format!("behavior/resolve: {e}")))?;
-        let text = std::fs::read_to_string(&resolved).map_err(|e| failure(e.to_string()))?;
-        let mut program: serde_json::Value = serde_json::from_str(&text).map_err(|e| failure(e.to_string()))?;
+        let mut program = serde_json::to_value(&resolved).map_err(|e| failure(e.to_string()))?;
         with_client_metadata(&mut program);
         from_json(program)
     }
@@ -2491,7 +2492,7 @@ orbital O {
                 "states": [{ "name": "ready", "isInitial": true }, { "name": "open" }],
                 "transitions": [
                     { "from": "ready", "to": "open", "event": "OPEN", "guard": ["=", "@entity.owner", "ann"] },
-                    { "from": "ready", "to": "open", "event": "LATE", "guard": [">", "@now", 1000] }
+                    { "from": "ready", "to": "open", "event": "LATE", "guard": ["time/isAfter", "@now", "1970-01-01T00:00:01.000Z"] }
                 ] } }] }] }))
         .unwrap();
         let step = |extra: serde_json::Value| {
@@ -2524,7 +2525,7 @@ orbital O {
         );
         assert_eq!(
             played[2]["result"]["guard"], "fail",
-            "a pinned @now of 0 is not past 1000: {}",
+            "a pinned @now of 0 is not past one second after the epoch: {}",
             played[2]
         );
         assert_eq!(

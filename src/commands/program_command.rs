@@ -299,7 +299,7 @@ fn boot_command_program(
         ..orbital_shell_rust::host::HostConfig::default()
     };
     orbital_shell_rust::host::boot::boot_file_with(
-        &resolved,
+        &resolved.path(),
         &std::env::vars().collect(),
         false,
         config,
@@ -337,7 +337,7 @@ pub(crate) fn boot_run(
         crate::commands::program_host::ProgramHost,
     ));
     let runtime = orbital_shell_rust::host::boot::boot_file(
-        &resolved,
+        &resolved.path(),
         &std::env::vars().collect(),
         trace,
         Some(host),

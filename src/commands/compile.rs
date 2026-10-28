@@ -91,6 +91,18 @@ pub(crate) struct CompileRequest<'a> {
     pub source: Option<&'a std::path::Path>,
 }
 
+/// Writes `content` as `name` in this run's own scratch directory, creating it on first use; the directory goes when
+/// `slot` drops.
+fn scratch_file(slot: &mut Option<tempfile::TempDir>, name: &str, content: &str) -> anyhow::Result<PathBuf> {
+    let dir = match slot {
+        Some(dir) => dir,
+        None => slot.insert(crate::commands::dev::scratch_dir("orbital-compile-")?),
+    };
+    let path = dir.path().join(name);
+    std::fs::write(&path, content).map_err(|e| anyhow::anyhow!("Failed to write {}: {}", path.display(), e))?;
+    Ok(path)
+}
+
 /// The one compile pipeline: validates, generates, writes the project, and reports what `orb compile` prints.
 pub(crate) fn compile_run(request: CompileRequest) -> anyhow::Result<CompileReport> {
     let CompileRequest {
@@ -133,6 +145,7 @@ pub(crate) fn compile_run(request: CompileRequest) -> anyhow::Result<CompileRepo
 
     let is_lolo = is_lolo_ext || matches!(detect_syntax(&source_content), InputSyntax::Lolo);
 
+    let mut scratch: Option<tempfile::TempDir> = None;
     let compile_path: PathBuf = if is_lolo {
         let schema = if is_lolo_ext {
             // .lolo extension: go straight to the parser, no detection
@@ -154,12 +167,12 @@ pub(crate) fn compile_run(request: CompileRequest) -> anyhow::Result<CompileRepo
         let json = serde_json::to_string_pretty(&orbital_core::util::canonical_json(&value))
             .map_err(|e| anyhow::anyhow!("Failed to serialize lowered schema: {}", e))?;
         let target = if let Some(emit) = emit_orb {
+            std::fs::write(emit, &json)
+                .map_err(|e| anyhow::anyhow!("Failed to write lowered .orb: {}", e))?;
             emit.to_path_buf()
         } else {
-            std::env::temp_dir().join("_orbital_lolo_lowered.orb")
+            scratch_file(&mut scratch, "_orbital_lolo_lowered.orb", &json)?
         };
-        std::fs::write(&target, &json)
-            .map_err(|e| anyhow::anyhow!("Failed to write lowered .orb: {}", e))?;
         tracing::info!(target: ns::CLI, path = %target.display(), "lowered");
         target
     } else {
@@ -167,11 +180,7 @@ pub(crate) fn compile_run(request: CompileRequest) -> anyhow::Result<CompileRepo
         let content_translated = translate_schema_content(&source_content);
         let translated_path = if content_translated != source_content {
             // Schema was translated — write to temp file for compilation
-            let temp_dir = std::env::temp_dir();
-            let temp_path = temp_dir.join("_orbital_translated_schema.orb");
-            std::fs::write(&temp_path, &content_translated)
-                .map_err(|e| anyhow::anyhow!("Failed to write translated schema: {}", e))?;
-            temp_path
+            scratch_file(&mut scratch, "_orbital_translated_schema.orb", &content_translated)?
         } else {
             path.clone()
         };
@@ -277,6 +286,7 @@ fn compile_mixed(
     let content_raw = std::fs::read_to_string(path)
         .map_err(|e| anyhow::anyhow!("Failed to read schema file: {}", e))?;
 
+    let mut scratch: Option<tempfile::TempDir> = None;
     let compile_path = if matches!(detect_syntax(&content_raw), InputSyntax::Lolo) {
         // LOLO syntax in .orb file — lower to JSON temp file
         let schema =
@@ -288,20 +298,12 @@ fn compile_mixed(
             .map_err(|e| anyhow::anyhow!("Failed to serialize lowered schema: {}", e))?;
         let json = serde_json::to_string_pretty(&orbital_core::util::canonical_json(&value))
             .map_err(|e| anyhow::anyhow!("Failed to serialize lowered schema: {}", e))?;
-        let temp_dir = std::env::temp_dir();
-        let temp_path = temp_dir.join("_orbital_lolo_lowered_mixed.orb");
-        std::fs::write(&temp_path, &json)
-            .map_err(|e| anyhow::anyhow!("Failed to write lowered .orb: {}", e))?;
-        temp_path
+        scratch_file(&mut scratch, "_orbital_lolo_lowered_mixed.orb", &json)?
     } else {
         // Orb JSON — apply i18n translation
         let content_translated = translate_schema_content(&content_raw);
         if content_translated != content_raw {
-            let temp_dir = std::env::temp_dir();
-            let temp_path = temp_dir.join("_orbital_translated_schema_mixed.orb");
-            std::fs::write(&temp_path, &content_translated)
-                .map_err(|e| anyhow::anyhow!("Failed to write translated schema: {}", e))?;
-            temp_path
+            scratch_file(&mut scratch, "_orbital_translated_schema_mixed.orb", &content_translated)?
         } else {
             path.clone()
         }
@@ -536,6 +538,39 @@ fn generate_docker_compose(frontend: Option<ShellType>, backend: Option<ShellTyp
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parallel_compiles_each_read_back_their_own_lowered_program() {
+        let handles: Vec<_> = (0..16)
+            .map(|i| {
+                std::thread::spawn(move || {
+                    let mut slot = None;
+                    let own = format!("program-{i}");
+                    let path = scratch_file(&mut slot, "_orbital_lolo_lowered.orb", &own).unwrap();
+                    std::thread::yield_now();
+                    (own, path, slot)
+                })
+            })
+            .collect();
+        let runs: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        let mut seen = std::collections::BTreeSet::new();
+        for (own, path, _slot) in &runs {
+            assert_eq!(&std::fs::read_to_string(path).unwrap(), own, "a run read another run's program");
+            assert!(seen.insert(path.clone()), "two runs share {}", path.display());
+        }
+        let paths: Vec<PathBuf> = runs.iter().map(|(_, path, _)| path.clone()).collect();
+        drop(runs);
+        assert!(paths.iter().all(|p| !p.exists()), "a finished run leaves its scratch behind");
+    }
+
+    #[test]
+    fn one_run_keeps_one_scratch_directory_for_all_its_files() {
+        let mut slot = None;
+        let a = scratch_file(&mut slot, "a.orb", "A").unwrap();
+        let b = scratch_file(&mut slot, "b.orb", "B").unwrap();
+        assert_eq!(a.parent(), b.parent());
+        assert_eq!(std::fs::read_to_string(&b).unwrap(), "B");
+    }
 
     fn lazy_fixture() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))

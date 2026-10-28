@@ -2,43 +2,72 @@
 
 use std::path::{Path, PathBuf};
 
-/// Resolve a schema (Inline + Compose + Enrich) and write the resolved `.orb` to a temp
-/// file, returning its path. Native hosts parse a path; the CLI owns resolution.
-pub(crate) fn resolve_to_temp(path: &std::path::Path) -> anyhow::Result<PathBuf> {
+/// A resolved program written to a directory this run owns; the directory is removed when this is dropped, on every
+/// exit path. The name carries a random suffix, so no two runs, in one process or several, share a path.
+pub(crate) struct ResolvedProgram {
+    dir: tempfile::TempDir,
+}
+
+impl ResolvedProgram {
+    pub(crate) fn path(&self) -> PathBuf {
+        self.dir.path().join("program.orb")
+    }
+}
+
+/// A fresh directory under `parent`, named `<prefix><random>` and removed when the guard drops.
+pub(crate) fn scratch_dir_in(parent: &Path, prefix: &str) -> anyhow::Result<tempfile::TempDir> {
+    tempfile::Builder::new()
+        .prefix(prefix)
+        .tempdir_in(parent)
+        .map_err(|e| anyhow::anyhow!("create a scratch directory under {}: {e}", parent.display()))
+}
+
+/// [`scratch_dir_in`] under the system temp directory.
+pub(crate) fn scratch_dir(prefix: &str) -> anyhow::Result<tempfile::TempDir> {
+    scratch_dir_in(&std::env::temp_dir(), prefix)
+}
+
+/// Resolve a schema (Inline + Compose + Enrich) into a run-owned directory. Native hosts boot from a path; the CLI
+/// owns resolution.
+pub(crate) fn resolve_to_temp(path: &Path) -> anyhow::Result<ResolvedProgram> {
     let schema = orbital_compiler::parse_file(path)
         .map_err(|e| anyhow::anyhow!("parse {}: {e}", path.display()))?;
     resolve_schema_to_temp(schema, path)
 }
 
 /// [`resolve_to_temp`] for a program already parsed: `path` is where it was read from, so its relative imports resolve.
-pub(crate) fn resolve_schema_to_temp(schema: orbital_core::OrbitalSchema, path: &std::path::Path) -> anyhow::Result<PathBuf> {
-    let options = orbital_compiler::CompilerOptions::from_env();
-    let (resolved, lazy) =
-        orbital_compiler::phases::lazy::resolve_program_with_path(schema, &options, Some(path))
-            .map_err(|e| anyhow::anyhow!("resolve {}: {e}", path.display()))?;
-    // One directory per call: programs resolved concurrently in one process (the runner, its tests) never share files.
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let dir = std::env::temp_dir().join(format!("orbital-dev-{}-{n}", std::process::id()));
-    std::fs::create_dir_all(&dir)?;
-    let out = dir.join("program.orb");
+pub(crate) fn resolve_schema_to_temp(schema: orbital_core::OrbitalSchema, path: &Path) -> anyhow::Result<ResolvedProgram> {
+    resolve_schema_into(&std::env::temp_dir(), schema, path)
+}
+
+fn resolve_schema_into(parent: &Path, schema: orbital_core::OrbitalSchema, path: &Path) -> anyhow::Result<ResolvedProgram> {
+    let (resolved, lazy) = resolve_in_memory(schema, path)?;
+    let program = ResolvedProgram { dir: scratch_dir_in(parent, "orbital-dev-")? };
+    let out = program.path();
     std::fs::write(&out, serde_json::to_string(&resolved)?)?;
-    let program_dir = path.parent().unwrap_or(std::path::Path::new("."));
+    let program_dir = path.parent().unwrap_or(Path::new("."));
     orbital_compiler::phases::messages::write_catalogs(&out, &resolved, program_dir)?;
-    crate::commands::parse::write_lazy(
-        out.parent().unwrap_or(std::path::Path::new(".")),
-        &lazy,
-        program_dir,
-    )?;
-    Ok(out)
+    crate::commands::parse::write_lazy(program.dir.path(), &lazy, program_dir)?;
+    Ok(program)
+}
+
+/// The resolved program and its lazy behaviors, never written: for a reader that takes the program as data.
+pub(crate) fn resolve_in_memory(
+    schema: orbital_core::OrbitalSchema,
+    path: &Path,
+) -> anyhow::Result<(orbital_core::OrbitalSchema, Vec<orbital_compiler::phases::lazy::ResolvedLazy>)> {
+    let options = orbital_compiler::CompilerOptions::from_env();
+    orbital_compiler::phases::lazy::resolve_program_with_path(schema, &options, Some(path))
+        .map_err(|e| anyhow::anyhow!("resolve {}: {e}", path.display()))
 }
 
 /// [`resolve_to_temp`] for a command program: one std ships is resolved once per state of what it depends on and
 /// cached under the derived-data directory; any other program resolves as usual.
-pub(crate) fn resolve_command_to_temp(path: &Path) -> anyhow::Result<PathBuf> {
+pub(crate) fn resolve_command_to_temp(path: &Path) -> anyhow::Result<ResolvedProgram> {
     match std_command_key(path)? {
         Some((stem, key)) => cached_resolve(
             &crate::commands::behaviors_index::derived_dir().join("programs"),
+            &std::env::temp_dir(),
             &stem,
             &key,
             || resolve_to_temp(path),
@@ -136,28 +165,32 @@ fn program_stem(path: &Path) -> String {
     path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
 }
 
-/// The resolved program cached under `cache/<stem>-<key>`: a hit copies the entry to a fresh directory, a miss runs
-/// `build` and stores its directory, replacing the stem's older entries. An entry appears whole or not at all.
+/// The resolved program cached under `cache/<stem>-<key>`: a hit copies the entry to a fresh run-owned directory under
+/// `parent`, a miss runs `build` and stores its directory, replacing the stem's older entries. An entry appears whole
+/// or not at all.
 fn cached_resolve(
     cache: &Path,
+    parent: &Path,
     stem: &str,
     key: &str,
-    build: impl FnOnce() -> anyhow::Result<PathBuf>,
-) -> anyhow::Result<PathBuf> {
+    build: impl FnOnce() -> anyhow::Result<ResolvedProgram>,
+) -> anyhow::Result<ResolvedProgram> {
     let entry = cache.join(format!("{stem}-{key}"));
     if entry.join("program.orb").is_file() {
-        let dir = fresh_dir();
-        copy_tree(&entry, &dir)?;
-        return Ok(dir.join("program.orb"));
+        let program = ResolvedProgram { dir: scratch_dir_in(parent, "orbital-cmd-")? };
+        copy_tree(&entry, program.dir.path())?;
+        return Ok(program);
     }
-    let out = build()?;
-    let built = out.parent().unwrap_or(Path::new("."));
+    let program = build()?;
     std::fs::create_dir_all(cache)?;
-    let staging = cache.join(format!("{stem}-{key}.{}.tmp", std::process::id()));
-    let _ = std::fs::remove_dir_all(&staging);
-    copy_tree(built, &staging)?;
-    if std::fs::rename(&staging, &entry).is_err() {
-        let _ = std::fs::remove_dir_all(&staging);
+    let staging = tempfile::Builder::new()
+        .prefix(&format!("{stem}-{key}."))
+        .suffix(".tmp")
+        .tempdir_in(cache)?;
+    copy_tree(program.dir.path(), staging.path())?;
+    let staged = staging.keep();
+    if std::fs::rename(&staged, &entry).is_err() {
+        let _ = std::fs::remove_dir_all(&staged);
     }
     for old in std::fs::read_dir(cache)?.flatten() {
         let name = old.file_name().to_string_lossy().into_owned();
@@ -167,14 +200,7 @@ fn cached_resolve(
             let _ = std::fs::remove_dir_all(old.path());
         }
     }
-    Ok(out)
-}
-
-/// One directory per call: programs resolved concurrently in one process never share files.
-fn fresh_dir() -> PathBuf {
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    std::env::temp_dir().join(format!("orbital-cmd-{}-{n}", std::process::id()))
+    Ok(program)
 }
 
 fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
@@ -196,13 +222,15 @@ mod tests {
     use super::*;
     use std::cell::Cell;
 
-    fn build_into(dir: &Path, calls: &Cell<u32>, text: &str) -> anyhow::Result<PathBuf> {
+    fn built(parent: &Path, calls: &Cell<u32>, text: &str) -> anyhow::Result<ResolvedProgram> {
         calls.set(calls.get() + 1);
+        let program = ResolvedProgram { dir: scratch_dir_in(parent, "orbital-dev-")? };
+        let dir = program.dir.path();
         std::fs::create_dir_all(dir.join("lazy/a"))?;
         std::fs::write(dir.join("program.orb"), text)?;
         std::fs::write(dir.join("program.en.json"), "{}")?;
         std::fs::write(dir.join("lazy/a/child.orb"), "{}")?;
-        Ok(dir.join("program.orb"))
+        Ok(program)
     }
 
     fn files(dir: &Path) -> Vec<(String, String)> {
@@ -229,12 +257,12 @@ mod tests {
         let cache = tempfile::tempdir().unwrap();
         let work = tempfile::tempdir().unwrap();
         let calls = Cell::new(0);
-        let first = cached_resolve(cache.path(), "p", "k1", || build_into(&work.path().join("1"), &calls, "A")).unwrap();
-        let second = cached_resolve(cache.path(), "p", "k1", || build_into(&work.path().join("2"), &calls, "B")).unwrap();
+        let first = cached_resolve(cache.path(), work.path(), "p", "k1", || built(work.path(), &calls, "A")).unwrap();
+        let second = cached_resolve(cache.path(), work.path(), "p", "k1", || built(work.path(), &calls, "B")).unwrap();
         assert_eq!(calls.get(), 1);
-        assert_eq!(std::fs::read_to_string(&second).unwrap(), "A");
-        assert_ne!(first.parent(), second.parent(), "a hit answers its own directory");
-        assert_eq!(files(first.parent().unwrap()), files(second.parent().unwrap()));
+        assert_eq!(std::fs::read_to_string(second.path()).unwrap(), "A");
+        assert_ne!(first.path().parent(), second.path().parent(), "a hit answers its own directory");
+        assert_eq!(files(first.dir.path()), files(second.dir.path()));
     }
 
     #[test]
@@ -242,11 +270,11 @@ mod tests {
         let cache = tempfile::tempdir().unwrap();
         let work = tempfile::tempdir().unwrap();
         let calls = Cell::new(0);
-        cached_resolve(cache.path(), "p", "k1", || build_into(&work.path().join("1"), &calls, "A")).unwrap();
-        cached_resolve(cache.path(), "q", "k1", || build_into(&work.path().join("q"), &calls, "Q")).unwrap();
-        let out = cached_resolve(cache.path(), "p", "k2", || build_into(&work.path().join("2"), &calls, "B")).unwrap();
+        cached_resolve(cache.path(), work.path(), "p", "k1", || built(work.path(), &calls, "A")).unwrap();
+        cached_resolve(cache.path(), work.path(), "q", "k1", || built(work.path(), &calls, "Q")).unwrap();
+        let out = cached_resolve(cache.path(), work.path(), "p", "k2", || built(work.path(), &calls, "B")).unwrap();
         assert_eq!(calls.get(), 3);
-        assert_eq!(std::fs::read_to_string(&out).unwrap(), "B");
+        assert_eq!(std::fs::read_to_string(out.path()).unwrap(), "B");
         let mut entries: Vec<String> = std::fs::read_dir(cache.path()).unwrap().flatten()
             .map(|e| e.file_name().to_string_lossy().into_owned()).collect();
         entries.sort();
@@ -260,15 +288,15 @@ mod tests {
         std::fs::create_dir_all(cache.path().join("p-k1.99.tmp")).unwrap();
         std::fs::write(cache.path().join("p-k1.99.tmp/program.orb"), "PARTIAL").unwrap();
         let calls = Cell::new(0);
-        let out = cached_resolve(cache.path(), "p", "k1", || build_into(&work.path().join("1"), &calls, "A")).unwrap();
+        let out = cached_resolve(cache.path(), work.path(), "p", "k1", || built(work.path(), &calls, "A")).unwrap();
         assert_eq!(calls.get(), 1);
-        assert_eq!(std::fs::read_to_string(out).unwrap(), "A");
+        assert_eq!(std::fs::read_to_string(out.path()).unwrap(), "A");
     }
 
     #[test]
     fn a_failed_build_stores_nothing() {
         let cache = tempfile::tempdir().unwrap();
-        let err = cached_resolve(cache.path(), "p", "k1", || anyhow::bail!("resolve failed"));
+        let err = cached_resolve(cache.path(), cache.path(), "p", "k1", || anyhow::bail!("resolve failed"));
         assert!(err.is_err());
         assert_eq!(std::fs::read_dir(cache.path()).map(|d| d.count()).unwrap_or(0), 0);
     }
@@ -299,11 +327,11 @@ mod tests {
         let cache = tempfile::tempdir().unwrap();
         let work = tempfile::tempdir().unwrap();
         let calls = Cell::new(0);
-        cached_resolve(cache.path(), &live, "k1", || build_into(&work.path().join("1"), &calls, "L")).unwrap();
-        cached_resolve(cache.path(), &scratch, "k2", || build_into(&work.path().join("2"), &calls, "S")).unwrap();
-        let again = cached_resolve(cache.path(), &live, "k1", || build_into(&work.path().join("3"), &calls, "X")).unwrap();
+        cached_resolve(cache.path(), work.path(), &live, "k1", || built(work.path(), &calls, "L")).unwrap();
+        cached_resolve(cache.path(), work.path(), &scratch, "k2", || built(work.path(), &calls, "S")).unwrap();
+        let again = cached_resolve(cache.path(), work.path(), &live, "k1", || built(work.path(), &calls, "X")).unwrap();
         assert_eq!(calls.get(), 2);
-        assert_eq!(std::fs::read_to_string(again).unwrap(), "L");
+        assert_eq!(std::fs::read_to_string(again.path()).unwrap(), "L");
     }
 
     #[test]
@@ -315,5 +343,87 @@ mod tests {
         std::fs::write(&tmp, "bbbb").unwrap();
         std::fs::rename(&tmp, root.path().join("x.lolo")).unwrap();
         assert_ne!(tree_state(root.path()).unwrap(), base, "a replaced file has a new inode");
+    }
+
+    fn entries(dir: &Path) -> Vec<String> {
+        let mut out: Vec<String> =
+            std::fs::read_dir(dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        out.sort();
+        out
+    }
+
+    fn program_file(dir: &Path, name: &str) -> PathBuf {
+        let path = dir.join(format!("{name}.orb"));
+        std::fs::write(&path, format!(r#"{{"name":"{name}","version":"1.0.0","orbitals":[]}}"#)).unwrap();
+        path
+    }
+
+    #[test]
+    fn a_resolved_program_exists_while_held_and_leaves_nothing_once_dropped() {
+        let src = tempfile::tempdir().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let path = program_file(src.path(), "solo");
+        let schema = orbital_compiler::parse_file(&path).unwrap();
+        let resolved = resolve_schema_into(tmp.path(), schema, &path).unwrap();
+        assert!(resolved.path().is_file(), "control: the program is on disk while the run holds it");
+        let held = entries(tmp.path());
+        assert_eq!(held.len(), 1);
+        assert!(held[0].starts_with("orbital-dev-"), "{held:?}");
+        drop(resolved);
+        assert!(entries(tmp.path()).is_empty(), "nothing left behind: {:?}", entries(tmp.path()));
+    }
+
+    #[test]
+    fn a_cached_hit_and_a_cached_miss_both_leave_nothing_once_dropped() {
+        let cache = tempfile::tempdir().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let calls = Cell::new(0);
+        let miss = cached_resolve(cache.path(), tmp.path(), "p", "k1", || built(tmp.path(), &calls, "A")).unwrap();
+        let hit = cached_resolve(cache.path(), tmp.path(), "p", "k1", || built(tmp.path(), &calls, "B")).unwrap();
+        assert_eq!(calls.get(), 1);
+        assert!(hit.dir.path().file_name().unwrap().to_string_lossy().starts_with("orbital-cmd-"));
+        assert_eq!(entries(tmp.path()).len(), 2, "control: both runs hold their directory");
+        drop((miss, hit));
+        assert!(entries(tmp.path()).is_empty(), "{:?}", entries(tmp.path()));
+        assert_eq!(entries(cache.path()), vec!["p-k1".to_string()], "the cache entry stays");
+    }
+
+    #[test]
+    fn a_failed_resolve_leaves_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        let path = program_file(src.path(), "ok");
+        let schema = orbital_compiler::parse_file(&path).unwrap();
+        let missing = tmp.path().join("no-such-parent");
+        assert!(resolve_schema_into(&missing, schema, &path).is_err());
+        assert!(entries(tmp.path()).is_empty());
+    }
+
+    #[test]
+    fn parallel_resolves_each_answer_their_own_program_in_their_own_directory() {
+        let src = tempfile::tempdir().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let handles: Vec<_> = (0..16)
+            .map(|i| {
+                let name = format!("prog{i}");
+                let path = program_file(src.path(), &name);
+                let parent = tmp.path().to_path_buf();
+                std::thread::spawn(move || {
+                    let schema = orbital_compiler::parse_file(&path).unwrap();
+                    let resolved = resolve_schema_into(&parent, schema, &path).unwrap();
+                    let text = std::fs::read_to_string(resolved.path()).unwrap();
+                    (name, text, resolved)
+                })
+            })
+            .collect();
+        let done: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        let mut dirs = std::collections::BTreeSet::new();
+        for (name, text, resolved) in &done {
+            assert!(text.contains(&format!("\"name\":\"{name}\"")), "{name} read {text}");
+            assert!(dirs.insert(resolved.path()), "two runs share {}", resolved.path().display());
+        }
+        assert_eq!(entries(tmp.path()).len(), 16);
+        drop(done);
+        assert!(entries(tmp.path()).is_empty());
     }
 }

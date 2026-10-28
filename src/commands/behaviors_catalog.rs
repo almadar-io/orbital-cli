@@ -593,7 +593,7 @@ fn inline_trait<'a>(
         .iter()
         .flat_map(|o| o.traits.iter())
         .find_map(|t| match t {
-            TraitReference::Inline(td) if td.name == trait_name => Some(td),
+            TraitReference::Inline(td) if td.name == trait_name => Some(&**td),
             _ => None,
         })
 }

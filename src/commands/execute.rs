@@ -122,15 +122,6 @@ fn with_step_config(path: &Path, steps: &[serde_json::Value]) -> anyhow::Result<
     Ok(Some(serde_json::to_string(&program)?))
 }
 
-/// The temp directory a live call's resolved program was written to, removed when the call ends.
-struct ResolvedTempDir(std::path::PathBuf);
-
-impl Drop for ResolvedTempDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
 /// A live step waits for its open keyed calls (a spawned process, a stream) to end. With the request's `settleMs`,
 /// a call still open after it is cancelled through `cancel-call`; without it the step waits, never cutting one off.
 fn settle_open_calls(host: &orbital_shell_rust::host::Host, settle_ms: Option<f64>) {
@@ -213,19 +204,18 @@ pub(crate) fn run_cascade_with(path: &Path, steps: &serde_json::Value, live: boo
             .and_then(|pin| *pin)
             .unwrap_or_else(orbital_core::time_util::now_millis_f64)
     });
-    let trait_defs: std::collections::BTreeMap<String, TraitDefinition> =
+    let trait_defs: std::collections::BTreeMap<String, std::sync::Arc<TraitDefinition>> =
         resolved
             .orbitals
             .iter()
             .flat_map(|o| o.traits.iter())
             .filter_map(|t| match t {
-                orbital_core::schema::types::TraitReference::Inline(td) => Some((td.name.clone(), td.clone())),
+                orbital_core::schema::types::TraitReference::Inline(td) => Some((td.name.clone(), std::sync::Arc::clone(td))),
                 _ => None,
             })
             .collect();
     let (live_host, _live_files) = if live {
-        let program = crate::commands::dev::resolve_schema_to_temp(program, path)?;
-        let files = program.parent().map(|dir| ResolvedTempDir(dir.to_path_buf()));
+        let files = crate::commands::dev::resolve_schema_to_temp(program, path)?;
         let config = orbital_shell_rust::host::HostConfig {
             substrate: Some(orbital_shell_rust::host::SubstratePort(std::sync::Arc::new(
                 crate::commands::program_host::ProgramHost,
@@ -233,8 +223,8 @@ pub(crate) fn run_cascade_with(path: &Path, steps: &serde_json::Value, live: boo
             clock: Some(clock.clone()),
             ..orbital_shell_rust::host::HostConfig::default()
         };
-        let host = orbital_shell_rust::host::boot::boot_file_with(&program, &std::env::vars().collect(), false, config)?;
-        (Some(host), files)
+        let host = orbital_shell_rust::host::boot::boot_file_with(&files.path(), &std::env::vars().collect(), false, config)?;
+        (Some(host), Some(files))
     } else {
         (None, None)
     };
@@ -421,6 +411,7 @@ mod outcome_report_tests {
             transition_index: None,
             entity_id: "singleton".into(),
             state_entity_id: "singleton".into(),
+            emit_source: Default::default(),
             guards: vec![ArmGuard {
                 arm: 1,
                 guard: GuardResult::passed(guard, Value::Bool(true)),
