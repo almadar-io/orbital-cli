@@ -487,7 +487,7 @@ pub(crate) fn resolve_import(
         None => None,
     };
     Ok(Some(ImportedBehavior {
-        program: source_value(&resolved)?,
+        program: source_json(&resolved)?,
         package: resolved.package,
         pattern,
         path: resolved.path,
@@ -1342,7 +1342,7 @@ pub(crate) fn describe_with(
     let described = inline_trait(&program, &trait_name);
     let machine = described.map(|td| MachineOut {
         linked_entity: td.linked_entity.clone(),
-        state_machine: td.state_machine.clone(),
+        state_machine: (*td.state_machine).clone(),
     });
     let source = described
         .map(orbital_lolo::unlower::print_trait)
@@ -1387,6 +1387,11 @@ pub(crate) fn behavior_source_path(spec: &str) -> anyhow::Result<PathBuf> {
 
 /// `orb behaviors source` as a value: the behavior a specifier names, as a program.
 pub(crate) fn source(spec: &str) -> anyhow::Result<Value> {
+    source_value_of(spec).map(|v| orbital_core::json_value::value_to_json(&v))
+}
+
+/// [`source`] as a core value: a `.orb` file is parsed straight to it, with no JSON tree between.
+pub(crate) fn source_value_of(spec: &str) -> anyhow::Result<orbital_core::Value> {
     let behavior = match spec.rfind(TRAITS_SEGMENT) {
         Some(i) if i > 0 => spec[..i].to_string(),
         _ => spec.to_string(),
@@ -1394,14 +1399,18 @@ pub(crate) fn source(spec: &str) -> anyhow::Result<Value> {
     source_value(&resolve(&behavior)?)
 }
 
-fn source_value(resolved: &Resolved) -> anyhow::Result<Value> {
+fn source_json(resolved: &Resolved) -> anyhow::Result<Value> {
+    source_value(resolved).map(|v| orbital_core::json_value::value_to_json(&v))
+}
+
+fn source_value(resolved: &Resolved) -> anyhow::Result<orbital_core::Value> {
     if resolved.path.extension().is_some_and(|e| e == "orb") {
         let raw = std::fs::read_to_string(&resolved.path)
             .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", resolved.path.display()))?;
         serde_json::from_str(&raw)
             .map_err(|e| anyhow::anyhow!("{} is not valid JSON: {e}", resolved.path.display()))
     } else {
-        Ok(serde_json::to_value(&resolved.schema)?)
+        Ok(serde_json::from_value(serde_json::to_value(&resolved.schema)?)?)
     }
 }
 
@@ -1428,7 +1437,7 @@ fn knob_facts(f: &KnobField) -> KnobFacts {
 pub(crate) fn text_facts(spec: &str, organism: &str) -> anyhow::Result<Vec<OrbitalFacts>> {
     let resolved = resolve(spec)?;
     let described = describe_resolved(&resolved, spec, None)?;
-    let written = source_value(&resolved)?;
+    let written = source_json(&resolved)?;
     let written: HashMap<&str, (bool, BTreeSet<&str>)> = written
         .get("orbitals")
         .and_then(Value::as_array)

@@ -24,6 +24,12 @@ fn to_json(value: &Value) -> serde_json::Value {
     orbital_core::json_value::value_to_json(value)
 }
 
+/// A whole program is read or composed as several transient forms; give their freed pages back before the next step
+/// holds its own, so the process peaks at the largest step and not at the sum of the pages the steps left mapped.
+fn release_transients() {
+    orbital_core::runtime::memory_release::release_freed_memory();
+}
+
 fn from_json(value: serde_json::Value) -> Result<Value, SubstrateFailure> {
     serde_json::from_value(value).map_err(|e| failure(e.to_string()))
 }
@@ -193,18 +199,20 @@ fn program_name_ok(name: &str) -> bool {
 
 /// A program argument: an object with a `name` and `orbitals`, every orbital value in it standing for its import
 /// orbital (as `@almadar/core` `parseProgram` reads a program held as data).
-fn program_arg(op: &str, value: Option<&Value>) -> Result<serde_json::Value, SubstrateFailure> {
-    let json = value.map(to_json).unwrap_or(serde_json::Value::Null);
-    match &json {
-        serde_json::Value::Object(map)
-            if map.get("name").is_some_and(serde_json::Value::is_string)
-                && map.contains_key("orbitals") =>
+fn program_value_arg(op: &str, value: Option<&Value>) -> Result<Value, SubstrateFailure> {
+    match value {
+        Some(program @ Value::Object(map))
+            if map.get("name").is_some_and(Value::is_string) && map.contains_key("orbitals") =>
         {
-            orbital_core::schema::behavior_value::program_with_orbital_imports(&json)
+            orbital_core::schema::behavior_value::into_program_with_orbital_imports(program.clone())
                 .map_err(|e| failure(format!("{op}: {e}")))
         }
         _ => Err(failure(format!("{op}: not a program"))),
     }
+}
+
+fn program_arg(op: &str, value: Option<&Value>) -> Result<serde_json::Value, SubstrateFailure> {
+    program_value_arg(op, value).map(|program| to_json(&program))
 }
 
 /// A program stamped (ids minted against `prior`) and validated: the findings, and the stamped program text when
@@ -371,9 +379,9 @@ impl ProgramHost {
     }
 
     /// `program/read { resolve: true, path, output? }`: what `orb resolve <path> [--output]` prints
-    /// and writes, as `{ program, text }`; the file at the absolute `path` is read, not `text`.
-    /// `text: false` answers `{ program, lazy: [{ orbital, program }] }` and writes nothing, so a program with lazy
-    /// behaviors or locales is not refused (the lint input reads programs this way).
+    /// and writes, as `{ program, text, loadedResolved, programPath? }` (`loadedResolved`: the source carried the `resolved` stamp, EXEC-LOAD-1, and is answered as it was read, `output` unwritten; `programPath`: the source when it was resolved, `output` when written, absent in memory); the file at the absolute `path` is read, not `text`.
+    /// `text: false` without `output` answers `{ program, lazy: [{ orbital, program }] }` and writes nothing, so a program with lazy
+    /// behaviors or locales is not refused (the lint input reads programs this way); with `output` it is the same read without `text` in the answer.
     fn read_resolved(options: &serde_json::Value) -> Result<Value, SubstrateFailure> {
         let path = options
             .get("path")
@@ -386,22 +394,30 @@ impl ProgramHost {
             Some(serde_json::Value::String(out)) => Some(std::path::PathBuf::from(out)),
             Some(_) => return Err(failure("program/read: `output` must be a path")),
         };
-        match options.get("text") {
-            None | Some(serde_json::Value::Null) | Some(serde_json::Value::Bool(true)) => {}
-            Some(serde_json::Value::Bool(false)) if output.is_some() => {
-                return Err(failure("program/read: `text: false` writes nothing, so it takes no `output`"))
+        let with_text = match options.get("text") {
+            None | Some(serde_json::Value::Null) | Some(serde_json::Value::Bool(true)) => true,
+            Some(serde_json::Value::Bool(false)) if output.is_none() => {
+                return crate::commands::parse::resolved_value(path)
+                    .map_err(|e| failure(format!("program/read: {e}")));
             }
-            Some(serde_json::Value::Bool(false)) => {
-                let answer = crate::commands::parse::resolved_value(path)
-                    .map_err(|e| failure(format!("program/read: {e}")))?;
-                return from_json(answer);
-            }
+            Some(serde_json::Value::Bool(false)) => false,
             Some(_) => return Err(failure("program/read: `text` must be a boolean")),
-        }
-        let text = crate::commands::parse::resolved_text(path, output.as_deref())
+        };
+        let read = crate::commands::parse::resolved_read(path, output.as_deref())
             .map_err(|e| failure(format!("program/read: {e}")))?;
-        let program: serde_json::Value = serde_json::from_str(&text).map_err(|e| failure(e.to_string()))?;
-        from_json(serde_json::json!({ "program": program, "text": text }))
+        let program: Value = serde_json::from_str(&read.text).map_err(|e| failure(e.to_string()))?;
+        let mut fields = orbital_core::ValueMap::default();
+        fields.insert("program".to_string(), program);
+        fields.insert("loadedResolved".to_string(), Value::Bool(read.loaded_resolved));
+        if let Some(program_path) = &read.program_path {
+            fields.insert("programPath".to_string(), Value::String(program_path.display().to_string().into()));
+        }
+        if with_text {
+            fields.insert("text".to_string(), Value::String(read.text.into()));
+        }
+        let answer = Value::object(fields);
+        release_transients();
+        Ok(answer)
     }
 
     /// `program/read { stamp: true, path, prior?, imports?, output? }`: what `orb stamp` prints, as `{ program, text }`;
@@ -1241,6 +1257,9 @@ impl ProgramHost {
 
 const LAYOUT_STRATEGIES: [&str; 5] = ["sidebar", "tabs", "dashboard", "wizard-flow", "single"];
 
+/// The option keys `program/compose` runs; the operator table declares the same set.
+const COMPOSE_OPTION_KEYS: [&str; 4] = ["appName", "layout", "theme", "overrides"];
+
 impl ProgramHost {
     /// `program/compose`: the programs, in order, as one app program (`orbital_compiler::composition::compose_programs`).
     fn compose(&self, args: &[Value]) -> Result<Value, SubstrateFailure> {
@@ -1250,7 +1269,7 @@ impl ProgramHost {
         };
         let programs = list
             .iter()
-            .map(|p| program_arg(op, Some(p)))
+            .map(|p| program_value_arg(op, Some(p)))
             .collect::<Result<Vec<_>, _>>()?;
         let options = args
             .get(1)
@@ -1259,8 +1278,11 @@ impl ProgramHost {
             .ok_or_else(|| failure("program/compose: options must be an object with an appName"))?;
         let (mut app_name, mut layout, mut theme, mut overrides) = (None, None, None, None);
         for (key, value) in options.as_object().into_iter().flatten() {
+            if !COMPOSE_OPTION_KEYS.contains(&key.as_str()) {
+                return Err(failure(format!("program/compose: unsupported option \"{key}\"")));
+            }
             match (key.as_str(), value.as_str()) {
-                ("overrides", _) => overrides = Some(value.clone()),
+                ("overrides", _) => overrides = Some(from_json(value.clone())?),
                 ("appName", Some(v)) if !v.is_empty() => app_name = Some(v.to_string()),
                 ("theme", Some(v)) => theme = (!v.is_empty()).then(|| v.to_string()),
                 ("layout", v) => match v.filter(|l| LAYOUT_STRATEGIES.contains(l)) {
@@ -1274,7 +1296,7 @@ impl ProgramHost {
                 },
                 _ => {
                     return Err(failure(format!(
-                        "program/compose: unsupported option \"{key}\""
+                        "program/compose: option \"{key}\" is not a string"
                     )))
                 }
             }
@@ -1285,11 +1307,11 @@ impl ProgramHost {
             orbital_core::time_util::now_millis() as f64,
         );
         let load = |from: &str| {
-            crate::commands::behaviors_catalog::source(from)
+            crate::commands::behaviors_catalog::source_value_of(from)
                 .map_err(|e| format!("behavior/source: {e}"))
         };
         let schema = orbital_compiler::composition::compose_programs(
-            &programs,
+            programs,
             &app_name,
             layout.as_deref(),
             theme.as_deref(),
@@ -1298,7 +1320,8 @@ impl ProgramHost {
             &load,
         )
         .map_err(|e| failure(format!("{op}: {e}")))?;
-        from_json(schema)
+        release_transients();
+        Ok(schema)
     }
 }
 
@@ -1502,6 +1525,139 @@ orbital O {
     }
 
     #[test]
+    fn read_with_resolve_says_whether_the_source_was_already_resolved() {
+        orbital_compiler::loader::register_source_lowerer(|path, _, _| crate::lower_lolo_file(path));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = dir.path().join("note.lolo");
+        std::fs::write(&source, NOTE.replacen("app note-pad [", "app note-pad [\n  locales: [en, ar],", 1)).unwrap();
+        let resolved_file = dir.path().join("note.orb");
+        let out = dir.path().join("out");
+        std::fs::create_dir(&out).unwrap();
+        let read = |file: &std::path::Path, output: &std::path::Path| {
+            let options = from_json(serde_json::json!({ "resolve": true, "path": file.display().to_string(), "output": output.display().to_string() })).unwrap();
+            json(&ProgramHost.run("program/read", &[Value::String(String::new().into()), options]).expect("resolves"))
+        };
+        let authored = read(&source, &resolved_file);
+        assert_eq!(authored["loadedResolved"], false, "a .lolo is authored: {authored}");
+        let resolved = read(&resolved_file, &out.join("again.orb"));
+        assert_eq!(resolved["loadedResolved"], true, "a resolved .orb is loaded as it is: {resolved}");
+        assert!(!out.join("again.orb").exists(), "a resolved source is not written out again");
+        let mut unresolved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&resolved_file).unwrap()).unwrap();
+        unresolved.as_object_mut().unwrap().remove("resolved");
+        let bare = dir.path().join("bare.orb");
+        std::fs::write(&bare, unresolved.to_string()).unwrap();
+        let unstamped = read(&bare, &out.join("bare.orb"));
+        assert_eq!(unstamped["loadedResolved"], false, "control: an .orb without the stamp is authored: {unstamped}");
+        assert!(out.join("bare.orb").exists(), "control: an unresolved .orb is resolved and written");
+    }
+
+    #[test]
+    fn read_with_resolve_names_where_the_program_lives() {
+        orbital_compiler::loader::register_source_lowerer(|path, _, _| crate::lower_lolo_file(path));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = dir.path().join("note.lolo");
+        std::fs::write(&source, NOTE.replacen("app note-pad [", "app note-pad [\n  locales: [en, ar],", 1)).unwrap();
+        let read = |file: &std::path::Path, output: Option<&std::path::Path>| {
+            let mut options = serde_json::json!({ "resolve": true, "path": file.display().to_string() });
+            if let Some(out) = output {
+                options["output"] = out.display().to_string().into();
+            }
+            ProgramHost.run("program/read", &[Value::String(String::new().into()), from_json(options).unwrap()])
+        };
+        let written = dir.path().join("dist");
+        std::fs::create_dir(&written).unwrap();
+        let app = written.join("app.orb");
+        let authored = json(&read(&source, Some(&app)).expect("resolves and writes"));
+        assert_eq!(authored["programPath"], app.display().to_string(), "an authored source lives at its output: {authored}");
+        assert_eq!(authored["loadedResolved"], false);
+        assert!(app.exists());
+        assert!(written.join("messages").exists() || std::fs::read_dir(&written).unwrap().count() > 1, "catalogs sit beside the output");
+
+        let elsewhere = dir.path().join("elsewhere");
+        std::fs::create_dir(&elsewhere).unwrap();
+        let again = json(&read(&app, Some(&elsewhere.join("app.orb"))).expect("loads as it is"));
+        assert_eq!(again["programPath"], app.display().to_string(), "a resolved source lives where it was read: {again}");
+        assert_eq!(again["loadedResolved"], true);
+        assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0, "nothing is written when the source is resolved");
+
+        let bare = json(&read(&app, None).expect("a resolved source with locales needs no output"));
+        assert_eq!(bare["programPath"], app.display().to_string(), "{bare}");
+        assert_eq!(bare["program"], again["program"]);
+
+        let refused = read(&source, None).unwrap_err();
+        assert!(refused.message.contains("declares locales"), "control: an authored source with locales still needs an output: {}", refused.message);
+    }
+
+    #[test]
+    fn read_with_resolve_without_text_and_with_output_answers_no_text() {
+        orbital_compiler::loader::register_source_lowerer(|path, _, _| crate::lower_lolo_file(path));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = dir.path().join("note.lolo");
+        std::fs::write(&source, NOTE.replacen("app note-pad [", "app note-pad [\n  locales: [en, ar],", 1)).unwrap();
+        let read = |file: &std::path::Path, output: &std::path::Path| {
+            let options = from_json(serde_json::json!({ "resolve": true, "text": false, "path": file.display().to_string(), "output": output.display().to_string() })).unwrap();
+            json(&ProgramHost.run("program/read", &[Value::String(String::new().into()), options]).expect("resolves"))
+        };
+        let dist = dir.path().join("dist");
+        std::fs::create_dir(&dist).unwrap();
+        let app = dist.join("app.orb");
+        let authored = read(&source, &app);
+        assert!(authored.get("text").is_none(), "no text in the answer: {authored}");
+        assert_eq!(authored["loadedResolved"], false);
+        assert_eq!(authored["programPath"], app.display().to_string());
+        assert_eq!(authored["program"]["name"], "note-pad");
+        assert!(app.exists(), "an authored source is written to output");
+        assert!(std::fs::read_dir(&dist).unwrap().count() > 1, "catalogs sit beside the output");
+
+        let elsewhere = dir.path().join("elsewhere");
+        std::fs::create_dir(&elsewhere).unwrap();
+        let again = read(&app, &elsewhere.join("app.orb"));
+        assert!(again.get("text").is_none(), "{again}");
+        assert_eq!(again["loadedResolved"], true);
+        assert_eq!(again["programPath"], app.display().to_string());
+        assert_eq!(again["program"], authored["program"]);
+        assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0, "a resolved source is answered in place");
+    }
+
+    #[test]
+    fn control_read_with_resolve_without_text_and_output_answers_program_and_lazy_only() {
+        orbital_compiler::loader::register_source_lowerer(|path, _, _| crate::lower_lolo_file(path));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = dir.path().join("note.lolo");
+        std::fs::write(&source, NOTE).unwrap();
+        let options = from_json(serde_json::json!({ "resolve": true, "text": false, "path": source.display().to_string() })).unwrap();
+        let answer = json(&ProgramHost.run("program/read", &[Value::String(String::new().into()), options]).expect("resolves"));
+        assert_eq!(answer["lazy"], serde_json::json!([]), "{answer}");
+        assert!(answer.get("text").is_none() && answer.get("loadedResolved").is_none() && answer.get("programPath").is_none(), "{answer}");
+    }
+
+    #[test]
+    fn control_read_with_resolve_refuses_a_resolved_orb_of_another_type_contract() {
+        orbital_compiler::loader::register_source_lowerer(|path, _, _| crate::lower_lolo_file(path));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = dir.path().join("note.lolo");
+        std::fs::write(&source, NOTE).unwrap();
+        let mut resolved: serde_json::Value = serde_json::from_str(&crate::commands::parse::resolved_text(&source, None).unwrap()).unwrap();
+        resolved["resolved"]["typeContractVersion"] = 999.into();
+        let stale = dir.path().join("stale.orb");
+        std::fs::write(&stale, resolved.to_string()).unwrap();
+        let options = from_json(serde_json::json!({ "resolve": true, "path": stale.display().to_string() })).unwrap();
+        let refused = ProgramHost.run("program/read", &[Value::String(String::new().into()), options]).unwrap_err();
+        assert!(refused.message.contains("type contract 999"), "{}", refused.message);
+    }
+
+    #[test]
+    fn read_with_resolve_in_memory_names_no_program_path() {
+        orbital_compiler::loader::register_source_lowerer(|path, _, _| crate::lower_lolo_file(path));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = dir.path().join("note.lolo");
+        std::fs::write(&source, NOTE).unwrap();
+        let options = from_json(serde_json::json!({ "resolve": true, "path": source.display().to_string() })).unwrap();
+        let answer = json(&ProgramHost.run("program/read", &[Value::String(String::new().into()), options]).expect("resolves"));
+        assert!(answer.get("programPath").is_none(), "resolved in memory and written nowhere: {answer}");
+    }
+
+    #[test]
     fn read_with_resolve_answers_a_resolved_orb_as_it_is() {
         orbital_compiler::loader::register_source_lowerer(|path, _, _| crate::lower_lolo_file(path));
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1520,6 +1676,23 @@ orbital O {
     }
 
     #[test]
+    fn the_resolved_value_is_the_printed_resolve_read_back() {
+        orbital_compiler::loader::register_source_lowerer(|path, _, _| crate::lower_lolo_file(path));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = dir.path().join("note.lolo");
+        std::fs::write(&source, NOTE).unwrap();
+        let printed: Value = serde_json::from_str::<Value>(&crate::commands::parse::resolved_text(&source, None).expect("orb resolve"))
+            .expect("reads back");
+        let direct = crate::commands::parse::resolved_value(&source).expect("resolved value");
+        assert_eq!(direct.get_path("program"), Some(&printed));
+        assert_eq!(direct.get_path("lazy"), Some(&Value::array(Vec::<Value>::new())));
+        let other = std::fs::write(&source, NOTE.replacen("note-pad", "note-other", 1));
+        other.unwrap();
+        let changed = crate::commands::parse::resolved_value(&source).expect("resolved value");
+        assert_ne!(changed.get_path("program"), Some(&printed), "control: another program is another value");
+    }
+
+    #[test]
     fn read_with_resolve_and_no_text_answers_a_program_with_locales() {
         orbital_compiler::loader::register_source_lowerer(|path, _, _| crate::lower_lolo_file(path));
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1535,8 +1708,6 @@ orbital O {
         assert!(answer.get("text").is_none(), "no text is printed: {answer}");
         let refused = read(serde_json::json!({})).unwrap_err();
         assert!(refused.message.contains("declares locales"), "control: the printed form still needs --output: {}", refused.message);
-        let both = read(serde_json::json!({ "text": false, "output": "/tmp/x.orb" })).unwrap_err();
-        assert!(both.message.contains("takes no `output`"), "{}", both.message);
     }
 
     #[test]
@@ -2329,6 +2500,23 @@ orbital O {
                 .contains("layout must be one of"),
             "control: an unknown layout is refused"
         );
+    }
+
+    #[test]
+    fn program_compose_runs_exactly_the_options_the_operator_table_declares() {
+        use orbital_core::language::registry::{get_operator, OperatorTypeRef, OperatorTypeRefKind};
+        let options = &get_operator("program/compose").expect("table entry").params[1].ty;
+        let OperatorTypeRef::Tagged(OperatorTypeRefKind::Object { fields, .. }) = options else {
+            panic!("program/compose options are an object");
+        };
+        let mut declared: Vec<&str> = fields.keys().map(String::as_str).collect();
+        declared.sort_unstable();
+        let mut run = COMPOSE_OPTION_KEYS.to_vec();
+        run.sort_unstable();
+        assert_eq!(declared, run);
+        let bad = from_json(serde_json::json!({ "appName": "X", "bogus": "y" })).unwrap();
+        let refused = ProgramHost.run("program/compose", &[Value::Array(Vec::new().into()), bad]).unwrap_err();
+        assert!(refused.message.contains("unsupported option \"bogus\""), "control: {}", refused.message);
     }
 
     #[test]
