@@ -39,7 +39,16 @@ pub(crate) fn parse_schema_auto(
     content: &str,
     source_path: &str,
 ) -> anyhow::Result<orbital_core::schema::OrbitalSchema> {
-    parse_schema_auto_typed(content, source_path).map_err(|e| anyhow::anyhow!("{}", e.describe()))
+    parse_schema_auto_anchored(content, source_path, None)
+}
+
+/// [`parse_schema_auto`] with `prior` anchoring the ids a `.lolo` lowering reuses.
+pub(crate) fn parse_schema_auto_anchored(
+    content: &str,
+    source_path: &str,
+    prior: Option<&orbital_core::schema::OrbitalSchema>,
+) -> anyhow::Result<orbital_core::schema::OrbitalSchema> {
+    parse_schema_auto_typed_anchored(content, source_path, prior).map_err(|e| anyhow::anyhow!("{}", e.describe()))
 }
 
 /// Typed parse-error for use by callers that want to map to structured
@@ -73,10 +82,21 @@ pub fn parse_schema_auto_typed(
     content: &str,
     source_path: &str,
 ) -> Result<orbital_core::schema::OrbitalSchema, TypedParseError> {
+    parse_schema_auto_typed_anchored(content, source_path, None)
+}
+
+fn parse_schema_auto_typed_anchored(
+    content: &str,
+    source_path: &str,
+    prior: Option<&orbital_core::schema::OrbitalSchema>,
+) -> Result<orbital_core::schema::OrbitalSchema, TypedParseError> {
     use orbital_core::schema::parse_schema;
     match detect_syntax(content) {
-        InputSyntax::Lolo => orbital_lolo::parse_and_lower_str_at(content, source_path)
-            .map_err(TypedParseError::Lolo),
+        InputSyntax::Lolo => match prior {
+            Some(_) => orbital_lolo::parse_and_lower_str_with_prior_at(content, prior, source_path),
+            None => orbital_lolo::parse_and_lower_str_at(content, source_path),
+        }
+        .map_err(TypedParseError::Lolo),
         InputSyntax::OrbJson => {
             let translated = translate_schema_content(content);
             parse_schema(&translated)
@@ -611,7 +631,7 @@ pub(crate) fn typed_parse_error_to_json(
                     )),
                 ),
                 TypeError::GenericTypeForbidden { name, .. } => (
-                    ErrorCode::GenericTypeDeprecated.as_str(),
+                    "ORB_T_GENERIC_TYPE_DEPRECATED",
                     Some(format!(
                         "replace `{name}`: a relation → the related entity's name (`Order`, `[Order]`); renderable content → `node`; structured data → an inline shape, a named `type` alias, or `Map K V`; a value of several kinds → a named tagged-union `type` alias, or the concrete primitive; the row of an entity → `@entity` / `@entity @config.<knob>`"
                     )),

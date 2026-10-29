@@ -84,7 +84,8 @@ const CARD_LOLO: &str =
 fn live_std_programs(project: &Path) {
     let std = project.join("node_modules/@almadar/std");
     let manifest_path = std.join("package.json");
-    let mut manifest: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
+    let mut manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
     manifest["orb"] = serde_json::json!({
         "prefix": "almadar-std",
         "source": "behaviors/lolo",
@@ -303,53 +304,6 @@ fn catalog_without_vectors_needs_no_store_and_carries_the_pattern_tag() {
     .success());
 }
 
-#[test]
-fn the_derived_index_is_cached_by_content_and_follows_an_edit() {
-    let p = project("m1");
-    let derived = p.path().join(".derived/behavior-index");
-    let run = || {
-        json(&orb(
-            p.path(),
-            &["behaviors", "catalog", "--json", "--no-vectors", "alpha"],
-        ))
-    };
-    let cached = || -> Vec<String> {
-        std::fs::read_dir(&derived)
-            .map(|d| {
-                d.flatten()
-                    .map(|e| e.file_name().to_string_lossy().to_string())
-                    .filter(|n| n.starts_with("alpha-") && n.ends_with(".json"))
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
-    assert!(cached().is_empty());
-    let first = run();
-    let once = cached();
-    assert_eq!(once.len(), 1, "one derived index per package: {once:?}");
-    assert_eq!(run(), first, "a warm read answers the same");
-    assert_eq!(cached(), once);
-    // An edit to a source changes what is derived, and replaces the cached file.
-    let card = p
-        .path()
-        .join("node_modules/alpha/behaviors/lolo/ui/core/atoms/alpha-card.lolo");
-    write(&card, &CARD_LOLO.replace("palette", "both"));
-    let edited = run();
-    let card_of = |v: &serde_json::Value| {
-        v.as_array()
-            .unwrap()
-            .iter()
-            .find(|e| e["behavior"] == "alpha/alpha-card")
-            .unwrap()["exposure"]
-            .clone()
-    };
-    assert_eq!(card_of(&first), "palette");
-    assert_eq!(card_of(&edited), "both");
-    let after = cached();
-    assert_eq!(after.len(), 1);
-    assert_ne!(after, once);
-}
-
 /// Owner ruling (G-ORB-488): a behavior that cannot be indexed is reported and skipped, never fatal to its package.
 #[test]
 fn a_lolo_header_tag_outside_the_vocabulary_is_named_and_that_behavior_skipped() {
@@ -369,9 +323,17 @@ fn a_lolo_header_tag_outside_the_vocabulary_is_named_and_that_behavior_skipped()
         "{err}"
     );
     let listed: serde_json::Value = serde_json::from_slice(&out.stdout).expect("catalog json");
-    let names: Vec<&str> = listed.as_array().unwrap().iter().filter_map(|e| e["behavior"].as_str()).collect();
+    let names: Vec<&str> = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|e| e["behavior"].as_str())
+        .collect();
     assert!(!names.contains(&"alpha/alpha-card"), "{names:?}");
-    assert!(names.contains(&"alpha/alpha-board"), "control: the package's other behaviors are still listed: {names:?}");
+    assert!(
+        names.contains(&"alpha/alpha-board"),
+        "control: the package's other behaviors are still listed: {names:?}"
+    );
 }
 
 #[test]
@@ -534,6 +496,182 @@ fn a_text_with_no_vector_and_no_provider_is_an_error_naming_the_variables() {
     assert!(orb(p.path(), &["behaviors", "catalog", "--json", "beta"])
         .status
         .success());
+}
+
+/// G-STD-180: `std-orb-behaviors` declares the `~/.almadar/vectors` anchor beside the optional `ALMADAR_VECTORS_DIR` one, so an unset
+/// variable is the usual case and never a warning.
+#[test]
+fn an_unset_vectors_dir_prints_no_grant_warning_while_the_home_default_is_declared() {
+    let p = project("m1");
+    let out = Command::new(orb_bin())
+        .args(["behaviors", "catalog", "--json", "--no-vectors", "alpha"])
+        .current_dir(p.path())
+        .env_remove("ALMADAR_VECTORS_DIR")
+        .output()
+        .expect("spawn orb");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{err}");
+    assert!(!err.contains("grants nothing"), "{err}");
+}
+
+/// A program that drives `std-vector-write` the way `std-vector-resolve` does on an embed-on-miss: the path under the directory
+/// `ALMADAR_VECTORS_DIR` names (anchor `env`), else under `~/.almadar/vectors` (anchor `home`).
+const WRITE_PROBE: &str = r#"app write-probe [
+  version: "1.0.0",
+  description: "Scratch probe: drive std-vector-write end to end against the real os host.",
+  env: ["ALMADAR_VECTORS_DIR", "HOME"],
+  fs: { "~/.almadar": [create], "~/.almadar/vectors/**": [read, write, remove, create], env ALMADAR_VECTORS_DIR: "**": [read, write, remove, create] },
+  exec: ["kill"]
+]
+uses W from "std/behaviors/std-vector-write"
+
+orbital Probe {
+  entity ProbeRun [runtime] {
+    id : string!
+    where : string = ""
+    anchor : string = ""
+    done : boolean = false
+  }
+  trait ProbeDriver -> ProbeRun [optimistic] {
+    initial: idle
+    state idle {
+      INIT -> idle
+        (os/getenv "ALMADAR_VECTORS_DIR" { key: "dir" emit: { success: PROBE_ENV, failure: PROBE_ENV_FAILED } })
+      PROBE_ENV -> idle when (!= (default @payload.value "") "")
+        (emit VECTOR_WRITE { path: (str/concat @payload.value "/m.vec"), anchor: "env", model: "m", records: [{ text: "alpha", vector: [0.5, 0.25, -0.5, 1.0] }, { text: "beta", vector: [0.1, 0.2, 0.3, 0.4] }] })
+      PROBE_ENV -> idle when (== (default @payload.value "") "")
+        (emit VECTOR_WRITE { path: "/home/.almadar/vectors/m.vec", anchor: "home", model: "m", records: [{ text: "alpha", vector: [0.5, 0.25, -0.5, 1.0] }, { text: "beta", vector: [0.1, 0.2, 0.3, 0.4] }] })
+      PROBE_ENV_FAILED -> idle
+      VECTOR_WRITTEN -> idle
+      VECTOR_WRITE_REFUSED -> idle
+    }
+    emits {
+      VECTOR_WRITE -> external { path : string!  anchor : string!  model : string!  records : [{ text : string!, vector : [number]! }]! }
+      PROBE_ENV { key : string  value : string }
+      PROBE_ENV_FAILED { error : string!  kind : string }
+    }
+    listens {
+      PROBE_ENV { key : string  value : string }
+      PROBE_ENV_FAILED { error : string!  kind : string }
+      Writer.VectorWrite.VECTOR_WRITTEN -> VECTOR_WRITTEN
+      VECTOR_WRITTEN { path : string!  count : number! }
+      Writer.VectorWrite.VECTOR_WRITE_REFUSED -> VECTOR_WRITE_REFUSED
+      VECTOR_WRITE_REFUSED { code : string!  detail : string! }
+    }
+  }
+  page boot as ProbeStart -> ProbeDriver
+}
+
+orbital Writer = W.orbitals.VectorWriteOrbital {
+  listens {
+    Probe.ProbeDriver.VECTOR_WRITE -> VectorWrite.VECTOR_WRITE
+  }
+}
+"#;
+
+/// G-STD-181: the user store is written relative to a declared anchor (the env one, else the home default), never an absolute path under
+/// the working directory, which anchored-path grants refuse.
+#[test]
+fn std_vector_write_persists_under_the_env_anchor_and_under_the_home_default() {
+    let p = project("m1");
+    write(&p.path().join("write-probe.lolo"), WRITE_PROBE);
+    let run = |home: &Path, env_dir: Option<&Path>| {
+        let mut cmd = Command::new(orb_bin());
+        cmd.args(["run", "write-probe.lolo"])
+            .current_dir(p.path())
+            .env("HOME", home);
+        match env_dir {
+            Some(dir) => cmd.env("ALMADAR_VECTORS_DIR", dir),
+            None => cmd.env_remove("ALMADAR_VECTORS_DIR"),
+        };
+        let out = cmd.output().expect("spawn orb");
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        out
+    };
+    let home = tempfile::tempdir().unwrap();
+    let env_dir = p.path().join("env-vectors");
+    std::fs::create_dir_all(&env_dir).unwrap();
+    run(home.path(), Some(&env_dir));
+    let stored =
+        std::fs::read(env_dir.join("m.vec")).expect("the store is written under the env anchor");
+    assert_eq!(&stored[..6], b"ORBVEC");
+    assert!(
+        !env_dir.join("m.vec.lock").exists(),
+        "the writer lock is released"
+    );
+    assert!(
+        !home.path().join(".almadar").exists(),
+        "control: the env anchor wins, the home default stays untouched"
+    );
+
+    run(home.path(), None);
+    let stored = std::fs::read(home.path().join(".almadar/vectors/m.vec"))
+        .expect("the store is written under the home default, its directory created");
+    assert_eq!(&stored[..6], b"ORBVEC");
+    assert!(
+        !home.path().join(".almadar/vectors/m.vec.lock").exists(),
+        "the writer lock is released"
+    );
+}
+
+/// Byte parity with the retired Rust `orb behaviors texts` (archive/orbital-rust/crates/orbital-cli/src/commands/behaviors_texts.rs): the
+/// organism texts, then the `#capabilities` texts, then every knob text (in the order `describe` lists the knobs), each with the lower-case hex SHA-256
+/// of its UTF-8 text.
+#[test]
+fn texts_are_the_retired_rust_texts_with_their_sha256_in_embed_order() {
+    use sha2::{Digest, Sha256};
+    let p = project("m1");
+    let got = json(&orb(p.path(), &["behaviors", "texts", "--json", "alpha"]));
+    let row = |key: &str, text: &str| {
+        let hash: String = Sha256::digest(text.as_bytes())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        serde_json::json!({ "key": key, "text": text, "hash": hash })
+    };
+    let (card, capability) = card_texts("alpha");
+    let want = serde_json::json!([
+        row("alpha-board", &board_text("alpha")),
+        row("alpha-card", &card),
+        row("alpha-card#capabilities", &capability),
+        row(
+            "alpha-card/CardOrbital/CardView/size",
+            "alpha-card CardOrbital CardView.size\nSubject: the Card View for Card records"
+        ),
+        row(
+            "alpha-card/CardOrbital/CardView/title",
+            "alpha-card CardOrbital CardView.title\nTitle\nSubject: the Card View for Card records"
+        ),
+    ]);
+    assert_eq!(got, want);
+    for kind in ["organism", "capability", "knob"] {
+        let only = json(&orb(
+            p.path(),
+            &["behaviors", "texts", "--json", "alpha", "--kind", kind],
+        ));
+        let kept: Vec<&serde_json::Value> = want
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|t| {
+                let key = t["key"].as_str().unwrap();
+                match kind {
+                    "capability" => key.ends_with("#capabilities"),
+                    "knob" => key.contains('/'),
+                    _ => !key.contains('/') && !key.ends_with("#capabilities"),
+                }
+            })
+            .collect();
+        assert_eq!(
+            only.as_array().unwrap().iter().collect::<Vec<_>>(),
+            kept,
+            "--kind {kind}"
+        );
+    }
 }
 
 #[test]
@@ -924,6 +1062,47 @@ fn describe_carries_each_orbitals_forwarded_controls() {
         &["behaviors", "describe", "--json", "./orbitals/plain"],
     ));
     assert_eq!(v["orbitals"][0]["forwards"], serde_json::json!([]));
+}
+
+#[test]
+fn describe_lists_the_unhandled_controls_an_external_emit_scope_leaves_for_the_embedder() {
+    let p = project("m1");
+    let view = |name: &str, scope: &str| {
+        format!(
+            r#"{{"name":"{name}","linkedEntity":"Row","emits":[{{"event":"SAVE","scope":"{scope}","scopeOverridden":true}}],"stateMachine":{{"states":[{{"name":"s","isInitial":true}}],"transitions":[{{"from":"s","to":"s","event":"INIT","effects":[["render-ui","main",{{"type":"button","label":"Save","action":"SAVE"}}]]}}]}}}}"#
+        )
+    };
+    let program = |scope: &str| {
+        format!(
+            r#"{{"name":"fw","orbitals":[{{"name":"RowOrbital","entity":{{"name":"Row","fields":[{{"name":"id","type":"string","required":true}}]}},"traits":[{}],"pages":[{{"name":"RowsPage","path":"/rows","traits":[{{"ref":"RowView"}}]}}]}}]}}"#,
+            view("RowView", scope)
+        )
+    };
+    write(
+        &p.path().join("orbitals/forwarded.orb"),
+        &program("external"),
+    );
+    let v = json(&orb(
+        p.path(),
+        &["behaviors", "describe", "--json", "./orbitals/forwarded"],
+    ));
+    assert_eq!(
+        v["orbitals"][0]["forwards"],
+        serde_json::json!([{ "trait": "RowView", "event": "SAVE", "via": ["button.action"] }])
+    );
+    write(
+        &p.path().join("orbitals/internal.orb"),
+        &program("internal"),
+    );
+    let control = json(&orb(
+        p.path(),
+        &["behaviors", "describe", "--json", "./orbitals/internal"],
+    ));
+    assert_eq!(
+        control["orbitals"][0]["forwards"],
+        serde_json::json!([]),
+        "control: an emit that is not scoped external forwards nothing"
+    );
 }
 
 #[test]

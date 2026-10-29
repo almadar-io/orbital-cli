@@ -112,12 +112,11 @@ fn program_file(
 /// `orb compile` writes only programs that pass `orb validate`: the source before anything is generated, then every
 /// `.orb` the shell wrote.
 fn refuse_invalid(program: &Path, source: &Path) -> anyhow::Result<()> {
-    let registry = crate::utils::load_services_registry(None)?;
-    let diags =
-        crate::ports::validate::run_full_validation(program, Some(source), None, registry, false)?;
-    if diags.errors.is_empty() {
+    let errors = crate::utils::validation::findings_report(program, None, None, &[])?.errors;
+    if errors.is_empty() {
         return Ok(());
     }
+    let lines: Vec<String> = errors.iter().map(|e| format!("[{}] {}: {}", e.code, e.path, e.message)).collect();
     anyhow::bail!(
         "{} fails `orb validate` with {} error(s), so it is not compiled:\n{}",
         if program == source {
@@ -125,8 +124,8 @@ fn refuse_invalid(program: &Path, source: &Path) -> anyhow::Result<()> {
         } else {
             format!("{} (compiled from {})", program.display(), source.display())
         },
-        diags.errors.len(),
-        diags.errors.join("\n")
+        errors.len(),
+        lines.join("\n")
     )
 }
 

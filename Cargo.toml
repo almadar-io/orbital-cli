@@ -18,7 +18,7 @@ path = "src/bin/orb.rs"
 
 [dependencies]
 # Core crates
-orbital-core = { path = "../orbital-core", features = ["client-http", "native-transport"] }
+orbital-core = { path = "../orbital-core", features = ["client-http"] }
 orbital-compiler = { path = "../orbital-compiler" }
 orbital-lolo = { path = "../orbital-lolo" }
 orbital-shell-rust = { path = "../orbital-shell-rust" }

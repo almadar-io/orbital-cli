@@ -6,7 +6,7 @@ use super::{
 };
 use crate::{SourcePosition, ValidationJsonError, ValidationJsonOutput, ValidationJsonWarning, ValidationStats};
 use orbital_compiler::phases::validation::report::{
-    passes, validate_parsed, Finding, ProgramFinding, Report, SourceLocator, SourcePosition as Position, SourceSpan,
+    passes, validate_parsed, Finding, FindingSeverity, ProgramFinding, Report, SourceLocator, SourcePosition as Position, SourceSpan,
     ValidationInput,
 };
 
@@ -101,7 +101,7 @@ fn language_data_finding() -> Option<Finding> {
 
 /// The report for the file at `path`: discovery, read, parse, then the compiler pipeline. Never bails on a finding;
 /// a failure that stops validation is the report's one error.
-fn findings_report(
+pub(crate) fn findings_report(
     path: &std::path::Path,
     patterns_path: Option<&std::path::Path>,
     services_path: Option<&std::path::Path>,
@@ -129,10 +129,19 @@ fn findings_report(
     let (schema, source_map) = match super::parse_schema_auto_typed_with_map(&content, &path.display().to_string()) {
         Ok(parsed) => parsed,
         Err(e) => {
-            return Ok(Report {
+            let mut report = Report {
                 errors: typed_parse_error_to_json(&e, Some(&content)).into_iter().map(from_json_error).collect(),
                 ..Report::default()
-            })
+            };
+            for pf in program_findings {
+                let mut f = Finding::new(pf.code.clone(), pf.path.clone(), pf.message.clone(), Some(pf.suggestion.clone()).filter(|s| !s.is_empty()));
+                f.valid_values = pf.valid_values.clone();
+                match pf.severity {
+                    FindingSeverity::Error => report.errors.push(f),
+                    FindingSeverity::Warning => report.warnings.push(f),
+                }
+            }
+            return Ok(report);
         }
     };
     let language = match detect_language(&content) {
@@ -212,6 +221,31 @@ mod tests {
         let errors = report.errors.expect("errors");
         assert!(errors[0].position.is_some(), "{errors:?}");
         assert!(!report.valid);
+    }
+
+    fn lint_finding(severity: FindingSeverity) -> ProgramFinding {
+        ProgramFinding { code: "LINT_PASSED".into(), path: "app".into(), message: "the lint ran".into(), suggestion: String::new(), severity, valid_values: None }
+    }
+
+    #[test]
+    fn a_program_that_does_not_parse_still_reports_the_findings_the_lint_passed() {
+        let path = std::env::temp_dir().join(format!("orb-validation-{}-unparseable-lint.lolo", std::process::id()));
+        std::fs::write(&path, "app probe [ this does not parse").unwrap();
+        let findings = [lint_finding(FindingSeverity::Error), lint_finding(FindingSeverity::Warning)];
+        let report = validation_report(&path, None, None, false, &findings).expect("report");
+        let errors = report.errors.expect("errors");
+        assert!(errors.iter().any(|e| e.code == "LINT_PASSED"), "{errors:?}");
+        assert!(errors.iter().any(|e| e.position.is_some()), "{errors:?}");
+        assert!(report.warnings.expect("warnings").iter().any(|w| w.code == "LINT_PASSED"));
+    }
+
+    #[test]
+    fn control_a_program_that_does_not_parse_reports_no_lint_findings_when_the_lint_passed_none() {
+        let path = std::env::temp_dir().join(format!("orb-validation-{}-unparseable-nolint.lolo", std::process::id()));
+        std::fs::write(&path, "app probe [ this does not parse").unwrap();
+        let report = validation_report(&path, None, None, false, &[]).expect("report");
+        assert!(report.errors.expect("errors").iter().all(|e| e.code != "LINT_PASSED"));
+        assert!(report.warnings.is_none());
     }
 
     #[test]

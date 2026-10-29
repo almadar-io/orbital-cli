@@ -176,6 +176,10 @@ pub(crate) struct CatalogRow {
     pub(crate) package: String,
     pub(crate) prefix: String,
     pub(crate) row: BehaviorRow,
+    /// The package's place among the packages the scopes name, in first-mention order.
+    pub(crate) rank: usize,
+    /// The row's place among its package's rows, in path order.
+    pub(crate) order: usize,
 }
 
 /// The installed behaviors under `paths` (`<prefix>[/<dir>…]`, `std` naming the std package), narrowed to `exposure`
@@ -220,10 +224,17 @@ pub(crate) fn catalog_rows(
             derived.insert(*package, rows);
         }
     }
+    let mut first_mention: Vec<usize> = Vec::new();
+    for (package, _) in &scopes {
+        if !first_mention.contains(package) {
+            first_mention.push(*package);
+        }
+    }
     let mut out: std::collections::BTreeMap<String, CatalogRow> = Default::default();
     for (package, dirs) in &scopes {
         let pkg = &packages[*package];
-        for row in &derived[package].rows {
+        let rank = first_mention.iter().position(|p| p == package).unwrap_or(0);
+        for (order, row) in derived[package].rows.iter().enumerate() {
             let in_scope = row.dirs.len() >= dirs.len() && row.dirs[..dirs.len()] == dirs[..];
             let exposed = exposure.is_empty() || row.exposure.as_deref().is_some_and(|e| exposure.iter().any(|x| x == e));
             if in_scope && exposed {
@@ -233,6 +244,8 @@ pub(crate) fn catalog_rows(
                         package: pkg.name.clone(),
                         prefix: pkg.prefix.clone(),
                         row: row.clone(),
+                        rank,
+                        order,
                     },
                 );
             }

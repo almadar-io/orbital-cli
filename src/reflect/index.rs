@@ -27,6 +27,8 @@ pub(crate) struct BehaviorRow {
     pub(crate) capabilities: Option<String>,
     pub(crate) pattern: Option<String>,
     pub(crate) traits: Vec<String>,
+    pub(crate) default_entity_name: String,
+    pub(crate) connectable_events: Vec<String>,
 }
 
 type Lookup<'a> = &'a dyn Fn(&str) -> Option<Rc<Value>>;
@@ -34,6 +36,8 @@ type Lookup<'a> = &'a dyn Fn(&str) -> Option<Rc<Value>>;
 struct ProgramFacts {
     description: String,
     state_pattern: String,
+    default_entity_name: String,
+    connectable_events: Vec<String>,
     traits: Vec<String>,
 }
 
@@ -151,10 +155,25 @@ fn signature_traits(orbital: &Value, lookup: Lookup, depth: usize) -> Vec<String
     names
 }
 
+/// The names of the entities an orbital signs: its inline entity, else the imported orbital's.
+fn signature_entities(orbital: &Value, lookup: Lookup, depth: usize) -> Vec<Option<String>> {
+    let own: Vec<Option<String>> = match orbital.get("entity") {
+        Some(e) if e.is_object() && e.get("extends").is_none() => vec![str_of(e, "name").map(str::to_string)],
+        _ => Vec::new(),
+    };
+    if !own.is_empty() || depth >= MAX_IMPORT_DEPTH || orbital.get("reference").is_none() {
+        return own;
+    }
+    match import_target(orbital, lookup) {
+        Some((target, at)) => signature_entities(&array(&target, "orbitals")[at], lookup, depth + 1),
+        None => own,
+    }
+}
+
 /// The facts a lowered program yields; `None` when it has no orbital.
 fn program_facts(orb: &Value, lookup: Lookup) -> Option<ProgramFacts> {
     let orbitals = array(orb, "orbitals");
-    orbitals.first()?;
+    let first = orbitals.first()?;
     let machines: Vec<Value> = orbitals.iter().filter_map(|o| orbital_machine(o, lookup)).collect();
     let mut states: Vec<&str> = machines
         .iter()
@@ -162,6 +181,28 @@ fn program_facts(orb: &Value, lookup: Lookup) -> Option<ProgramFacts> {
         .filter_map(|s| str_of(s, "name"))
         .collect();
     states.sort_unstable();
+    let mut seen_events = HashSet::new();
+    let connectable_events: Vec<String> = machines
+        .iter()
+        .flat_map(|m| array(m, "events"))
+        .filter_map(|e| str_of(e, "key"))
+        .filter(|k| *k != "INIT")
+        .filter(|k| seen_events.insert(*k))
+        .map(str::to_string)
+        .collect();
+    let entity = first.get("entity");
+    let referenced = match entity {
+        Some(e) if e.is_string() || (e.is_object() && e.get("extends").is_some()) => signature_entities(first, lookup, 0).into_iter().next(),
+        _ => None,
+    };
+    let default_entity_name = match referenced {
+        Some(Some(name)) => name,
+        _ => entity
+            .and_then(|e| str_of(e, "name"))
+            .filter(|n| !n.is_empty())
+            .unwrap_or("Item")
+            .to_string(),
+    };
     let mut seen = HashSet::new();
     let traits: Vec<String> = orbitals
         .iter()
@@ -171,6 +212,8 @@ fn program_facts(orb: &Value, lookup: Lookup) -> Option<ProgramFacts> {
     Some(ProgramFacts {
         description: str_of(orb, "description").unwrap_or("").to_string(),
         state_pattern: states.join(", "),
+        default_entity_name,
+        connectable_events,
         traits,
     })
 }
@@ -279,6 +322,8 @@ fn row_of(
         capabilities: tags.capabilities,
         pattern: tags.pattern,
         traits: facts.traits,
+        default_entity_name: facts.default_entity_name,
+        connectable_events: facts.connectable_events,
     }))
 }
 
@@ -389,5 +434,22 @@ mod tests {
         assert!(facts(&json!({"orbitals": []}), &[]).is_none());
         let orb = json!({"orbitals": [{"name": "A", "traits": [{"name": "Shared"}]}, {"name": "B", "traits": [{"name": "Shared"}, {"name": "Own"}]}]});
         assert_eq!(facts(&orb, &[]).unwrap().traits, ["Shared", "Own"]);
+    }
+
+    #[test]
+    fn the_connectable_events_skip_init_once_and_the_entity_is_the_first_orbitals_own_else_the_imported_one() {
+        let machine = json!({ "states": [{"name": "s"}], "events": [{"key": "GO"}, {"key": "INIT"}, {"key": "GO"}, {"key": "STOP"}], "transitions": [] });
+        let own = json!({"orbitals": [{"name": "O", "entity": {"name": "Note"}, "traits": [{"name": "T", "stateMachine": machine}]}]});
+        let f = facts(&own, &[]).unwrap();
+        assert_eq!(f.connectable_events, ["GO", "STOP"]);
+        assert_eq!(f.default_entity_name, "Note");
+        let importing = json!({"orbitals": [{"name": "Mine", "uses": [{"from": "std-up.orb", "as": "U"}], "reference": {"ref": "U.orbitals.Up"}, "entity": {"name": "Local", "extends": "X"}, "traits": []}]});
+        let upstream = json!({"orbitals": [{"name": "Up", "entity": {"name": "Upstream"}, "traits": []}]});
+        assert_eq!(facts(&importing, &[("std-up", upstream)]).unwrap().default_entity_name, "Upstream");
+        assert_eq!(facts(&importing, &[]).unwrap().default_entity_name, "Local");
+        let bare = json!({"orbitals": [{"name": "O", "traits": []}]});
+        let f = facts(&bare, &[]).unwrap();
+        assert_eq!(f.default_entity_name, "Item");
+        assert!(f.connectable_events.is_empty());
     }
 }
