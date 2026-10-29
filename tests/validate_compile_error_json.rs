@@ -65,9 +65,7 @@ const WELL_FORMED_PERSIST: &str = r#"{
       "traits": [
         {
           "name": "NoteFeed",
-          "category": "interaction",
           "linkedEntity": "Note",
-          "scope": "collection",
           "emits": [
             { "event": "SAVE", "scope": "external", "tier": "domain", "payloadSchema": [{ "name": "body", "type": "string" }] },
             { "event": "SAVED", "scope": "external", "tier": "domain", "payloadSchema": [{ "name": "id", "type": "string" }] },

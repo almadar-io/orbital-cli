@@ -14,8 +14,6 @@ mod commands;
 mod emit;
 mod utils;
 
-use commands::run_which;
-
 pub use utils::{parse_schema_auto_typed, TypedParseError};
 
 #[derive(Parser)]
@@ -147,15 +145,11 @@ enum Commands {
         program: PathBuf,
     },
 
-    /// Behavior packages — install/remove/update/inspect the npm packages
-    /// `uses` resolves against (Almadar_Behavior_Packages.md).
+    /// Behavior packages: the one verb std's program cannot answer yet (`vectors snapshot`).
     Behaviors {
         #[command(subcommand)]
         command: BehaviorsCommand,
     },
-
-
-
 }
 
 #[derive(Subcommand)]
@@ -175,84 +169,10 @@ enum VectorsCommand {
 
 #[derive(Subcommand)]
 enum BehaviorsCommand {
-    /// Resolve one `uses` specifier ("which copy compiled?") — prints the
-    /// resolved `.orb` path and the owning package.
-    Which {
-        /// `<prefix>/<name>` or `std/behaviors/<name>`.
-        spec: String,
-    },
-    /// The installed behaviors under one or more registry scopes
-    /// (`<prefix>/<topic>[/<tier>]`, e.g. `almadar-std/ui/core/molecules`;
-    /// `std/...` spells the std package), with descriptions, trait values and
-    /// shipped embedding vectors.
-    Catalog {
-        /// Scope paths: a package prefix, optionally narrowed by topic and tier.
-        #[arg(required = true)]
-        paths: Vec<String>,
-        /// Keep only entries with one of these exposures
-        /// (`app|experience|palette|both|internal`); repeatable.
-        #[arg(long)]
-        exposure: Vec<String>,
-        /// Print as JSON (`CatalogEntry[]`).
-        #[arg(long)]
-        json: bool,
-        /// Leave out the vectors (and the embedding model): no vector store or provider is read.
-        #[arg(long)]
-        no_vectors: bool,
-        /// Leave out each entry's trait values (`behavior/catalog` `traits: false`).
-        #[arg(long)]
-        no_traits: bool,
-        /// Print each package and topic once with how many entries it holds (`CatalogTopic[]`), not the entries.
-        #[arg(long)]
-        topics: bool,
-    },
-    /// The texts an installed package embeds, one `{ key, text, hash }` each: the organism
-    /// text, its `<name>#capabilities` text and every knob text, in embed order.
-    Texts {
-        /// Scope paths, as `catalog` takes them (a package prefix, optionally narrowed).
-        #[arg(required = true)]
-        paths: Vec<String>,
-        /// Keep only one kind of text (`organism|capability|knob`).
-        #[arg(long)]
-        kind: Option<String>,
-        /// Print as JSON (the only format; accepted for symmetry with `catalog`).
-        #[arg(long)]
-        json: bool,
-    },
-    /// Describe one trait of an installed behavior: knobs, events, embedding
-    /// model. Knob vectors are attached only with `--knob-vectors`.
-    Describe {
-        /// `<behavior>.traits.<Trait>`, or `-` to read a trait value (JSON) from stdin.
-        spec: String,
-        /// Print as JSON (`TraitDescription`).
-        #[arg(long)]
-        json: bool,
-        /// Attach each knob's embedding vector, embedding the trait's knob texts on a miss
-        /// (needs an embedding provider; stored in `~/.almadar/vectors`).
-        #[arg(long)]
-        knob_vectors: bool,
-    },
     /// The embedding vector store (`~/.almadar/vectors`).
     Vectors {
         #[command(subcommand)]
         command: VectorsCommand,
-    },
-    /// Derive every orbital's `expects` from the behavior as written (imports resolved through
-    /// the loader): `{ <orbital>: { expectations, diagnostics } }`.
-    Expects {
-        /// `<prefix>/<name>`, `std/behaviors/<name>`, a workspace-relative `./<dir>/<name>`, or a `.orb` path.
-        spec: String,
-        /// Print as JSON.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Print a behavior's `.orb` as JSON (the file the loader resolves).
-    Source {
-        /// `<prefix>/<name>`, `std/behaviors/<name>` or a workspace-relative `./<dir>/<name>`.
-        spec: String,
-        /// Print as JSON.
-        #[arg(long)]
-        json: bool,
     },
 }
 
@@ -340,9 +260,6 @@ fn run_command(args: &[String]) -> anyhow::Result<i32> {
             | Some(Commands::Add { .. })
             | Some(Commands::Remove { .. })
             | Some(Commands::List { .. })
-            | Some(Commands::Behaviors {
-                command: BehaviorsCommand::Which { .. }
-            })
     );
     if needs_language_data {
         tracing::info_span!(target: ns::CLI, "language data").in_scope(crate::utils::require_language_data)?;
@@ -361,28 +278,11 @@ fn run_command(args: &[String]) -> anyhow::Result<i32> {
 fn dispatch(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
         Some(Commands::Behaviors { command }) => match command {
-            BehaviorsCommand::Which { spec } => run_which(spec),
-            BehaviorsCommand::Catalog {
-                paths,
-                exposure,
-                json,
-                no_vectors,
-                no_traits,
-                topics,
-            } => commands::run_catalog(paths, exposure, json, no_vectors, no_traits, topics),
-            BehaviorsCommand::Texts { paths, kind, json: _ } => commands::run_texts(paths, kind),
-            BehaviorsCommand::Describe {
-                spec,
-                json,
-                knob_vectors,
-            } => commands::run_describe(spec, json, knob_vectors),
             BehaviorsCommand::Vectors { command } => match command {
                 VectorsCommand::Snapshot { package, out } => {
                     commands::behaviors_vectors_snapshot::run_snapshot(package, out)
                 }
             },
-            BehaviorsCommand::Source { spec, json } => commands::run_source(spec, json),
-            BehaviorsCommand::Expects { spec, json } => commands::run_expects(spec, json),
         },
         Some(Commands::Run { program }) => commands::program_command::run_program(&program),
         Some(Commands::Update { global }) => commands::packages::run_update(global),

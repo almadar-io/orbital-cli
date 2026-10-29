@@ -2,7 +2,7 @@
 
 use crate::utils::{
     detect_language, detect_syntax, load_extra_patterns, load_services_registry,
-    merge_post_inline_diagnostics, parse_schema_auto_typed_with_map, parse_schema_auto_with_map,
+    merge_post_inline_diagnostics, parse_schema_auto_typed_with_map,
     typed_parse_error_to_json,
 };
 use crate::{
@@ -10,7 +10,6 @@ use crate::{
     ValidationStats,
 };
 use orbital_core::logging::ns;
-use std::path::PathBuf;
 
 /// `.lolo` source facts the lowered schema cannot carry. The pre-bracket app
 /// header (a positional version, description/theme/locales/public on loose
@@ -35,7 +34,8 @@ pub(crate) fn source_findings(content: &str) -> Vec<Finding> {
     )]
 }
 
-/// `orb validate --json`'s report as a value — what the CLI prints and `orb mcp` returns.
+/// `orb validate --json`'s report as a value — what the CLI prints and `orb mcp` returns: the one [`Report`] rendered
+/// as JSON rows.
 pub(crate) fn validation_report(
     path: &std::path::Path,
     patterns_path: Option<&std::path::Path>,
@@ -44,26 +44,22 @@ pub(crate) fn validation_report(
     final_program: bool,
     findings: &[ProgramFinding],
 ) -> anyhow::Result<ValidationJsonOutput> {
-    if let Err(e) = tracing::info_span!(target: ns::CLI, "language data").in_scope(crate::utils::patterns::ensure_language_ready) {
-        return Ok(ValidationJsonOutput {
-            success: true,
-            valid: false,
-            errors: Some(vec![language_data_json_error(&e)]),
-            warnings: None,
-            stats: None,
-        });
-    }
-    let path = path.to_path_buf();
-    let extra_patterns = load_extra_patterns(&path, patterns_path);
-    let service_registry = load_services_registry(services_path)?;
-    validate_schema_json(
-        &path,
-        extra_patterns,
-        service_registry,
-        deny_warnings,
-        final_program,
-        findings,
-    )
+    let report = if let Some(refused) = language_data_finding() {
+        Report::refused(refused)
+    } else {
+        let extra_patterns = load_extra_patterns(path, patterns_path);
+        let service_registry = load_services_registry(services_path)?;
+        findings_report(path, None, extra_patterns, service_registry, final_program, findings)
+    };
+    Ok(report.into_json(deny_warnings))
+}
+
+/// The finding for a missing/incompatible installed language data package, when there is one.
+fn language_data_finding() -> Option<Finding> {
+    let error = tracing::info_span!(target: ns::CLI, "language data")
+        .in_scope(crate::utils::patterns::ensure_language_ready)
+        .err()?;
+    Some(Finding::from_json_error(language_data_json_error(&error)))
 }
 
 /// The JSON error for a missing/incompatible installed `@almadar/core` / `@almadar/std`
@@ -160,108 +156,113 @@ pub(crate) fn inline_error_needs_install(
     )
 }
 
-/// Validate schema with JSON output (for programmatic consumption by DeepAgent)
-fn validate_schema_json(
-    path: &PathBuf,
-    extra_patterns: Option<orbital_compiler::ExtraPatterns>,
-    service_registry: orbital_compiler::embedded::ServiceRegistryData,
-    deny_warnings: bool,
-    final_program: bool,
-    findings: &[ProgramFinding],
-) -> anyhow::Result<ValidationJsonOutput> {
-    use orbital_compiler::CompilerOptions;
+/// What validating one file found: the findings every renderer (text, JSON, `orb mcp`, `orb compile`'s gate) reads.
+pub(crate) struct Report {
+    pub errors: Vec<Finding>,
+    pub warnings: Vec<Finding>,
+    pub stats: Option<ValidationStats>,
+}
 
-    // Behavior-package discovery runs unconditionally in `from_env` — a
-    // `PrefixConflict` (or a malformed installed package) is validator
-    // infrastructure, never a schema authoring error, so it is reported
-    // before the schema is even read.
-    let discovery_probe = tracing::info_span!(target: ns::CLI, "discover packages").in_scope(CompilerOptions::from_env);
-    if let Some(discovery_err) = &discovery_probe.discovery_error {
-        let output = ValidationJsonOutput {
-            success: true,
-            valid: false,
-            errors: Some(vec![ValidationJsonError {
-                code: discovery_error_json_code(discovery_err).to_string(),
-                path: "".to_string(),
-                message: discovery_err.to_string(),
-                suggestion: Some(
-                    "Validator environment error — the schema was NOT evaluated; retry, do not edit the schema"
-                        .to_string(),
-                ),
-                fix_guidance: None,
-                expected_shape: None,
-                valid_values: None,
-                position: None,
-                needs_install: None,
-            }]),
-            warnings: None,
+impl Report {
+    /// A report whose one finding stopped validation before the schema was evaluated.
+    fn refused(finding: Finding) -> Self {
+        Self {
+            errors: vec![finding],
+            warnings: Vec::new(),
             stats: None,
-        };
-        return Ok(output);
+        }
     }
 
-    // Step 1: Parse schema (auto-detect LOLO vs JSON syntax)
+    pub(crate) fn into_json(self, deny_warnings: bool) -> ValidationJsonOutput {
+        let errors: Vec<ValidationJsonError> =
+            self.errors.into_iter().map(finding_json_error).collect();
+        let warnings: Vec<ValidationJsonWarning> =
+            self.warnings.into_iter().map(finding_json_warning).collect();
+        ValidationJsonOutput {
+            success: true,
+            valid: validation_passes(errors.len(), warnings.len(), deny_warnings),
+            errors: (!errors.is_empty()).then_some(errors),
+            warnings: (!warnings.is_empty()).then_some(warnings),
+            stats: self.stats,
+        }
+    }
+
+    pub(crate) fn into_text(self) -> ValidationDiagnostics {
+        ValidationDiagnostics {
+            errors: self.errors.iter().map(Finding::render).collect(),
+            warnings: self.warnings.iter().map(Finding::render).collect(),
+        }
+    }
+}
+
+/// The one producer of a file's findings: discovery, read, parse, then [`validate_schema_core`]. Never bails on a
+/// finding; a failure that stops validation is the report's one error.
+pub(crate) fn findings_report(
+    path: &std::path::Path,
+    resources_beside: Option<&std::path::Path>,
+    extra_patterns: Option<orbital_compiler::ExtraPatterns>,
+    service_registry: orbital_compiler::embedded::ServiceRegistryData,
+    final_program: bool,
+    program_findings: &[ProgramFinding],
+) -> Report {
+    use orbital_compiler::CompilerOptions;
+
+    let discovery_probe = tracing::info_span!(target: ns::CLI, "discover packages").in_scope(CompilerOptions::from_env);
+    if let Some(discovery_err) = &discovery_probe.discovery_error {
+        return Report::refused(Finding {
+            code: discovery_error_json_code(discovery_err).to_string(),
+            message: discovery_err.to_string(),
+            suggestion: Some(
+                "Validator environment error — the schema was NOT evaluated; retry, do not edit the schema"
+                    .to_string(),
+            ),
+            ..Finding::default()
+        });
+    }
+
     let content_raw = match std::fs::read_to_string(path) {
         Ok(c) => c,
         Err(e) => {
-            // Handle file read error similar to parse error
-            let output = ValidationJsonOutput {
-                success: true,
-                valid: false,
-                errors: Some(vec![ValidationJsonError {
-                    code: "FILE_READ_ERROR".to_string(),
-                    path: "".to_string(),
-                    message: format!("Failed to read schema file: {}", e),
-                    suggestion: None,
-                    fix_guidance: None,
-                    expected_shape: None,
-                    valid_values: None,
-                    position: None,
-                    needs_install: None,
-                }]),
-                warnings: None,
-                stats: None,
-            };
-            return Ok(output);
+            return Report::refused(Finding {
+                code: "FILE_READ_ERROR".to_string(),
+                message: format!("Failed to read schema file: {e}"),
+                ..Finding::default()
+            })
         }
     };
 
-    let (mut schema, source_map) =
-        match tracing::info_span!(target: ns::CLI, "lower").in_scope(|| parse_schema_auto_typed_with_map(&content_raw, &path.display().to_string())) {
-            Ok(s) => s,
-            Err(e) => {
-                // Map parse/lower/type errors into typed `ValidationJsonError`
-                // rows — includes the `ORB_T_TYPE_*` family for `.lolo` type
-                // check failures so consumers (agent retry loops, editor
-                // tooling) can switch on the code instead of regexing a
-                // human-readable string.
-                let output = ValidationJsonOutput {
-                    success: true,
-                    valid: false,
-                    errors: Some(typed_parse_error_to_json(&e, Some(&content_raw))),
-                    warnings: None,
-                    stats: None,
-                };
-                return Ok(output);
+    let (schema, source_map) = match tracing::info_span!(target: ns::CLI, "lower")
+        .in_scope(|| parse_schema_auto_typed_with_map(&content_raw, &path.display().to_string()))
+    {
+        Ok(parsed) => parsed,
+        Err(e) => {
+            return Report {
+                errors: typed_parse_error_to_json(&e, Some(&content_raw))
+                    .into_iter()
+                    .map(Finding::from_json_error)
+                    .collect(),
+                warnings: Vec::new(),
+                stats: None,
             }
-        };
+        }
+    };
 
-    let json_language = match detect_language(&content_raw) {
+    let schema_language = match detect_language(&content_raw) {
         Some(lang) if lang != "en" => orbital_compiler::SchemaLanguage::NonLatin(lang),
         _ => orbital_compiler::SchemaLanguage::English,
     };
 
     let core = validate_schema_core(
         schema,
-        Some(path.as_path()),
+        Some(resources_beside.unwrap_or(path)),
         source_map.as_ref(),
-        json_language,
-        path.as_path(),
+        schema_language,
+        path,
         extra_patterns,
         service_registry,
         &discovery_probe,
         final_program,
-        findings.to_vec(),
+        program_findings.to_vec(),
     );
     let stats = core.inlined.as_ref().map(|inlined| ValidationStats {
         orbitals: inlined.orbitals.len(),
@@ -275,16 +276,11 @@ fn validate_schema_json(
             .sum(),
     });
     let (errors, warnings) = reported_findings(core, &content_raw);
-    let errors: Vec<ValidationJsonError> = errors.into_iter().map(finding_json_error).collect();
-    let warnings: Vec<ValidationJsonWarning> =
-        warnings.into_iter().map(finding_json_warning).collect();
-    Ok(ValidationJsonOutput {
-        success: true,
-        valid: validation_passes(errors.len(), warnings.len(), deny_warnings),
-        errors: (!errors.is_empty()).then_some(errors),
-        warnings: (!warnings.is_empty()).then_some(warnings),
+    Report {
+        errors,
+        warnings,
         stats,
-    })
+    }
 }
 
 impl orbital_compiler::phases::validation::orbital_ref_config::CascadeRow for ProgramFinding {
@@ -482,15 +478,13 @@ fn finding_json_warning(f: Finding) -> ValidationJsonWarning {
     }
 }
 
-/// One validation finding. `text` is the exact human line `orb validate`
-/// prints; the structured fields serve `--json` and lazy-child prefixing.
+/// One validation finding: the one model every renderer reads.
 #[derive(Default)]
 pub(crate) struct Finding {
     pub code: String,
     pub path: String,
     pub message: String,
     pub suggestion: Option<String>,
-    pub text: String,
     pub fix_guidance: Option<String>,
     pub expected_shape: Option<String>,
     pub valid_values: Option<Vec<String>>,
@@ -499,9 +493,45 @@ pub(crate) struct Finding {
 }
 
 impl Finding {
+    fn from_json_error(e: ValidationJsonError) -> Self {
+        Self {
+            code: e.code,
+            path: e.path,
+            message: e.message,
+            suggestion: e.suggestion,
+            fix_guidance: e.fix_guidance,
+            expected_shape: e.expected_shape,
+            valid_values: e.valid_values,
+            position: e.position,
+            needs_install: e.needs_install,
+        }
+    }
+
+    /// The human line: `[code] path: message @ line:col`, then the suggestion and the fix guidance. A finding with no
+    /// code is its message alone.
+    pub(crate) fn render(&self) -> String {
+        if self.code.is_empty() {
+            return self.message.clone();
+        }
+        let mut line = if self.path.is_empty() {
+            format!("[{}] {}", self.code, self.message)
+        } else {
+            format!("[{}] {}: {}", self.code, self.path, self.message)
+        };
+        if let Some(position) = &self.position {
+            line.push_str(&format!(" @ {}:{}", position.line, position.column));
+        }
+        if let Some(suggestion) = &self.suggestion {
+            line.push_str(&format!(" \u{1f4a1} {suggestion}"));
+        }
+        if let Some(guidance) = &self.fix_guidance {
+            line.push_str(&format!(" {guidance}"));
+        }
+        line
+    }
+
     fn new(code: String, path: String, message: String, suggestion: Option<String>) -> Self {
         Self {
-            text: format!("[{code}] {path}: {message}"),
             code,
             path,
             message,
@@ -522,13 +552,6 @@ fn located_finding(
     guidance: Option<&str>,
 ) -> Finding {
     let resolved = source_map.and_then(|m| m.lookup_detailed(&path));
-    let mut text = format!("[{code}] {path}: {message}");
-    if let Some((span, _)) = &resolved {
-        text.push_str(&format!(" @ {}:{}", span.line, span.col));
-    }
-    if let Some(sug) = &suggestion {
-        text.push_str(&format!(" \u{1f4a1} {sug}"));
-    }
     Finding {
         fix_guidance: located_guidance(resolved.as_ref(), guidance),
         position: resolved.map(|(span, exact)| SourcePosition::of(span, exact)),
@@ -536,7 +559,6 @@ fn located_finding(
         path,
         message,
         suggestion,
-        text,
         ..Finding::default()
     }
 }
@@ -560,64 +582,7 @@ pub(crate) struct CoreValidation {
     pub inlined: Option<orbital_core::schema::OrbitalSchema>,
 }
 
-/// Run the full static validation pipeline on `path` — the SAME pipeline
-/// `orb validate` runs: parse -> inline -> enrich -> `validate_comprehensive_full`
-/// -> compile to OIR -> `OirValidator`. Returns the findings (errors, warnings); never
-/// bails on validation errors, only on I/O failures.
-/// `extra_patterns` / `service_registry` mirror the `orb validate` inputs.
-pub(crate) fn full_findings(
-    path: &std::path::Path,
-    resources_beside: Option<&std::path::Path>,
-    extra_patterns: Option<orbital_compiler::ExtraPatterns>,
-    service_registry: orbital_compiler::embedded::ServiceRegistryData,
-    final_program: bool,
-) -> anyhow::Result<(Vec<Finding>, Vec<Finding>)> {
-    use orbital_compiler::{CompilerOptions, SchemaLanguage};
-
-    // Behavior-package discovery runs unconditionally in `from_env` — a
-    // `PrefixConflict` (or a malformed installed package) is validator
-    // infrastructure, checked before the schema is even read.
-    let default_opts = tracing::info_span!(target: ns::CLI, "discover packages").in_scope(CompilerOptions::from_env);
-    if let Some(discovery_err) = &default_opts.discovery_error {
-        let code = discovery_error_json_code(discovery_err);
-        let message = discovery_err.to_string();
-        return Ok((
-            vec![Finding {
-                text: format!(
-                    "[{code}] {message} (validator environment error — the schema was NOT evaluated; retry, do not edit the schema)"
-                ),
-                code: code.to_string(),
-                message,
-                ..Finding::default()
-            }],
-            Vec::new(),
-        ));
-    }
-
-    let content_raw = std::fs::read_to_string(path)?;
-    let schema_language = match detect_language(&content_raw) {
-        Some(lang) if lang != "en" => SchemaLanguage::NonLatin(lang),
-        _ => SchemaLanguage::English,
-    };
-    let (schema, source_map) = tracing::info_span!(target: ns::CLI, "lower")
-        .in_scope(|| parse_schema_auto_with_map(&content_raw, &path.display().to_string()))?;
-
-    let core = validate_schema_core(
-        schema,
-        Some(resources_beside.unwrap_or(path)),
-        source_map.as_ref(),
-        schema_language,
-        path,
-        extra_patterns,
-        service_registry,
-        &default_opts,
-        final_program,
-        Vec::new(),
-    );
-    Ok(reported_findings(core, &content_raw))
-}
-
-/// [`full_findings`] rendered as the human lines `orb compile` and `orb verify` print.
+/// [`findings_report`] rendered as the human lines `orb compile`'s gate prints.
 pub(crate) fn run_full_validation(
     path: &std::path::Path,
     resources_beside: Option<&std::path::Path>,
@@ -625,11 +590,11 @@ pub(crate) fn run_full_validation(
     service_registry: orbital_compiler::embedded::ServiceRegistryData,
     final_program: bool,
 ) -> anyhow::Result<ValidationDiagnostics> {
-    let (errors, warnings) = full_findings(path, resources_beside, extra_patterns, service_registry, final_program)?;
-    Ok(ValidationDiagnostics {
-        errors: errors.into_iter().map(|f| f.text).collect(),
-        warnings: warnings.into_iter().map(|f| f.text).collect(),
-    })
+    let report = match language_data_finding() {
+        Some(refused) => Report::refused(refused),
+        None => findings_report(path, resources_beside, extra_patterns, service_registry, final_program, &[]),
+    };
+    Ok(report.into_text())
 }
 
 /// Validates every `uses lazy` behavior split out of `schema` with the same
@@ -659,10 +624,8 @@ pub(crate) fn validate_lazy_children(
             Vec::new(),
         );
         let prefix = |f: Finding| {
-            let path = format!("lazy[{}].{}", artifact.orbital, f.path);
             Finding {
-                text: format!("[{}] {}: {}", f.code, path, f.message),
-                path,
+                path: format!("lazy[{}].{}", artifact.orbital, f.path),
                 ..f
             }
         };
@@ -802,14 +765,7 @@ pub(crate) fn validate_schema_core(
         } else {
             e.structured_code().to_string()
         };
-        let path_part = match e.structured_path() {
-            "" => String::new(),
-            p => format!(" {p}:"),
-        };
         errors.push(Finding {
-            text: format!(
-                "[{code}]{path_part} {message} (schema not fully resolved — downstream validation suppressed until this is fixed)"
-            ),
             code,
             path: e.structured_path().to_string(),
             message,
@@ -823,6 +779,10 @@ pub(crate) fn validate_schema_core(
             } else {
                 "Check `uses:` imports resolve to known behaviors".to_string()
             }),
+            fix_guidance: Some(
+                "(schema not fully resolved — downstream validation suppressed until this is fixed)"
+                    .to_string(),
+            ),
             position,
             needs_install: needs_install.then_some(true),
             ..Finding::default()
@@ -935,7 +895,6 @@ pub(crate) fn validate_schema_core(
                     .to_string(),
                     path: e.path.clone(),
                     message: e.message.clone(),
-                    text: format!("OIR {e}"),
                     ..Finding::default()
                 };
                 if e.severity == ValidationSeverity::Error {
@@ -949,8 +908,7 @@ pub(crate) fn validate_schema_core(
             // number-returning operator calls) — they run with JS truthiness.
             for w in orbital_compiler::type_infer::collect_guard_type_warnings(&module) {
                 warnings.push(Finding {
-                    message: w.clone(),
-                    text: w,
+                    message: w,
                     ..Finding::default()
                 });
             }
@@ -1107,7 +1065,6 @@ mod one_finding_list_tests {
         {
           "name": "Counter",
           "linkedEntity": "Item",
-          "category": "interaction",
           "stateMachine": {
             "states": [ { "name": "idle", "isInitial": true } ],
             "events": [ { "key": "GO" } ],
@@ -1144,7 +1101,7 @@ mod one_finding_list_tests {
         assert_eq!(errors.len(), text.errors.len(), "errors: {errors:?} vs {:?}", text.errors);
         assert_eq!(warnings.len(), text.warnings.len(), "warnings: {warnings:?} vs {:?}", text.warnings);
         for e in &errors {
-            let prefix = format!("[{}] {}:", e.code, e.path);
+            let prefix = if e.path.is_empty() { format!("[{}] ", e.code) } else { format!("[{}] {}:", e.code, e.path) };
             assert!(text.errors.iter().any(|t| t.starts_with(&prefix)), "no text line for {prefix} in {:?}", text.errors);
         }
         for w in &warnings {
@@ -1157,6 +1114,39 @@ mod one_finding_list_tests {
             assert!(hit, "no text line for warning {w:?} in {:?}", text.warnings);
         }
         (errors, warnings)
+    }
+
+    #[test]
+    fn a_program_that_does_not_parse_is_the_same_finding_in_both_renders() {
+        let path = fixture("unparseable", "lolo", "app probe [ this does not parse");
+        let (errors, _) = report_and_text(&path);
+        assert!(!errors.is_empty());
+        assert!(errors[0].position.is_some(), "the parse finding carries its span: {errors:?}");
+    }
+
+    #[test]
+    fn a_missing_file_is_the_same_finding_in_both_renders() {
+        let path = std::env::temp_dir().join(format!("orb-one-finding-list-{}-absent.lolo", std::process::id()));
+        let (errors, _) = report_and_text(&path);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code, "FILE_READ_ERROR");
+    }
+
+    #[test]
+    fn the_text_line_is_rendered_from_the_finding_alone() {
+        use super::Finding;
+        let finding = Finding {
+            code: "ORB_X".into(),
+            path: "orbitals.A".into(),
+            message: "broken".into(),
+            suggestion: Some("fix it".into()),
+            ..Finding::default()
+        };
+        assert_eq!(finding.render(), "[ORB_X] orbitals.A: broken \u{1f4a1} fix it");
+        let pathless = Finding { path: String::new(), suggestion: None, ..finding };
+        assert_eq!(pathless.render(), "[ORB_X] broken", "control: no path, no suggestion");
+        let codeless = Finding { code: String::new(), message: "guard".into(), ..pathless };
+        assert_eq!(codeless.render(), "guard", "control: a finding with no code is its message");
     }
 
     #[test]

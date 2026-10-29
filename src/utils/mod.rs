@@ -12,7 +12,7 @@ pub(crate) mod terminal;
 
 pub(crate) use bun::find_bun;
 pub(crate) use detect::{
-    detect_syntax, parse_schema_auto, parse_schema_auto_with_map,
+    detect_syntax, parse_schema_auto,
     typed_parse_error_to_json, InputSyntax,
 };
 pub use detect::{parse_schema_auto_typed, parse_schema_auto_typed_with_map, TypedParseError};

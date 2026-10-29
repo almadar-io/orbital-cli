@@ -48,6 +48,7 @@ pub(crate) fn parse_schema_auto(
 pub enum TypedParseError {
     Lolo(orbital_lolo::LoloError),
     Json(String),
+    RetiredKeys(Vec<orbital_core::schema::RetiredTraitKey>),
 }
 
 impl TypedParseError {
@@ -56,6 +57,11 @@ impl TypedParseError {
         match self {
             TypedParseError::Lolo(e) => format!("LOLO parse error: {}", e.render_with_hint()),
             TypedParseError::Json(msg) => format!("JSON parse error: {msg}"),
+            TypedParseError::RetiredKeys(rows) => rows
+                .iter()
+                .map(|r| format!("{} at {}", r.message(), r.path))
+                .collect::<Vec<_>>()
+                .join("; "),
         }
     }
 }
@@ -78,7 +84,7 @@ pub fn parse_schema_auto_typed(
                     orbital_core::stamp::ensure_stamped(&mut schema);
                     schema
                 })
-                .map_err(|e| TypedParseError::Json(e.to_string()))
+                .map_err(|e| json_parse_error(&translated, e.to_string()))
         }
     }
 }
@@ -108,22 +114,22 @@ pub fn parse_schema_auto_typed_with_map(
                     orbital_core::stamp::ensure_stamped(&mut schema);
                     (schema, None)
                 })
-                .map_err(|e| TypedParseError::Json(e.to_string()))
+                .map_err(|e| json_parse_error(&translated, e.to_string()))
         }
     }
 }
 
-/// [`parse_schema_auto`] additionally returning the L2 source map. See
-/// [`parse_schema_auto_typed_with_map`].
-pub(crate) fn parse_schema_auto_with_map(
-    content: &str,
-    source_path: &str,
-) -> anyhow::Result<(
-    orbital_core::schema::OrbitalSchema,
-    Option<orbital_lolo::LoloSourceMap>,
-)> {
-    parse_schema_auto_typed_with_map(content, source_path)
-        .map_err(|e| anyhow::anyhow!("{}", e.describe()))
+/// A failed `.orb` parse that retired trait keys explain is reported as those
+/// keys (code, path and replacement); any other failure keeps serde's message.
+fn json_parse_error(content: &str, message: String) -> TypedParseError {
+    let retired = serde_json::from_str::<serde_json::Value>(content)
+        .map(|doc| orbital_core::schema::retired_trait_keys(&doc))
+        .unwrap_or_default();
+    if retired.is_empty() {
+        TypedParseError::Json(message)
+    } else {
+        TypedParseError::RetiredKeys(retired)
+    }
 }
 
 /// Map a `TypedParseError` into one or more `ValidationJsonError` rows so
@@ -148,6 +154,20 @@ pub(crate) fn typed_parse_error_to_json(
             position: None,
             needs_install: None,
         }],
+        TypedParseError::RetiredKeys(rows) => rows
+            .iter()
+            .map(|r| ValidationJsonError {
+                code: orbital_core::schema::RETIRED_TRAIT_KEY_CODE.to_string(),
+                path: r.path.clone(),
+                message: r.detail(),
+                suggestion: Some(r.replacement.to_string()),
+                fix_guidance: None,
+                expected_shape: None,
+                valid_values: None,
+                position: None,
+                needs_install: None,
+            })
+            .collect(),
         TypedParseError::Lolo(LoloError::Io { path, message }) => vec![ValidationJsonError {
             code: "LOLO_IO_ERROR".to_string(),
             path: path.clone(),
@@ -593,7 +613,7 @@ pub(crate) fn typed_parse_error_to_json(
                 TypeError::GenericTypeForbidden { name, .. } => (
                     ErrorCode::GenericTypeDeprecated.as_str(),
                     Some(format!(
-                        "replace `{name}`: renderable content → `node`; structured data → an inline shape, a named `type` alias, or `Map K V`; a value of several kinds → a named tagged-union `type` alias, or the concrete primitive; the row of an entity → `@entity` / `@entity @config.<knob>`"
+                        "replace `{name}`: a relation → the related entity's name (`Order`, `[Order]`); renderable content → `node`; structured data → an inline shape, a named `type` alias, or `Map K V`; a value of several kinds → a named tagged-union `type` alias, or the concrete primitive; the row of an entity → `@entity` / `@entity @config.<knob>`"
                     )),
                 ),
                 TypeError::PayloadSiblingUnresolved { sibling, .. } => (
@@ -701,6 +721,24 @@ mod tests {
             "describe() must carry the teaching hint: {}",
             err.describe()
         );
+    }
+
+    #[test]
+    fn a_retired_trait_key_is_reported_with_its_code_and_a_clean_trait_parses() {
+        let doc = |extra: &str| {
+            format!(
+                r#"{{"name":"App","orbitals":[{{"name":"A","entity":{{"name":"Row","persistence":"runtime","fields":[{{"name":"id","type":"string"}}]}},"traits":[{{"name":"T","linkedEntity":"Row"{extra},"stateMachine":{{"states":[{{"name":"idle","isInitial":true}}],"events":[],"transitions":[]}}}}],"pages":[]}}]}}"#
+            )
+        };
+        let err = parse_schema_auto_typed(&doc(r#","category":"interaction""#), "x.orb")
+            .expect_err("a retired key is refused");
+        let rows = typed_parse_error_to_json(&err, None);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].code, "ORB_SCHEMA_RETIRED_TRAIT_KEY");
+        assert_eq!(rows[0].path, "orbitals[0].traits[0].category");
+        assert!(rows[0].suggestion.as_deref().unwrap().contains("dispatch"));
+        let ok = parse_schema_auto_typed(&doc(r#","dispatch":"client""#), "x.orb");
+        assert!(ok.is_ok(), "control: a declared dispatch parses");
     }
 }
 

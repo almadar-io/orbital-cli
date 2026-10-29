@@ -395,6 +395,7 @@ pub(crate) fn run_handoff(answer: CommandAnswer) -> anyhow::Result<()> {
     let stop = stop_on_signal()?;
     let runtime = orbital_shell_rust::host::boot::boot_app(
         schema,
+        Path::new(app),
         host,
         catalogs,
         &std::env::vars().collect(),
@@ -752,6 +753,58 @@ orbital EchoOrbital {
             code, body: out, ..
         } = run_command_program(&command.program, &command.command, &command.argv, &cwd).unwrap();
         assert_eq!((code, out.as_str()), (0, "hi"));
+    }
+
+    #[test]
+    #[ignore = "lands with G-ORB-487 (absolute-path ruling)"]
+    fn the_longest_declared_hook_is_tried_first_whatever_its_word_count() {
+        let (cwd, store) = project("longest-first", "cli");
+        with_programs(
+            &cwd,
+            &["cli-behaviors", "cli-behaviors-vectors", "cli-behaviors-vectors-snapshot"],
+        );
+        assert_eq!(
+            routed(&["behaviors", "vectors", "snapshot", "out"], &cwd, &store),
+            Some(("behaviors-vectors-snapshot".into(), words(&["out"])))
+        );
+        assert_eq!(
+            routed(&["behaviors", "vectors", "check"], &cwd, &store),
+            Some(("behaviors-vectors".into(), words(&["check"]))),
+            "control: the next shorter hook answers when the longest is not declared"
+        );
+        assert_eq!(
+            routed(&["behaviors", "catalog"], &cwd, &store),
+            Some(("behaviors".into(), words(&["catalog"])))
+        );
+        assert_eq!(
+            routed(&["behaviors", "vectors", "snapshot", "--json"], &cwd, &store),
+            Some(("behaviors-vectors-snapshot".into(), words(&["--json"]))),
+            "a flag ends the words and stays argv"
+        );
+        assert_eq!(
+            routed(&["behaviors", "--json", "vectors"], &cwd, &store),
+            Some(("behaviors".into(), words(&["--json", "vectors"]))),
+            "control: words after a flag are argv, never part of the hook"
+        );
+    }
+
+    #[test]
+    #[ignore = "lands with G-ORB-487 (absolute-path ruling)"]
+    fn command_candidates_run_from_all_leading_words_down_to_one() {
+        let args = words(&["a", "b", "c", "--x", "d"]);
+        let found: Vec<(String, Vec<String>)> = command_candidates(&args)
+            .into_iter()
+            .map(|(hook, rest)| (hook, rest.to_vec()))
+            .collect();
+        assert_eq!(
+            found,
+            vec![
+                ("a-b-c".to_string(), words(&["--x", "d"])),
+                ("a-b".to_string(), words(&["c", "--x", "d"])),
+                ("a".to_string(), words(&["b", "c", "--x", "d"])),
+            ]
+        );
+        assert!(command_candidates(&words(&["--x", "a"])).is_empty());
     }
 
     #[test]
@@ -1174,6 +1227,30 @@ orbital SplitOrbital {{
                     Some("SPLIT_CALLED")
                 )
             );
+        });
+    }
+
+    #[test]
+    fn a_command_whose_sibling_trait_effect_fails_answers_unanswered_naming_that_failure() {
+        bounded(|| {
+            let failing = split_program(false)
+                .replace("id : string!\n  }", "id : string!\n    n : number = 0\n  }")
+                .replace(
+                    "      STARTED -> ready\n",
+                    "      STARTED -> ready\n        (set @entity.n (array/first [1] 0))\n",
+                );
+            let program = run_fixture("split-fail", &failing);
+            let CommandAnswer { code, body: out, .. } =
+                run_command_program(&program, "split", &[], Path::new(".")).unwrap();
+            assert_eq!(code, 1, "{out}");
+            let body: serde_json::Value = serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}: {out}"));
+            assert_eq!(body["code"].as_str(), Some("inbound-unanswered"), "{out}");
+            let failures = body["failures"].as_array().unwrap_or_else(|| panic!("no failures: {out}"));
+            assert!(failures.iter().any(|f| f.as_str().is_some_and(|f| f.starts_with("SplitEngine:"))), "{out}");
+            let quiet = run_fixture("split-fail-control", &split_program(false));
+            let CommandAnswer { body: control, .. } =
+                run_command_program(&quiet, "split", &[], Path::new(".")).unwrap();
+            assert!(!control.contains("failures"), "control: a clean cascade names no failure: {control}");
         });
     }
 

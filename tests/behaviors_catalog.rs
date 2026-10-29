@@ -80,6 +80,20 @@ fn package(root: &Path, dir: &str, prefix: &str, model: &str, extra: &[(&str, &s
 const CARD_LOLO: &str =
     "app card [\n  version: \"1.0.0\"\n]\n;; @exposure palette\n;; @capabilities \"display\"\n";
 
+/// The installed std's command programs, so `orb behaviors ...` runs as std's `.lolo` program (the only implementation).
+fn live_std_programs(project: &Path) {
+    let std = project.join("node_modules/@almadar/std");
+    let manifest_path = std.join("package.json");
+    let mut manifest: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
+    manifest["orb"] = serde_json::json!({
+        "prefix": "almadar-std",
+        "source": "behaviors/lolo",
+        "compiler": ">=0.0.0"
+    });
+    std::fs::write(&manifest_path, manifest.to_string()).unwrap();
+    orbital_test_support::link_installed_std_programs(&std, Path::new(env!("CARGO_MANIFEST_DIR")));
+}
+
 fn project(second_model: &str) -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     write(
@@ -90,6 +104,7 @@ fn project(second_model: &str) -> tempfile::TempDir {
         dir.path(),
         Path::new(env!("CARGO_MANIFEST_DIR")),
     );
+    live_std_programs(dir.path());
     package(
         dir.path(),
         "alpha",

@@ -64,27 +64,6 @@ pub(crate) fn verify_package(pkg: &BehaviorPackage, packages: &[BehaviorPackage]
     Ok(())
 }
 
-pub(crate) fn run_which(spec: String) -> anyhow::Result<()> {
-    let cwd = std::env::current_dir()?;
-    let packages = discover_from(&cwd)?;
-    let config = LoaderConfig {
-        base_path: cwd,
-        packages,
-        ..Default::default()
-    };
-    let mut loader = ExternalOrbitalLoader::new(config);
-    match loader.resolve_owned(&spec) {
-        Ok((path, owner)) => {
-            println!("{} ({owner})", path.display());
-            Ok(())
-        }
-        Err(e) => {
-            eprintln!("{e}");
-            std::process::exit(1);
-        }
-    }
-}
-
 /// The file `spec` resolves to from the working directory's installed packages and the package
 /// that owns it, as `orb behaviors which` prints them; the inner error is the loader's refusal.
 pub(crate) fn which(spec: &str) -> anyhow::Result<Result<(std::path::PathBuf, String), String>> {

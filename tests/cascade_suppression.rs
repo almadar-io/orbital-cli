@@ -41,7 +41,6 @@ const UPSTREAM: &str = r#"{
         {
           "name": "WidgetView",
           "linkedEntity": "Widget",
-          "category": "interaction",
           "stateMachine": {
             "states": [ { "name": "idle", "isInitial": true } ],
             "events": [ { "key": "OPEN" } ],
@@ -51,7 +50,6 @@ const UPSTREAM: &str = r#"{
         {
           "name": "OtherFetcher",
           "linkedEntity": "Widget",
-          "category": "interaction",
           "stateMachine": {
             "states": [ { "name": "idle", "isInitial": true } ],
             "events": [ { "key": "LOAD" } ],

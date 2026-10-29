@@ -407,13 +407,13 @@ impl ProgramHost {
             .map_err(|e| failure(format!("program/read: {e}")))?;
         let program: Value = serde_json::from_str(&read.text).map_err(|e| failure(e.to_string()))?;
         let mut fields = orbital_core::ValueMap::default();
-        fields.insert("program".to_string(), program);
-        fields.insert("loadedResolved".to_string(), Value::Bool(read.loaded_resolved));
+        fields.insert("program".into(), program);
+        fields.insert("loadedResolved".into(), Value::Bool(read.loaded_resolved));
         if let Some(program_path) = &read.program_path {
-            fields.insert("programPath".to_string(), Value::String(program_path.display().to_string().into()));
+            fields.insert("programPath".into(), Value::String(program_path.display().to_string().into()));
         }
         if with_text {
-            fields.insert("text".to_string(), Value::String(read.text.into()));
+            fields.insert("text".into(), Value::String(read.text.into()));
         }
         let answer = Value::object(fields);
         release_transients();
@@ -1736,7 +1736,7 @@ orbital O {
 
     const REFERENCED_ATOM: &str = r#"{ "name": "atom", "version": "1.0.0", "orbitals": [ { "name": "AtomOrbital",
       "entity": { "name": "Widget", "persistence": "persistent", "fields": [ { "name": "id", "type": "string", "required": true }, { "name": "n", "type": "number" } ] },
-      "traits": [ { "name": "Widget", "linkedEntity": "Widget", "category": "interaction",
+      "traits": [ { "name": "Widget", "linkedEntity": "Widget", 
         "config": { "k": { "type": "number", "default": 0 } },
         "stateMachine": { "states": [ { "name": "idle", "isInitial": true } ], "events": [ { "key": "LOAD" } ],
           "transitions": [ { "from": "idle", "to": "idle", "event": "LOAD", "effects": [ ["set", "@entity.n", "@config.k"] ] } ] } } ] } ] }"#;

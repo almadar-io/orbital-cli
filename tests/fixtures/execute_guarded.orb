@@ -17,9 +17,7 @@
       "traits": [
         {
           "name": "GateSwitch",
-          "category": "interaction",
           "linkedEntity": "Gate",
-          "scope": "collection",
           "emits": [
             { "event": "INIT", "scope": "external", "tier": "domain" }
           ],

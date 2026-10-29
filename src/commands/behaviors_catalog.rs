@@ -148,63 +148,7 @@ pub(crate) enum Vectors<'a> {
     Attach(Option<&'a dyn Embedder>),
 }
 
-pub(crate) fn run_catalog(
-    paths: Vec<String>,
-    exposure: Vec<String>,
-    json: bool,
-    no_vectors: bool,
-    no_traits: bool,
-    topics: bool,
-) -> anyhow::Result<()> {
-    let out = if no_vectors {
-        catalog_with(&paths, &exposure, Vectors::Omit, None)?
-    } else {
-        catalog(&paths, &exposure)?
-    };
-    if topics {
-        let topics = topics_of(&out);
-        if json {
-            println!("{}", serde_json::to_string_pretty(&topics)?);
-        } else {
-            for t in topics {
-                println!("{:<24} {:<24} {}", t.package, t.topic, t.count);
-            }
-        }
-        return Ok(());
-    }
-    let out: Vec<CatalogEntryOut> = if no_traits { out.into_iter().map(CatalogEntryOut::without_traits).collect() } else { out };
-    if json {
-        println!("{}", serde_json::to_string_pretty(&out)?);
-    } else {
-        for e in out {
-            println!(
-                "{:<48} {:<9} {:<10} {}",
-                e.behavior,
-                e.level,
-                e.exposure.as_deref().unwrap_or("-"),
-                e.description
-            );
-        }
-    }
-    Ok(())
-}
-
-/// The installed behaviors under `paths` — what `orb behaviors catalog` prints: vectors attached,
-/// missing ones embedded through the configured provider.
-pub(crate) fn catalog(
-    paths: &[String],
-    exposure: &[String],
-) -> anyhow::Result<Vec<CatalogEntryOut>> {
-    let embedder = ProviderEmbedder::from_env();
-    catalog_with(
-        paths,
-        exposure,
-        Vectors::Attach(embedder.as_ref().map(|e| e as &dyn Embedder)),
-        None,
-    )
-}
-
-/// [`catalog`] with the vectors chosen; `user_dir` replaces `~/.almadar/vectors`.
+/// The installed behaviors under `paths` with the vectors chosen; `user_dir` replaces `~/.almadar/vectors`.
 pub(crate) fn catalog_with(
     paths: &[String],
     exposure: &[String],
@@ -1173,11 +1117,6 @@ fn describe_resolved(
     })
 }
 
-pub(crate) fn run_expects(spec: String, _json: bool) -> anyhow::Result<()> {
-    println!("{}", serde_json::to_string(&expectations(&spec)?)?);
-    Ok(())
-}
-
 /// Each orbital's derived expectations for the `.orb` file or behavior `spec` names, as
 /// `orb behaviors expects` prints them.
 pub(crate) fn expectations(spec: &str) -> anyhow::Result<Value> {
@@ -1218,28 +1157,6 @@ pub(crate) fn expectations(spec: &str) -> anyhow::Result<Value> {
 pub(crate) enum DescribeTarget {
     Spec(String),
     Value(Value),
-}
-
-pub(crate) fn run_describe(spec: String, _json: bool, knob_vectors: bool) -> anyhow::Result<()> {
-    let target = if spec == "-" {
-        let mut buf = String::new();
-        std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)?;
-        DescribeTarget::Value(
-            serde_json::from_str(&buf)
-                .map_err(|e| anyhow::anyhow!("stdin is not a trait value: {e}"))?,
-        )
-    } else {
-        DescribeTarget::Spec(spec)
-    };
-    let embedder = ProviderEmbedder::from_env();
-    let vectors = if knob_vectors {
-        Vectors::Attach(embedder.as_ref().map(|e| e as &dyn Embedder))
-    } else {
-        Vectors::Omit
-    };
-    let out = describe_with(target, None, vectors, None)?;
-    println!("{}", serde_json::to_string_pretty(&out)?);
-    Ok(())
 }
 
 /// [`describe`] of a trait value a program names: a relative value resolves from that program.
@@ -1369,11 +1286,6 @@ pub(crate) fn describe_with(
         source,
         model,
     })?)
-}
-
-pub(crate) fn run_source(spec: String, _json: bool) -> anyhow::Result<()> {
-    println!("{}", serde_json::to_string_pretty(&source(&spec)?)?);
-    Ok(())
 }
 
 /// The source file a behavior specifier resolves to (the `.lolo` an author reads as an example).

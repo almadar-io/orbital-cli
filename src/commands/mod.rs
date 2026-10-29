@@ -20,8 +20,5 @@ pub(crate) mod sidecar_fetch;
 pub(crate) mod stamp;
 pub(crate) mod validate;
 
-pub(crate) use behaviors::run_which;
-pub(crate) use behaviors_catalog::{run_catalog, run_describe, run_expects, run_source};
-pub(crate) use behaviors_texts::run_texts;
 pub(crate) mod packages;
 pub(crate) mod update_notice;

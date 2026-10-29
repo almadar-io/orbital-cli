@@ -27,9 +27,7 @@
       "traits": [
         {
           "name": "SpanStart",
-          "category": "interaction",
           "linkedEntity": "Gate",
-          "scope": "collection",
           "emits": [
             {
               "event": "START_SPAN",

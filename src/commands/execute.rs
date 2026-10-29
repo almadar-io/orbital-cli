@@ -288,7 +288,7 @@ pub(crate) fn run_cascade_with(path: &Path, steps: &serde_json::Value, live: boo
                         _ => Default::default(),
                     };
                     for (key, value) in fields {
-                        row.insert(key.clone(), to_core_value(value)?);
+                        row.insert(key.clone().into(), to_core_value(value)?);
                     }
                     Value::Object(row)
                 }

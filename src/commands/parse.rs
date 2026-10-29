@@ -47,14 +47,14 @@ pub(crate) fn resolved_value(path: &std::path::Path) -> anyhow::Result<orbital_c
         .iter()
         .map(|child| {
             let mut fields = ValueMap::default();
-            fields.insert("orbital".to_string(), to_value(&child.orbital)?);
-            fields.insert("program".to_string(), resolved_canonical(&child.schema)?);
+            fields.insert("orbital".into(), to_value(&child.orbital)?);
+            fields.insert("program".into(), resolved_canonical(&child.schema)?);
             Ok(Value::object(fields))
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
     let mut fields = ValueMap::default();
-    fields.insert("program".to_string(), resolved_canonical(&resolved)?);
-    fields.insert("lazy".to_string(), Value::array(lazy));
+    fields.insert("program".into(), resolved_canonical(&resolved)?);
+    fields.insert("lazy".into(), Value::array(lazy));
     Ok(Value::object(fields))
 }
 

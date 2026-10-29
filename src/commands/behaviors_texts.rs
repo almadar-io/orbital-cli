@@ -6,7 +6,6 @@
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use std::io::Write;
 
 use super::behaviors_catalog::{scoped_behaviors, text_facts};
 use super::behaviors_index::IndexEntry;
@@ -342,17 +341,6 @@ pub(crate) fn describe_all(
                 .ok_or_else(|| anyhow::anyhow!("a behavior was never described"))?
         })
         .collect()
-}
-
-/// `orb behaviors texts`: every embedding text under the scopes, as a JSON array.
-pub(crate) fn run_texts(paths: Vec<String>, kind: Option<String>) -> anyhow::Result<()> {
-    let all = texts(&paths, kind.as_deref())?;
-    let stdout = std::io::stdout();
-    let mut out = std::io::BufWriter::with_capacity(1 << 20, stdout.lock());
-    serde_json::to_writer(&mut out, &all)?;
-    out.write_all(b"\n")?;
-    out.flush()?;
-    Ok(())
 }
 
 /// Every embedding text under the scopes, in embed order: what `orb behaviors texts` prints.
