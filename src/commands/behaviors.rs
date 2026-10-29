@@ -3,7 +3,7 @@
 //! packages resolved node-style (Almadar_Behavior_Packages.md).
 
 use orbital_compiler::loader::{ExternalOrbitalLoader, LoaderConfig};
-use orbital_core::behavior_packages::{compiler_satisfies, core_satisfies, std_peer_satisfies, BehaviorPackage};
+use orbital_core::behavior_packages::{core_satisfies, std_peer_satisfies, BehaviorPackage};
 
 use crate::baked_engine_pins::BAKED_CORE;
 
@@ -25,24 +25,11 @@ fn std_version_for_peer_check(packages: &[BehaviorPackage]) -> anyhow::Result<St
         })
 }
 
-/// Verify one package's `compiler` range (against the running `orb`), its
-/// `core_range` (against the version of `@almadar/core` this `orb` was baked
+/// Verify one package's `core_range` (against the version of `@almadar/core` this `orb` was baked
 /// against) when declared, and its `std_peer_range` (against the installed
 /// std version) when declared. `Err` carries the human-readable reason naming
 /// both versions in each case.
 pub(crate) fn verify_package(pkg: &BehaviorPackage, packages: &[BehaviorPackage]) -> anyhow::Result<()> {
-    let running = env!("CARGO_PKG_VERSION");
-    let compiler_ok = compiler_satisfies(&pkg.compiler_range, running)
-        .map_err(|e| anyhow::anyhow!("invalid compiler range '{}': {e}", pkg.compiler_range))?;
-    if !compiler_ok {
-        anyhow::bail!(
-            "{}@{} requires orb {} but the running orb is {running}",
-            pkg.name,
-            pkg.version,
-            pkg.compiler_range
-        );
-    }
-
     if let Some(range) = &pkg.core_range {
         // The installed @almadar/core is the language the program is checked
         // against; BAKED_CORE is only this binary's pin for `orb update`.

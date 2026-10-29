@@ -297,9 +297,8 @@ fn emit_lolo_from_orb_reemits_to_the_same_orb() {
                             k != "id"
                                 && k != "ledger"
                                 && k != "schemaVersion"
-                                // spelling-dependent provenance: the printed source hashes differently and a nested self-reference gains its projection mark
+                                // spelling-dependent provenance: the printed source hashes differently
                                 && k != "sourceDeclaration"
-                                && k != "projectedFrom"
                                 && !k.ends_with("Id")
                                 && !k.ends_with("Ids")
                                 && !v.is_null()

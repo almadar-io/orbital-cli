@@ -308,7 +308,7 @@ fn install_rejects_incompatible_compiler_range_and_removes_it() {
         "stderr should name the required range: {stderr}"
     );
     assert!(
-        stderr.contains(env!("CARGO_PKG_VERSION")),
+        stderr.contains(orbital_core::language_data::running_version()),
         "stderr should name the running orb version: {stderr}"
     );
     assert!(

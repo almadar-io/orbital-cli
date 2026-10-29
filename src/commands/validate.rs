@@ -111,6 +111,7 @@ pub(crate) fn discovery_error_json_code(
     match e {
         DiscoverError::DuplicateBehaviorName { .. } => "ORB_BEHAVIOR_NAME_DUPLICATE",
         DiscoverError::PrefixConflict { .. } => "ORB_BEHAVIOR_PREFIX_CONFLICT",
+        DiscoverError::IncompatibleCompiler { .. } => orbital_core::language_data::CODE_INCOMPATIBLE,
         DiscoverError::MissingDeclaredPath { .. }
         | DiscoverError::InvalidSidecarLock { .. }
         | DiscoverError::InvalidPackageJson { .. }
@@ -252,7 +253,7 @@ fn validate_schema_json(
 
     let core = validate_schema_core(
         schema,
-        true,
+        Some(path.as_path()),
         source_map.as_ref(),
         json_language,
         path.as_path(),
@@ -566,6 +567,7 @@ pub(crate) struct CoreValidation {
 /// `extra_patterns` / `service_registry` mirror the `orb validate` inputs.
 pub(crate) fn full_findings(
     path: &std::path::Path,
+    resources_beside: Option<&std::path::Path>,
     extra_patterns: Option<orbital_compiler::ExtraPatterns>,
     service_registry: orbital_compiler::embedded::ServiceRegistryData,
     final_program: bool,
@@ -602,7 +604,7 @@ pub(crate) fn full_findings(
 
     let core = validate_schema_core(
         schema,
-        true,
+        Some(resources_beside.unwrap_or(path)),
         source_map.as_ref(),
         schema_language,
         path,
@@ -618,11 +620,12 @@ pub(crate) fn full_findings(
 /// [`full_findings`] rendered as the human lines `orb compile` and `orb verify` print.
 pub(crate) fn run_full_validation(
     path: &std::path::Path,
+    resources_beside: Option<&std::path::Path>,
     extra_patterns: Option<orbital_compiler::ExtraPatterns>,
     service_registry: orbital_compiler::embedded::ServiceRegistryData,
     final_program: bool,
 ) -> anyhow::Result<ValidationDiagnostics> {
-    let (errors, warnings) = full_findings(path, extra_patterns, service_registry, final_program)?;
+    let (errors, warnings) = full_findings(path, resources_beside, extra_patterns, service_registry, final_program)?;
     Ok(ValidationDiagnostics {
         errors: errors.into_iter().map(|f| f.text).collect(),
         warnings: warnings.into_iter().map(|f| f.text).collect(),
@@ -645,7 +648,7 @@ pub(crate) fn validate_lazy_children(
     for artifact in orbital_compiler::phases::lazy::split_lazy(schema) {
         let core = validate_schema_core(
             artifact.schema.clone(),
-            false,
+            None,
             None,
             schema_language.clone(),
             path,
@@ -686,7 +689,7 @@ pub(crate) fn validate_lazy_children(
 /// `OirValidator`. The one producer of findings for every report.
 pub(crate) fn validate_schema_core(
     mut schema: orbital_core::schema::OrbitalSchema,
-    check_own_catalogs: bool,
+    resources_beside: Option<&std::path::Path>,
     source_map: Option<&orbital_lolo::source_map::LoloSourceMap>,
     schema_language: orbital_compiler::SchemaLanguage,
     path: &std::path::Path,
@@ -710,10 +713,10 @@ pub(crate) fn validate_schema_core(
         default_opts,
     ));
     errors.extend(own_secret_findings(&schema));
-    if check_own_catalogs {
-        errors.extend(catalog_findings(&schema, path));
+    if let Some(resources) = resources_beside {
+        errors.extend(catalog_findings(&schema, resources));
         if let Some(public) = &schema.public_dir {
-            if let Err(message) = orbital_compiler::phases::public::resolve_public_dir(path, public)
+            if let Err(message) = orbital_compiler::phases::public::resolve_public_dir(resources, public)
             {
                 errors.push(Finding::new(
                     "ORB_PUBLIC_DIR_INVALID".to_string(),
@@ -1135,7 +1138,7 @@ mod one_finding_list_tests {
     fn report_and_text(path: &PathBuf) -> (Vec<ValidationJsonError>, Vec<ValidationJsonWarning>) {
         let report = validation_report(path, None, None, false, false, &[]).expect("report");
         let registry = crate::utils::load_services_registry(None).expect("registry");
-        let text = run_full_validation(path, None, registry, false).expect("text");
+        let text = run_full_validation(path, None, None, registry, false).expect("text");
         let errors = report.errors.unwrap_or_default();
         let warnings = report.warnings.unwrap_or_default();
         assert_eq!(errors.len(), text.errors.len(), "errors: {errors:?} vs {:?}", text.errors);
@@ -1184,4 +1187,40 @@ mod one_finding_list_tests {
         assert!(errors.is_empty(), "{errors:?}");
         assert!(warnings.iter().any(|w| w.message.contains("guard does not return boolean")), "{warnings:?}");
     }
+    const SITE: &str = "app site [ version: \"1.0.0\", description: \"Site\", locales: [en, ar] ]\n\norbital Home {\n  entity HomeView [runtime] {\n    id : string!\n  }\n\n  trait HomePage -> HomeView {\n    initial: idle\n\n    state idle {\n      INIT -> idle\n        (render-ui main { type: typography, content: (i18n/t \"hero.title\") })\n    }\n  }\n\n  page \"/\" as HomeRoute -> HomePage\n}\n";
+
+    fn site_with_catalogs() -> (PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!("orb-emitted-catalogs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let source_dir = root.join("source");
+        let emitted_dir = root.join("emitted");
+        std::fs::create_dir_all(&emitted_dir).unwrap();
+        for (locale, message) in [("en", "Hello"), ("ar", "hello-ar")] {
+            let catalog = source_dir.join("locales").join(locale);
+            std::fs::create_dir_all(&catalog).unwrap();
+            std::fs::write(catalog.join("site.json"), format!(r#"{{"hero.title":"{message}"}}"#)).unwrap();
+        }
+        std::fs::write(source_dir.join("site.lolo"), SITE).unwrap();
+        std::fs::write(emitted_dir.join("site.lolo"), SITE).unwrap();
+        (source_dir.join("site.lolo"), emitted_dir.join("site.lolo"))
+    }
+
+    fn i18n_errors(program: &PathBuf, catalogs_beside: Option<&std::path::Path>) -> Vec<String> {
+        let registry = crate::utils::load_services_registry(None).expect("registry");
+        run_full_validation(program, catalogs_beside, None, registry, false)
+            .expect("text")
+            .errors
+            .into_iter()
+            .filter(|e| e.contains("ORB_I18N"))
+            .collect()
+    }
+
+    #[test]
+    fn an_emitted_program_is_validated_against_the_catalogs_its_source_declared() {
+        let (source, emitted) = site_with_catalogs();
+        assert!(i18n_errors(&source, None).is_empty(), "control: the source reads its own catalogs");
+        assert!(!i18n_errors(&emitted, None).is_empty(), "control: beside the output there are no catalogs");
+        assert!(i18n_errors(&emitted, Some(&source)).is_empty(), "{:?}", i18n_errors(&emitted, Some(&source)));
+    }
+
 }

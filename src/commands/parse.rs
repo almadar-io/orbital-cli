@@ -36,7 +36,7 @@ pub(crate) fn resolved_program(
 pub(crate) fn resolved_value(path: &std::path::Path) -> anyhow::Result<serde_json::Value> {
     let (resolved, lazy) = resolved_program(path)?;
     let value = |schema: &orbital_core::schema::OrbitalSchema| -> anyhow::Result<serde_json::Value> {
-        serde_json::from_str(&resolved_json(schema)?).map_err(|e| anyhow::anyhow!("{e}"))
+        resolved_tree(schema)
     };
     let lazy = lazy
         .iter()
@@ -122,15 +122,19 @@ pub(crate) fn resolved_text(
 }
 
 fn resolved_json(resolved: &orbital_core::schema::OrbitalSchema) -> anyhow::Result<String> {
-    let mut resolved_value = serde_json::to_value(resolved)
+    serde_json::to_string_pretty(&resolved_tree(resolved)?)
+        .map_err(|e| anyhow::anyhow!("Failed to serialize resolved schema: {}", e))
+}
+
+/// The resolved program as a key-sorted JSON tree, built once and sorted in place.
+fn resolved_tree(resolved: &orbital_core::schema::OrbitalSchema) -> anyhow::Result<serde_json::Value> {
+    let mut tree = serde_json::to_value(resolved)
         .map_err(|e| anyhow::anyhow!("Failed to serialize resolved schema: {}", e))?;
     // Awaiting-server skeleton predictions — resolve output only, never persisted.
-    orbital_compiler::phases::await_render::attach_await_renders(resolved, &mut resolved_value);
-    // Byte-identical `orb resolve` (owner ruling, Stage C): `preserve_order`
-    // means `to_string_pretty` alone reflects HashMap insertion order, which
-    // varies run to run for the same schema. Canonicalize before printing.
-    serde_json::to_string_pretty(&orbital_core::util::canonical_json(&resolved_value))
-        .map_err(|e| anyhow::anyhow!("Failed to serialize resolved schema: {}", e))
+    orbital_compiler::phases::await_render::attach_await_renders(resolved, &mut tree);
+    // Byte-identical `orb resolve` (owner ruling, Stage C): `preserve_order` reflects insertion order, which
+    // varies run to run for the same schema, so the keys are sorted before the tree is printed or handed on.
+    Ok(orbital_core::util::into_canonical_json(tree))
 }
 
 pub(crate) fn write_lazy(

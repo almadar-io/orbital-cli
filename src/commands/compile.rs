@@ -245,7 +245,7 @@ pub(crate) fn compile_run(request: CompileRequest) -> anyhow::Result<CompileRepo
 /// `.orb` the shell wrote.
 fn refuse_invalid(program: &Path, source: &Path) -> anyhow::Result<()> {
     let registry = crate::utils::load_services_registry(None)?;
-    let diags = crate::commands::validate::run_full_validation(program, None, registry, false)?;
+    let diags = crate::commands::validate::run_full_validation(program, Some(source), None, registry, false)?;
     if diags.errors.is_empty() {
         return Ok(());
     }
