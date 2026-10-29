@@ -22,8 +22,6 @@ orbital-core = { path = "../orbital-core", features = ["client-http", "native-tr
 orbital-compiler = { path = "../orbital-compiler" }
 orbital-lolo = { path = "../orbital-lolo" }
 orbital-shell-rust = { path = "../orbital-shell-rust" }
-# The sandbox manifest `orb emit manifest` builds and signs.
-ring = "0.17"
 thiserror = { workspace = true }
 base64 = "0.22"
 

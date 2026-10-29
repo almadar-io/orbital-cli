@@ -74,7 +74,7 @@ pub(crate) fn generate(
 ) -> anyhow::Result<GenerateResponse> {
     let shell = locate(name)?;
     let resolved = if shell.description.needs_resolved || shell.description.needs_served {
-        Some(crate::ports::compile::resolve_compiled_schema(compile_path, source_path)?)
+        Some(resolve_compiled_schema(compile_path, source_path)?)
     } else {
         None
     };
@@ -123,4 +123,34 @@ pub(crate) fn report_lines(response: &GenerateResponse) -> Vec<String> {
         lines.extend(response.next_steps.iter().map(|step| format!("  {step}")));
     }
     lines
+}
+
+/// The resolved program a shell embeds as data, as the compiled path compiles it (lazy behaviors included), resolved
+/// against the original `source_path` so relative imports find their files.
+pub(crate) fn resolve_compiled_schema(compile_path: &Path, source_path: &Path) -> anyhow::Result<orbital_core::OrbitalSchema> {
+    let schema = orbital_compiler::phases::parse_file(compile_path)
+        .map_err(|e| anyhow::anyhow!("Failed to parse schema for the embedded resolved schema: {}", e))?;
+    orbital_compiler::phases::resolve_compiled_program_with_path(schema, &compiler_options_or_bail()?, Some(source_path))
+        .map_err(|e| anyhow::anyhow!("Failed to resolve the embedded resolved schema: {}", e))
+}
+
+/// `CompilerOptions::from_env()`, bailing when behavior-package discovery failed: that is environment, never a schema
+/// authoring error, so a compile must not proceed as if no packages were installed.
+pub(crate) fn compiler_options_or_bail() -> anyhow::Result<orbital_compiler::CompilerOptions> {
+    use orbital_core::behavior_packages::DiscoverError;
+    let mut options = orbital_compiler::CompilerOptions::from_env();
+    options.service_runtimes = Some(crate::utils::load_services_registry(None)?.runtimes);
+    if let Some(e) = &options.discovery_error {
+        let code = match e {
+            DiscoverError::DuplicateBehaviorName { .. } => "ORB_BEHAVIOR_NAME_DUPLICATE",
+            DiscoverError::PrefixConflict { .. } => "ORB_BEHAVIOR_PREFIX_CONFLICT",
+            DiscoverError::IncompatibleCompiler { .. } => orbital_core::language_data::CODE_INCOMPATIBLE,
+            DiscoverError::MissingDeclaredPath { .. }
+            | DiscoverError::InvalidSidecarLock { .. }
+            | DiscoverError::InvalidPackageJson { .. }
+            | DiscoverError::Io { .. } => "ORB_BEHAVIOR_PACKAGE_INVALID",
+        };
+        anyhow::bail!("[{code}] {e} (validator environment error — the schema was NOT compiled; retry, do not edit the schema)");
+    }
+    Ok(options)
 }

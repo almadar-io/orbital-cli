@@ -3,6 +3,7 @@
 
 pub(crate) mod dev;
 pub(crate) mod program_command;
+pub(crate) mod program_compile;
 pub(crate) mod program_host;
 pub(crate) mod program_inspect;
 

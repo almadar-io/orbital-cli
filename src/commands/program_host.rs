@@ -4,7 +4,7 @@
 //! commands (`emit orb`, `emit lolo`, `stamp` + `validate --json --deny-warnings`, `behaviors catalog|describe|source
 //! --json`, `resolve`); each answer here is the value those commands print, staged the same way.
 
-use crate::ports::behaviors_vectors::{Embedder, ProviderEmbedder};
+use crate::reflect::{self, DescribeTarget};
 use orbital_core::effects::executor::{SubstrateFailure, SubstrateHandler};
 use orbital_core::Value;
 use std::path::{Path, PathBuf};
@@ -18,6 +18,436 @@ pub(super) fn failure(message: impl Into<String>) -> SubstrateFailure {
         message: message.into(),
         errors: Vec::new(),
     }
+}
+
+/// The program text at `path`, parsed (`.lolo`, an unresolved `.orb` or a resolved one).
+fn parsed(path: &Path) -> anyhow::Result<orbital_core::OrbitalSchema> {
+    let content = std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("Failed to read {}: {}", path.display(), e))?;
+    crate::utils::parse_schema_auto(&content, &path.display().to_string()).map_err(|e| anyhow::anyhow!("Failed to parse {}: {}", path.display(), e))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum PrintTarget {
+    Orb,
+    Ts,
+    Py,
+    Lolo,
+    Manifest,
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum PrintFormat {
+    Stream,
+    Markdown,
+    Json,
+    Raw,
+}
+
+struct PrintRequest {
+    target: PrintTarget,
+    path: PathBuf,
+    section: Option<String>,
+    output: Option<PathBuf>,
+    format: Option<PrintFormat>,
+    only: Option<String>,
+    map: bool,
+    unit: Option<String>,
+    out: Option<PathBuf>,
+    signer: Option<(PathBuf, String)>,
+}
+
+#[derive(Default)]
+struct Printed {
+    stdout: String,
+    stderr: String,
+}
+
+impl Printed {
+    fn note(&mut self, line: &str) {
+        self.stderr.push_str(line);
+        self.stderr.push('\n');
+    }
+
+    fn write(&mut self, text: &str, file: Option<&Path>) -> anyhow::Result<()> {
+        match file {
+            Some(file) => std::fs::write(file, text).map_err(|e| anyhow::anyhow!("Failed to write {}: {e}", file.display())),
+            None => {
+                self.stdout.push_str(text);
+                if !text.ends_with('\n') {
+                    self.stdout.push('\n');
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+/// `.orb` JSON is parsed as written; `.lolo` is lowered, `prior` anchoring id reuse.
+fn parse_program(source: &str, source_path: &str, prior: Option<&orbital_core::OrbitalSchema>) -> anyhow::Result<orbital_core::OrbitalSchema> {
+    use crate::utils::{detect_syntax, InputSyntax};
+    match detect_syntax(source) {
+        InputSyntax::OrbJson => crate::utils::parse_schema_auto(source, source_path),
+        InputSyntax::Lolo => orbital_lolo::parse_and_lower_str_with_prior_at(source, prior, source_path)
+            .map_err(|e| anyhow::anyhow!("LOLO parse error: {}", e.render_with_hint())),
+    }
+}
+
+/// The lowered program of `source` as a value, keys in declaration order.
+fn orb_value(source: &str, source_path: &str) -> anyhow::Result<serde_json::Value> {
+    Ok(serde_json::to_value(parse_program(source, source_path, None)?)?)
+}
+
+/// The program as `.lolo` text.
+fn lolo_text(source: &str, source_path: &str) -> anyhow::Result<String> {
+    orbital_lolo::schema_to_lolo(&parse_program(source, source_path, None)?).map_err(|e| anyhow::anyhow!("{source_path}: {e}"))
+}
+
+impl PrintRequest {
+    fn print(&self, printed: &mut Printed) -> anyhow::Result<()> {
+        let source = std::fs::read_to_string(&self.path).map_err(|e| anyhow::anyhow!("Failed to read {}: {e}", self.path.display()))?;
+        let source_path = self.path.display().to_string();
+        match self.target {
+            PrintTarget::Orb => self.print_orb(&source, &source_path, printed),
+            PrintTarget::Lolo => Ok(printed.write(&lolo_text(&source, &source_path)?, self.output.as_deref())?),
+            PrintTarget::Manifest => self.print_manifest(&source, &source_path, printed),
+            PrintTarget::Ts | PrintTarget::Py => self.print_code(&source, &source_path, printed),
+        }
+    }
+
+    fn print_orb(&self, source: &str, source_path: &str, printed: &mut Printed) -> anyhow::Result<()> {
+        let prior = self
+            .output
+            .as_deref()
+            .filter(|p| p.exists())
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .and_then(|s| orbital_core::schema::parse_schema(&crate::utils::translate_schema_content(&s)).ok());
+        let schema = parse_program(source, source_path, prior.as_ref())?;
+        printed.write(&orbital_lolo::program::canonical_orb_json(&schema)?, self.output.as_deref())?;
+        let (Some(out), true) = (self.output.as_deref(), schema.locales.as_ref().is_some_and(|l| !l.is_empty())) else { return Ok(()) };
+        let path = Path::new(source_path);
+        let (resolved, _) = orbital_compiler::phases::lazy::resolve_program_with_path(schema, &orbital_compiler::CompilerOptions::from_env(), Some(path))
+            .map_err(|e| anyhow::anyhow!("Failed to resolve {source_path} for its catalogs: {e}"))?;
+        let program_dir = path.parent().unwrap_or(Path::new("."));
+        orbital_compiler::phases::messages::write_catalogs(out, &resolved, program_dir)
+            .map_err(|e| anyhow::anyhow!("Failed to write catalogs beside {}: {e}", out.display()))?;
+        let out_dir = out.parent().unwrap_or(Path::new("."));
+        for locale in resolved.locales.iter().flatten() {
+            let file = Path::new("locales").join(locale).join(format!("{}.json", resolved.name));
+            let (from, to) = (program_dir.join(&file), out_dir.join(&file));
+            if from.exists() && from.canonicalize().ok() != to.canonicalize().ok() {
+                std::fs::create_dir_all(to.parent().unwrap_or(out_dir))?;
+                std::fs::copy(&from, &to).map_err(|e| anyhow::anyhow!("Failed to copy {} to {}: {e}", from.display(), to.display()))?;
+            }
+        }
+        Ok(())
+    }
+
+    fn print_manifest(&self, source: &str, source_path: &str, printed: &mut Printed) -> anyhow::Result<()> {
+        use orbital_core::sandbox_manifest as manifest;
+        if self.output.is_some() {
+            anyhow::bail!("`orb emit manifest` writes one file per unit: use --out <dir>, not --output");
+        }
+        let signer = match &self.signer {
+            Some((path, key_id)) => {
+                let text = std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("Failed to read {}: {e}", path.display()))?;
+                let seed = manifest::parse_seed(&text).ok_or_else(|| anyhow::anyhow!("{}: the seed must be 64 hex characters", path.display()))?;
+                Some((seed, key_id.as_str()))
+            }
+            None => None,
+        };
+        crate::utils::require_language_data()?;
+        let schema = parse_program(source, source_path, None)?;
+        let digest = manifest::sha256_hex(orbital_lolo::program::canonical_orb_json(&schema)?.as_bytes());
+        let (resolved, _) = orbital_compiler::phases::lazy::resolve_program_with_path(
+            schema,
+            &orbital_compiler::CompilerOptions::from_env(),
+            Some(Path::new(source_path)),
+        )
+        .map_err(|e| anyhow::anyhow!("resolve orb schema: {e}"))?;
+        let units = match &self.unit {
+            Some(unit) => vec![unit.clone()],
+            None => manifest::unit_names(&resolved),
+        };
+        if units.is_empty() {
+            anyhow::bail!("{source_path}: `deployment` declares no units");
+        }
+        if self.out.is_none() && units.len() > 1 {
+            anyhow::bail!("{source_path} has {} units ({}): pass --out <dir> or --unit <name>", units.len(), units.join(", "));
+        }
+        for unit in &units {
+            let built = manifest::Manifest::build(&resolved, unit, &digest).map_err(|e| anyhow::anyhow!("{source_path}: {e}"))?;
+            let rendered = match signer {
+                Some((seed, key_id)) => manifest::sign_manifest(&built.to_unsigned_json(), key_id, &seed).map_err(|e| anyhow::anyhow!("{e}"))?,
+                None => serde_json::to_string_pretty(&built.to_unsigned_json())?,
+            };
+            match &self.out {
+                Some(dir) => {
+                    std::fs::create_dir_all(dir).map_err(|e| anyhow::anyhow!("Failed to create {}: {e}", dir.display()))?;
+                    printed.write(&rendered, Some(&dir.join(format!("{unit}.manifest.json"))))?;
+                }
+                None => printed.write(&rendered, None)?,
+            }
+            if signer.is_none() {
+                printed.note(&format!("orb: manifest for unit `{unit}` is UNSIGNED (no --sign-key); the io-gate refuses it until `io-gate sign` signs it"));
+            }
+        }
+        Ok(())
+    }
+
+    fn print_code(&self, source: &str, source_path: &str, printed: &mut Printed) -> anyhow::Result<()> {
+        use orbital_lolo::program::generated::{self, CodeTarget, Format, Only, Section};
+        crate::utils::require_language_data()?;
+        let schema = parse_program(source, source_path, None)?;
+        let mut compiler_options = orbital_compiler::CompilerOptions::from_env();
+        compiler_options.service_runtimes = Some(crate::utils::load_services_registry(None)?.runtimes);
+        let unresolved = schema.clone();
+        let module = orbital_compiler::phases::compile_schema(schema, &compiler_options).map_err(|e| anyhow::anyhow!("Schema compilation failed: {e}"))?;
+        let options = orbital_compiler::GenerateOptions { compiler: compiler_options, ..Default::default() };
+        let program_path = Path::new(source_path);
+        let (target, output) = if self.target == PrintTarget::Ts {
+            let (resolved, _) = orbital_compiler::phases::lazy::resolve_program_with_path(
+                unresolved,
+                &orbital_compiler::CompilerOptions::from_env(),
+                Some(program_path),
+            )
+            .map_err(|e| anyhow::anyhow!("Failed to resolve schema for the browser store: {e}"))?;
+            (CodeTarget::Ts, crate::utils::shell_programs::emit("typescript", &module, Some(resolved), None, program_path, &options, Default::default())?)
+        } else {
+            (CodeTarget::Py, crate::utils::shell_programs::emit("python", &module, None, None, program_path, &options, Default::default())?)
+        };
+        let section = self.section.as_deref().map(Section::parse).transpose().map_err(|e| anyhow::anyhow!(e))?.unwrap_or(Section::All);
+        let only = self.only.as_deref().map(Only::parse_list).transpose().map_err(|e| anyhow::anyhow!(e))?;
+        let files = generated::select(&output.files, &section, only.as_deref(), target);
+        if files.is_empty() {
+            printed.note(&format!("warning: selector {} matched zero generated files", self.section.as_deref().unwrap_or("(default)")));
+        }
+        let format = match (self.format, self.output.as_deref().and_then(|p| p.extension()).and_then(|e| e.to_str())) {
+            (Some(PrintFormat::Stream), _) => Format::Stream,
+            (Some(PrintFormat::Markdown), _) => Format::Markdown,
+            (Some(PrintFormat::Json), _) => Format::Json,
+            (Some(PrintFormat::Raw), _) => Format::Raw,
+            (None, Some("md" | "markdown")) => Format::Markdown,
+            (None, Some("json")) => Format::Json,
+            (None, _) => Format::Stream,
+        };
+        let rendered = generated::render(&files, format, target)?;
+        if self.map && matches!(format, Format::Stream | Format::Markdown | Format::Raw) {
+            self.print_map(source, source_path, target, &files, &rendered, printed)?;
+        }
+        printed.write(&rendered, self.output.as_deref())?;
+        Ok(())
+    }
+
+    fn print_map(
+        &self,
+        orb_source: &str,
+        orb_path: &str,
+        target: orbital_lolo::program::generated::CodeTarget,
+        files: &[&orbital_core::generate::GeneratedFile],
+        rendered: &str,
+        printed: &mut Printed,
+    ) -> anyhow::Result<()> {
+        use base64::Engine;
+        let spans = orbital_lolo::orb_json::OrbSpans::scan(orb_source);
+        let anchor = files.iter().find_map(|f| orbital_lolo::program::generated::anchor(f, target).and_then(|(kind, name)| spans.lookup(kind, &name)));
+        match (self.output.as_deref(), anchor) {
+            (Some(out), Some(range)) => {
+                let mut map_path = out.as_os_str().to_owned();
+                map_path.push(".map");
+                let map_path = PathBuf::from(map_path);
+                std::fs::write(&map_path, orbital_lolo::orb_json::source_map_v3(rendered, orb_source, orb_path, &range))
+                    .map_err(|e| anyhow::anyhow!("Failed to write {}: {e}", map_path.display()))?;
+                printed.note(&format!("source map: {}", map_path.display()));
+            }
+            (Some(_), None) => printed.note("warning: --map: no tracked node found in selected files; map skipped"),
+            (None, Some(range)) if target == orbital_lolo::program::generated::CodeTarget::Ts => {
+                let map = orbital_lolo::orb_json::source_map_v3(rendered, orb_source, orb_path, &range);
+                let b64 = base64::engine::general_purpose::STANDARD.encode(map.as_bytes());
+                printed.stdout.push_str(&format!("//# sourceMappingURL=data:application/json;base64,{b64}\n"));
+            }
+            (None, _) => {}
+        }
+        Ok(())
+    }
+}
+
+/// `content` pretty-printed in the syntax it is written in: `.lolo` through the authored-AST formatter (comments kept),
+/// `.orb` JSON with sorted keys. `label` names it in errors.
+pub(crate) fn formatted_text(content: &str, label: &str) -> anyhow::Result<String> {
+    use crate::utils::{detect_syntax, InputSyntax};
+    Ok(match detect_syntax(content) {
+        InputSyntax::Lolo => {
+            let program = orbital_lolo::parse_str(content).map_err(|e| anyhow::anyhow!("Parse error in {}: {:?}", label, e))?;
+            orbital_lolo::format_program(&program)
+        }
+        InputSyntax::OrbJson => {
+            let value: serde_json::Value = serde_json::from_str(content).map_err(|e| anyhow::anyhow!("Invalid JSON in {}: {}", label, e))?;
+            serde_json::to_string_pretty(&orbital_core::util::canonical_json(&value))?
+        }
+    })
+}
+
+/// What `program/read { stamp }` answers for the `.orb` at `path`: ids and ledger minted by the one `stamp_identity`
+/// authority (`prior` anchors id reuse; `imports_dir` resolves cross-file id edges), keys sorted.
+fn stamped_json(path: &Path, prior_path: Option<&Path>, imports_dir: Option<&Path>) -> anyhow::Result<String> {
+    use orbital_compiler::loader::{ExternalOrbitalLoader, LoaderConfig};
+    let load = |path: &Path, what: &str| -> anyhow::Result<orbital_core::OrbitalSchema> {
+        let content = std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("Failed to read {what}{}: {e}", path.display()))?;
+        orbital_core::schema::parse_schema(&crate::utils::translate_schema_content(&content))
+            .map_err(|e| anyhow::anyhow!("Failed to parse {what}{}: {e}", path.display()))
+    };
+    let mut schema = load(path, "")?;
+    let prior = prior_path.map(|p| load(p, "prior ")).transpose()?;
+    orbital_lolo::stamp_schema_identity(&mut schema, prior.as_ref(), &Default::default());
+    if let Some(dir) = imports_dir {
+        let packages = discover_packages(dir)?;
+        let mut loader = ExternalOrbitalLoader::new(LoaderConfig { base_path: dir.to_path_buf(), packages, ..Default::default() });
+        orbital_compiler::resolve_cross_file_id_edges(&mut schema, &mut loader)
+            .map_err(|e| anyhow::anyhow!("Failed to resolve cross-file id edges: {}", e))?;
+    }
+    let value = serde_json::to_value(&schema).map_err(|e| anyhow::anyhow!("Failed to serialize stamped schema: {}", e))?;
+    Ok(serde_json::to_string_pretty(&orbital_core::util::canonical_json(&value))?)
+}
+
+/// The behavior packages installed for `dir` (its own, then the user store).
+pub(crate) fn discover_packages(dir: &Path) -> anyhow::Result<Vec<orbital_core::behavior_packages::BehaviorPackage>> {
+    let user_store = orbital_core::behavior_packages::user_store_dir().unwrap_or_else(|| dir.to_path_buf());
+    orbital_core::behavior_packages::discover(dir, &user_store).map_err(|e| anyhow::anyhow!("failed to discover behavior packages: {e}"))
+}
+
+/// The file and owning package a behavior specifier resolves to from the working directory.
+fn which(spec: &str) -> anyhow::Result<Result<(PathBuf, String), String>> {
+    use orbital_compiler::loader::{ExternalOrbitalLoader, LoaderConfig};
+    let cwd = std::env::current_dir()?;
+    let mut loader = ExternalOrbitalLoader::new(LoaderConfig { packages: discover_packages(&cwd)?, base_path: cwd, ..Default::default() });
+    Ok(loader.resolve_owned(spec).map(|(path, owner)| (path, owner.to_string())).map_err(|e| e.to_string()))
+}
+
+/// The sidecar fetcher: `ureq`, with the request url (a capability token) never in an error.
+pub(crate) struct UreqFetcher;
+
+impl orbital_core::sidecar_store::SidecarFetcher for UreqFetcher {
+    fn fetch(&self, url: &str, sink: &mut dyn std::io::Write) -> Result<(), String> {
+        let agent = ureq::AgentBuilder::new()
+            .timeout_connect(std::time::Duration::from_secs(30))
+            .timeout_read(std::time::Duration::from_secs(300))
+            .build();
+        let response = agent.get(url).call().map_err(|e| match e {
+            ureq::Error::Status(code, _) => format!("HTTP {code}"),
+            ureq::Error::Transport(t) => format!("transport error: {}", t.kind()),
+        })?;
+        std::io::copy(&mut response.into_reader(), sink).map(|_| ()).map_err(|e| format!("download interrupted: {:?}", e.kind()))
+    }
+}
+
+/// The readable path of the package's `orb.vectors` snapshot: a package file as-is, a lock-resolved one from the cache,
+/// downloaded and verified first when absent. `None` when none is declared.
+pub(crate) fn resolve_vectors(
+    pkg: &orbital_core::behavior_packages::BehaviorPackage,
+    fetcher: &dyn orbital_core::sidecar_store::SidecarFetcher,
+) -> anyhow::Result<Option<PathBuf>> {
+    let Some(path) = &pkg.vectors else { return Ok(None) };
+    match pkg.sidecars.iter().find(|s| &s.cache_path == path) {
+        Some(sidecar) => orbital_core::sidecar_store::ensure_sidecar(&pkg.name, &pkg.version, sidecar, fetcher).map(Some).map_err(anyhow::Error::from),
+        None => Ok(Some(path.clone())),
+    }
+}
+
+/// The resolved program at `path` and each `uses lazy` behavior split off it, as `{ program, lazy: [{ orbital, program }] }`,
+/// keys in declaration order; nothing is written, so a program with lazy behaviors or locales is not refused.
+pub(crate) fn resolved_value(path: &Path) -> anyhow::Result<Value> {
+    use orbital_compiler::phases::lazy::resolved_value as canonical;
+    use orbital_core::value_serialize::to_value;
+    let (resolved, lazy) = super::dev::resolve_in_memory(parsed(path)?, path)?;
+    let lazy = lazy
+        .iter()
+        .map(|child| {
+            Ok(Value::object(orbital_core::ValueMap::from_iter([
+                ("orbital".into(), to_value(&child.orbital)?),
+                ("program".into(), canonical(&child.schema).map_err(anyhow::Error::msg)?),
+            ])))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    Ok(Value::object(orbital_core::ValueMap::from_iter([
+        ("program".into(), canonical(&resolved).map_err(anyhow::Error::msg)?),
+        ("lazy".into(), Value::array(lazy)),
+    ])))
+}
+
+/// The program at `path` as it reads before resolution, and every trait and orbital reference its resolution resolves,
+/// each paired with the upstream declaration it resolved to (`program/read { references: true }`).
+fn referenced_program(path: &Path) -> anyhow::Result<(serde_json::Value, Vec<orbital_compiler::phases::inline::ReferencePair>)> {
+    let mut options = orbital_compiler::CompilerOptions::from_env();
+    let session = orbital_compiler::phases::inline::InlineSession::default();
+    session.collect_references();
+    options.inline.session = Some(session.clone());
+    let mut schema = parsed(path)?;
+    let unresolved = serde_json::to_value(&schema).map_err(|e| anyhow::anyhow!("Failed to serialize {}: {}", path.display(), e))?;
+    let failed = |e: orbital_compiler::CompilerError| anyhow::anyhow!("Failed to resolve {}: {}", path.display(), e);
+    orbital_compiler::phases::lazy::split_lazy_and_resolve(&mut schema, &options, Some(path)).map_err(failed)?;
+    session.take_references();
+    orbital_compiler::resolve_schema_with_path(schema, &options, Some(path)).map_err(failed)?;
+    Ok((orbital_core::util::canonical_json(&unresolved), session.take_references()))
+}
+
+/// What reading the program at `path` as resolved answers (`program/read { resolve }`).
+pub(crate) struct ResolvedRead {
+    pub(crate) text: String,
+    /// The source carried the `resolved` stamp when it was loaded (EXEC-LOAD-1).
+    pub(crate) loaded_resolved: bool,
+    /// Where the resolved program lives on disk: the source when it was already resolved, `output` when it was
+    /// resolved and written; absent when it was resolved in memory only.
+    pub(crate) program_path: Option<PathBuf>,
+}
+
+/// `orb resolve`: the text of the program at `path` resolved, written to `output` with its catalogs and lazy children.
+/// A resolved source is answered as it was read and never written out again (EXEC-LOAD-1).
+pub(crate) fn resolved_read(path: &Path, output: Option<&Path>) -> anyhow::Result<ResolvedRead> {
+    use crate::utils::{detect_syntax, InputSyntax};
+    #[derive(serde::Deserialize)]
+    struct Stamp {
+        resolved: Option<orbital_core::schema::ResolvedMark>,
+    }
+    let content = std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("Failed to read {}: {}", path.display(), e))?;
+    let mark = match detect_syntax(&content) {
+        InputSyntax::OrbJson => serde_json::from_str::<Stamp>(&content)
+            .map_err(|e| anyhow::anyhow!("Failed to read the resolved stamp of {}: {}", path.display(), e))?
+            .resolved,
+        InputSyntax::Lolo => None,
+    };
+    if let Some(mark) = mark {
+        orbital_compiler::phases::check_resolved_mark(&mark, path.display().to_string())
+            .map_err(|e| anyhow::anyhow!("Failed to resolve {}: {}", path.display(), e))?;
+        return Ok(ResolvedRead { text: content, loaded_resolved: true, program_path: Some(path.to_path_buf()) });
+    }
+    let schema = crate::utils::parse_schema_auto(&content, &path.display().to_string())
+        .map_err(|e| anyhow::anyhow!("Failed to parse {}: {}", path.display(), e))?;
+    drop(content);
+    let locales = |schema: &orbital_core::OrbitalSchema| schema.locales.as_ref().is_some_and(|l| !l.is_empty());
+    let refusal = || anyhow::anyhow!("{} declares locales; each locale's catalog is written beside the resolved .orb — pass --output", path.display());
+    if output.is_none() && locales(&schema) {
+        return Err(refusal());
+    }
+    let (resolved, lazy) = super::dev::resolve_in_memory(schema, path)?;
+    let text = orbital_compiler::phases::lazy::resolved_json(&resolved).map_err(anyhow::Error::msg)?;
+    match output {
+        Some(out) => {
+            std::fs::write(out, &text).map_err(|e| anyhow::anyhow!("Failed to write {}: {}", out.display(), e))?;
+            let program_dir = path.parent().unwrap_or(Path::new("."));
+            orbital_compiler::phases::messages::write_catalogs(out, &resolved, program_dir)
+                .map_err(|e| anyhow::anyhow!("Failed to write catalogs beside {}: {}", out.display(), e))?;
+            orbital_compiler::phases::lazy::write_resolved_lazy(out.parent().unwrap_or(Path::new(".")), &lazy, program_dir)
+                .map_err(|e| anyhow::anyhow!("Failed to write lazy behaviors beside {}: {}", out.display(), e))?;
+        }
+        None if !lazy.is_empty() => anyhow::bail!(
+            "{} imports {} behavior(s) with `uses lazy`; each resolves to its own .orb — pass --output so they can be written beside it",
+            path.display(),
+            lazy.len()
+        ),
+        None if locales(&resolved) => return Err(refusal()),
+        None => {}
+    }
+    Ok(ResolvedRead { text, loaded_resolved: false, program_path: output.map(Path::to_path_buf) })
 }
 
 fn to_json(value: &Value) -> serde_json::Value {
@@ -159,7 +589,7 @@ impl PrintSource {
             (Some(path), _) if path.contains("[*]") => Err(failure("program/print: `node` names one construct; use `nodes` for a `[*]` path")),
             (Some(path), _) => Ok(Value::string(at(path)?.remove(0))),
             (None, Some(path)) => from_json(serde_json::Value::from(at(path)?)),
-            (None, None) => crate::ports::parse::formatted_text(&self.source, "source")
+            (None, None) => formatted_text(&self.source, "source")
                 .map(Value::string)
                 .map_err(|e| failure(format!("program/print: {e}"))),
         }
@@ -230,6 +660,9 @@ fn stamp_and_validate(
     prior: Option<&serde_json::Value>,
     final_program: bool,
 ) -> Result<Checked, SubstrateFailure> {
+    if final_program {
+        return Err(failure(format!("{op}: `final` is retired from the compiler (its checks were archived with the validators); pass a std lint's results as `findings`")));
+    }
     let name = program
         .get("name")
         .and_then(serde_json::Value::as_str)
@@ -255,13 +688,13 @@ fn stamp_and_validate(
         .map(|p| scratch.write("prior.orb", &p.to_string()))
         .transpose()?;
     let stamped_text =
-        match crate::ports::stamp::stamped_json(&input, prior_path.as_deref(), None) {
+        match stamped_json(&input, prior_path.as_deref(), None) {
             Ok(json) => json,
             Err(e) => return Ok(refused(issue("PROGRAM_STAMP_FAILED", e.to_string()))),
         };
     let stamped = scratch.write(&format!("{name}.stamped.orb"), &stamped_text)?;
     let report =
-        crate::ports::validate::validation_report(&stamped, None, None, true, final_program, &[])
+        crate::utils::validation::validation_report(&stamped, None, None, true, &[])
             .map_err(|e| failure(format!("{op}: {e}")))?;
     let report = serde_json::to_value(&report).map_err(|e| failure(e.to_string()))?;
     let (errors, warnings) = (issues(&report, "errors"), issues(&report, "warnings"));
@@ -315,7 +748,7 @@ fn copy_web_client(built: Option<&Path>, output: &Path) -> Result<PathBuf, Subst
 }
 
 /// `webClient` is the copied prebuilt web client, null when the generate asked for none.
-fn generate_answer(report: &crate::ports::compile::CompileReport, web_client: Option<&Path>) -> serde_json::Value {
+fn generate_answer(report: &orbital_compiler::mixed::CompileReport, web_client: Option<&Path>) -> serde_json::Value {
     serde_json::json!({
         "lines": report.lines,
         "files": report.files,
@@ -323,6 +756,90 @@ fn generate_answer(report: &crate::ports::compile::CompileReport, web_client: Op
         "nextSteps": report.next_steps,
         "webClient": web_client.map(|dir| dir.display().to_string()),
     })
+}
+
+/// The program at `path`, parsed and resolved the way a cascade runs it.
+fn resolve_program(path: &Path) -> anyhow::Result<orbital_core::OrbitalSchema> {
+    let text = std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("Failed to read {}: {}", path.display(), e))?;
+    resolve_parsed(parse_program(&text, path)?, path)
+}
+
+fn parse_program(text: &str, path: &Path) -> anyhow::Result<orbital_core::OrbitalSchema> {
+    crate::utils::parse_schema_auto(text, &path.display().to_string())
+        .map_err(|e| anyhow::anyhow!("Failed to parse {}: {}", path.display(), e))
+}
+
+fn resolve_parsed(schema: orbital_core::OrbitalSchema, path: &Path) -> anyhow::Result<orbital_core::OrbitalSchema> {
+    use orbital_compiler::{phases::lazy::resolve_program_with_path, CompilerOptions};
+    let (resolved, _lazy) = resolve_program_with_path(schema, &CompilerOptions::from_env(), Some(path))
+        .map_err(|e| anyhow::anyhow!("Failed to resolve {}: {}", path.display(), e))?;
+    Ok(resolved)
+}
+
+/// Replays `steps` on the program at `path` (`orb execute --steps`); `live` answers their os/* and http asks on the
+/// native program host instead of leaving keyed ones pending (G-ORB-459).
+fn run_cascade(path: &Path, steps: &serde_json::Value, live: bool) -> anyhow::Result<serde_json::Value> {
+    use orbital_core::runtime::{EntitySource, InMemoryEntityCache, RuntimeKernel};
+    use orbital_core::step_replay::{play_steps, replay_dispatch, trait_definitions, with_step_config, StepClock};
+    let steps = steps.as_array().ok_or_else(|| anyhow::anyhow!("--steps must be a JSON array"))?;
+    let text = std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("Failed to read {}: {e}", path.display()))?;
+    let text = with_step_config(&text, steps).map_err(|e| anyhow::anyhow!(e))?.unwrap_or(text);
+    let program = parse_program(&text, path)?;
+    let resolved = resolve_parsed(program.clone(), path)?;
+    let defs = trait_definitions(&resolved);
+    let clock = StepClock::new();
+    let live_host = if live {
+        let files = crate::commands::dev::resolve_schema_to_temp(program, path)?;
+        let config = orbital_shell_rust::host::HostConfig {
+            substrate: Some(orbital_shell_rust::host::SubstratePort(std::sync::Arc::new(ProgramHost))),
+            clock: Some(clock.dispatch_clock()),
+            ..orbital_shell_rust::host::HostConfig::default()
+        };
+        let host = orbital_shell_rust::host::boot::boot_file_with(&files.path(), &std::env::vars().collect(), false, config)?;
+        Some((host, files))
+    } else {
+        None
+    };
+    let replay_kernel;
+    let kernel: &RuntimeKernel = match &live_host {
+        Some((host, _files)) => host.kernel(),
+        None => {
+            replay_kernel = RuntimeKernel::new(
+                orbital_core::RuntimeEnvironment::Server,
+                std::sync::Arc::new(InMemoryEntityCache::new()) as std::sync::Arc<dyn EntitySource>,
+                orbital_core::KernelConfig { clock: Some(clock.dispatch_clock()), ..Default::default() },
+            );
+            replay_kernel.register_schema(resolved).map_err(|e| anyhow::anyhow!("Failed to register {}: {e}", path.display()))?;
+            &replay_kernel
+        }
+    };
+    play_steps(kernel, &clock, &defs, steps, live, &mut |trait_name, event, payload, settle_ms| match &live_host {
+        Some((host, _files)) => {
+            let played = host.dispatch(trait_name, orbital_core::RUNTIME_SINGLETON, event, payload).map_err(|e| e.to_string());
+            settle_open_calls(host, settle_ms);
+            played
+        }
+        None => replay_dispatch(kernel, trait_name, event, payload),
+    })
+    .map_err(|e| anyhow::anyhow!(e))
+}
+
+/// A live step waits for its open keyed calls to end; with `settleMs`, one still open after it is cancelled.
+fn settle_open_calls(host: &orbital_shell_rust::host::Host, settle_ms: Option<f64>) {
+    let (stop, stopped) = std::sync::mpsc::channel::<()>();
+    match settle_ms {
+        Some(ms) => {
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(ms.max(0.0) as u64));
+                let _ = stop.send(());
+            });
+            orbital_shell_rust::host::run::hold(host, &stopped);
+        }
+        None => {
+            orbital_shell_rust::host::run::hold(host, &stopped);
+            drop(stop);
+        }
+    }
 }
 
 fn issues(report: &serde_json::Value, key: &str) -> Vec<serde_json::Value> {
@@ -361,17 +878,19 @@ impl ProgramHost {
             Some(_) => Err(failure(format!("{op}: `{key}` must be a path"))),
         };
         let (patterns, services) = (file("patterns")?, file("services")?);
-        let findings: Vec<crate::ports::validate::ProgramFinding> = match options.get("findings") {
+        let findings: Vec<orbital_compiler::phases::validation::report::ProgramFinding> = match options.get("findings") {
             None | Some(serde_json::Value::Null) => Vec::new(),
             Some(list) => serde_json::from_value(list.clone())
                 .map_err(|e| failure(format!("{op}: `findings` must be a list of {{ code, path, message, suggestion, severity: \"error\" | \"warning\" }}: {e}")))?,
         };
-        let report = crate::ports::validate::validation_report(
+        if flag("final")? {
+            return Err(failure(format!("{op}: `final` is retired from the compiler (its checks were archived with the validators); pass a std lint's results as `findings`")));
+        }
+        let report = crate::utils::validation::validation_report(
             path,
             patterns.as_deref(),
             services.as_deref(),
             flag("denyWarnings")?,
-            flag("final")?,
             &findings,
         )
             .map_err(|e| failure(format!("{op}: {e}")))?;
@@ -379,7 +898,7 @@ impl ProgramHost {
     }
 
     /// `program/read { resolve: true, path, output? }`: what `orb resolve <path> [--output]` prints
-    /// and writes, as `{ program, text, loadedResolved, programPath? }` (`loadedResolved`: the source carried the `resolved` stamp, EXEC-LOAD-1, and is answered as it was read, `output` unwritten; `programPath`: the source when it was resolved, `output` when written, absent in memory); the file at the absolute `path` is read, not `text`.
+    /// and writes, as `{ program, text, loadedResolved, programPath?, catalogs? }` (`loadedResolved`: the source carried the `resolved` stamp, EXEC-LOAD-1, and is answered as it was read, `output` unwritten; `programPath`: the source when it was resolved, `output` when written, absent in memory); the file at the absolute `path` is read, not `text`. A program that declares locales and has no `output` answers each locale's merged catalog in `catalogs` (locale to qualified key to message) and writes nothing.
     /// `text: false` without `output` answers `{ program, lazy: [{ orbital, program }] }` and writes nothing, so a program with lazy
     /// behaviors or locales is not refused (the lint input reads programs this way); with `output` it is the same read without `text` in the answer.
     fn read_resolved(options: &serde_json::Value) -> Result<Value, SubstrateFailure> {
@@ -397,13 +916,13 @@ impl ProgramHost {
         let with_text = match options.get("text") {
             None | Some(serde_json::Value::Null) | Some(serde_json::Value::Bool(true)) => true,
             Some(serde_json::Value::Bool(false)) if output.is_none() => {
-                return crate::ports::parse::resolved_value(path)
+                return resolved_value(path)
                     .map_err(|e| failure(format!("program/read: {e}")));
             }
             Some(serde_json::Value::Bool(false)) => false,
             Some(_) => return Err(failure("program/read: `text` must be a boolean")),
         };
-        let read = crate::ports::parse::resolved_read(path, output.as_deref())
+        let read = resolved_read(path, output.as_deref())
             .map_err(|e| failure(format!("program/read: {e}")))?;
         let program: Value = serde_json::from_str(&read.text).map_err(|e| failure(e.to_string()))?;
         let mut fields = orbital_core::ValueMap::default();
@@ -411,6 +930,17 @@ impl ProgramHost {
         fields.insert("loadedResolved".into(), Value::Bool(read.loaded_resolved));
         if let Some(program_path) = &read.program_path {
             fields.insert("programPath".into(), Value::String(program_path.display().to_string().into()));
+        }
+        if !read.catalogs.is_empty() {
+            let mut catalogs = orbital_core::ValueMap::default();
+            for (locale, messages) in &read.catalogs {
+                let mut entries = orbital_core::ValueMap::default();
+                for (key, message) in messages {
+                    entries.insert(key.as_str().into(), Value::String(message.as_str().into()));
+                }
+                catalogs.insert(locale.as_str().into(), Value::object(entries));
+            }
+            fields.insert("catalogs".into(), Value::object(catalogs));
         }
         if with_text {
             fields.insert("text".into(), Value::String(read.text.into()));
@@ -429,7 +959,7 @@ impl ProgramHost {
         let prior = options.path("prior")?;
         let imports = options.path("imports")?;
         let output = options.path("output")?;
-        let text = crate::ports::stamp::stamped_json(&path, prior.as_deref(), imports.as_deref())
+        let text = stamped_json(&path, prior.as_deref(), imports.as_deref())
             .map_err(|e| failure(format!("program/read: {e}")))?;
         if let Some(out) = &output {
             std::fs::write(out, &text)
@@ -446,7 +976,7 @@ impl ProgramHost {
         let options = Options::of("program/read", options)?;
         options.only("references", &["references", "path"])?;
         let path = options.absolute("path", "references")?;
-        let (program, references) = crate::ports::parse::referenced_program(&path)
+        let (program, references) = referenced_program(&path)
             .map_err(|e| failure(format!("program/read: {e}")))?;
         let references = serde_json::to_value(references).map_err(|e| failure(e.to_string()))?;
         from_json(serde_json::json!({ "program": program, "references": references }))
@@ -456,7 +986,6 @@ impl ProgramHost {
     /// out?, signKey?, keyId? }`: what `orb emit <target> <path>` prints, as `{ text, stderr }`; the files `orb emit`
     /// writes (`output`, the source map, `out`) are written.
     fn print_target(options: &serde_json::Value) -> Result<Value, SubstrateFailure> {
-        use crate::ports::emit::{EmitFormat, EmitOptions, EmitTarget};
         let options = Options::of("program/print", options)?;
         options.only(
             "target",
@@ -465,7 +994,7 @@ impl ProgramHost {
                 "unit", "out", "signKey", "keyId",
             ],
         )?;
-        let target: EmitTarget = options
+        let target: PrintTarget = options
             .choice("target")?
             .ok_or_else(|| failure("program/print: `target` must be orb, lolo, ts, py or manifest"))?;
         let path = options.absolute("path", "target")?;
@@ -478,30 +1007,38 @@ impl ProgramHost {
         if document_version.is_some() && inspect_source.is_none() {
             return Err(failure("program/print: `documentVersion` needs `inspectSource`"));
         }
-        let rendered = crate::ports::emit::render(EmitOptions {
+        let request = PrintRequest {
             target,
-            path: Some(path),
+            path,
             section: options.text("section")?,
             output: options.path("output")?,
-            format: options.choice::<EmitFormat>("format")?,
+            format: options.choice::<PrintFormat>("format")?,
             only: options.text("only")?,
             map: options.flag("map")?,
-            inspect_source,
-            document_version,
             unit: options.text("unit")?,
             out: options.path("out")?,
-            sign_key,
-            key_id,
-        })
-        .map_err(|e| failure(format!("program/print: {e}")))?;
-        from_json(serde_json::json!({ "text": rendered.stdout, "stderr": rendered.stderr }))
+            signer: sign_key.zip(key_id),
+        };
+        let mut printed = Printed::default();
+        match inspect_source {
+            Some(original) => {
+                if target != PrintTarget::Orb {
+                    return Err(failure("program/print: --inspect-source requires the orb target"));
+                }
+                let source = std::fs::read_to_string(&request.path).map_err(|e| failure(format!("program/print: Failed to read {}: {e}", request.path.display())))?;
+                let envelope = super::program_inspect::inspect(&source, &serde_json::json!({ "path": original, "version": document_version }))?;
+                printed.write(&envelope.to_string(), request.output.as_deref()).map_err(|e| failure(format!("program/print: {e}")))?;
+            }
+            None => request.print(&mut printed).map_err(|e| failure(format!("program/print: {e}")))?,
+        }
+        from_json(serde_json::json!({ "text": printed.stdout, "stderr": printed.stderr }))
     }
 
     /// `program/eval { generate: { path, output, shell, mode?, frontend?, backend?, backendUrl?, patterns?, devLogs?,
     /// host?, listenHost?, port?, emitOrb?, webClient?, source? } }`: what `orb compile` does and prints, as `{ lines, files,
     /// warnings, nextSteps, webClient }`; `webClient: true` also copies the shell's prebuilt web client into the output. The program is validated before anything is generated, as the command does.
     fn eval_generate(options: &serde_json::Value) -> Result<Value, SubstrateFailure> {
-        use crate::ports::compile::{compile_run, CompileRequest};
+        use crate::commands::program_compile::{compile_run, CompileRequest};
         let op = "program/eval";
         Options::of(op, options)?.only("generate", &["generate"])?;
         let generate = options.get("generate").unwrap_or(&serde_json::Value::Null);
@@ -553,11 +1090,11 @@ impl ProgramHost {
     fn read(&self, text: &str) -> Result<Value, SubstrateFailure> {
         let scratch = Scratch::new("almadar-program")?;
         let path = scratch.write("program.lolo", text)?;
-        match crate::ports::emit::orb_value(text, &path.display().to_string()) {
+        match orb_value(text, &path.display().to_string()) {
             Ok(json) => from_json(json),
             Err(lowering) => {
                 let report =
-                    crate::ports::validate::validation_report(&path, None, None, true, false, &[])
+                    crate::utils::validation::validation_report(&path, None, None, true, &[])
                         .map_err(|e| failure(format!("program/read: {e}")))?;
                 let report = serde_json::to_value(&report).map_err(|e| failure(e.to_string()))?;
                 let found: Vec<serde_json::Value> = issues(&report, "errors")
@@ -587,7 +1124,7 @@ impl ProgramHost {
         let scratch = Scratch::new("almadar-program")?;
         let text = program.to_string();
         let path = scratch.write("program.orb", &text)?;
-        crate::ports::emit::lolo_text(&text, &path.display().to_string())
+        lolo_text(&text, &path.display().to_string())
             .map(Value::string)
             .map_err(|e| failure(format!("program/print: {e}")))
     }
@@ -634,8 +1171,8 @@ impl ProgramHost {
     fn describe_target(
         op: &str,
         value: Option<&Value>,
-    ) -> Result<crate::ports::behaviors_catalog::DescribeTarget, SubstrateFailure> {
-        use crate::ports::behaviors_catalog::DescribeTarget;
+    ) -> Result<DescribeTarget, SubstrateFailure> {
+        use DescribeTarget;
         let json = value.map(to_json).unwrap_or(serde_json::Value::Null);
         let behavior = json
             .get("behavior")
@@ -668,117 +1205,86 @@ impl ProgramHost {
             .ok_or_else(|| failure(format!("{op}: expected a value naming its behavior")))
     }
 
-    /// `behavior/catalog`: `options.vectors: false` omits the vectors, so neither the store nor `embedder` is read.
-    fn catalog(
-        scope: Option<&Value>,
-        options: Option<&Value>,
-        embedder: Option<&dyn Embedder>,
-        user_dir: Option<&Path>,
-    ) -> Result<Value, SubstrateFailure> {
-        use crate::ports::behaviors_catalog::{catalog_with, Vectors};
-        let vectors = match option_flag(options, "vectors") {
-            Some(false) => Vectors::Omit,
-            _ => Vectors::Attach(embedder),
-        };
+    /// `behavior/catalog`: the listing as rows. The shipped vectors and the topics view are std's (`std-orb-behaviors`,
+    /// `std-orb-vectors`), so `vectors` must be `false` and `topics` is refused.
+    fn catalog(scope: Option<&Value>, options: Option<&Value>) -> Result<Value, SubstrateFailure> {
+        if option_flag(options, "vectors") != Some(false) {
+            return Err(failure("behavior/catalog: vectors are attached by std; ask with `vectors: false`"));
+        }
+        if option_flag(options, "topics") == Some(true) {
+            return Err(failure("behavior/catalog: topics are computed by std from the listing"));
+        }
         let json = scope.map(to_json).unwrap_or(serde_json::Value::Null);
         let strings = |key: &str| -> Option<Vec<String>> {
-            json.get(key)
-                .and_then(serde_json::Value::as_array)
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|v| v.as_str().map(str::to_string))
-                        .collect()
-                })
+            json.get(key).and_then(serde_json::Value::as_array).map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
         };
         let Some(paths) = strings("paths") else {
-            return Err(failure(
-                "behavior/catalog: paths: expected a list of registry folders",
-            ));
+            return Err(failure("behavior/catalog: paths: expected a list of registry folders"));
         };
         let exposure = strings("exposure").unwrap_or_default();
+        let with_traits = option_flag(options, "traits") != Some(false);
         let started = std::time::Instant::now();
-        let entries = catalog_with(&paths, &exposure, vectors, user_dir)
-            .map_err(|e| failure(format!("behavior/catalog: {e}")))?;
-        let listed = started.elapsed().as_millis() as u64;
-        let shaped = if option_flag(options, "topics") == Some(true) {
-            serde_json::to_value(crate::ports::behaviors_catalog::topics_of(&entries))
-        } else if option_flag(options, "traits") == Some(false) {
-            serde_json::to_value(entries.into_iter().map(crate::ports::behaviors_catalog::CatalogEntryOut::without_traits).collect::<Vec<_>>())
-        } else {
-            serde_json::to_value(entries)
-        };
-        let answer = from_json(shaped.map_err(|e| failure(e.to_string()))?);
-        tracing::debug!(target: orbital_core::logging::ns::CLI, listed_ms = listed, total_ms = started.elapsed().as_millis() as u64, "behavior/catalog answered");
-        answer
-    }
-
-    /// `behavior/describe`: `options.knobVectors: true` attaches a trait's knob vectors as `orb behaviors describe
-    /// --knob-vectors` does, a miss embedded by `embedder`.
-    fn describe(
-        op: &str,
-        value: Option<&Value>,
-        options: Option<&Value>,
-        embedder: Option<&dyn Embedder>,
-        user_dir: Option<&Path>,
-    ) -> Result<Value, SubstrateFailure> {
-        use crate::ports::behaviors_catalog::{describe_with, Vectors};
-        let target = Self::describe_target(op, value)?;
-        let vectors = match option_flag(options, "knobVectors") {
-            Some(true) => Vectors::Attach(embedder),
-            _ => Vectors::Omit,
-        };
-        let described = describe_with(target, None, vectors, user_dir)
-            .map_err(|e| failure(format!("{op}: {e}")))?;
-        from_json(described)
-    }
-
-    /// `behavior/texts`: the embedding texts under `{ paths, kind? }`, as `orb behaviors texts --json` prints them.
-    fn texts(scope: Option<&Value>) -> Result<Value, SubstrateFailure> {
-        let json = scope.map(to_json).unwrap_or(serde_json::Value::Null);
-        let Some(paths) = json
-            .get("paths")
-            .and_then(serde_json::Value::as_array)
-            .map(|a| {
-                a.iter()
-                    .map(|v| v.as_str().map(str::to_string))
-                    .collect::<Option<Vec<String>>>()
+        let rows = reflect::catalog_rows(&paths, &exposure, &mut |prefix, name, error| {
+            tracing::warn!(target: orbital_core::logging::ns::CLI, "skipped {prefix}/{name}: {error}");
+        })
+        .map_err(|e| failure(format!("behavior/catalog: {e}")))?;
+        let entries: Vec<serde_json::Value> = rows
+            .into_iter()
+            .map(|r| {
+                let key = format!("{}/{}", r.prefix, r.row.name);
+                let mut entry = serde_json::json!({
+                    "behavior": key,
+                    "package": r.package,
+                    "topic": r.row.topic,
+                    "level": r.row.level,
+                    "description": r.row.description,
+                    "capabilities": r.row.capabilities.as_deref().into_iter().flat_map(|s| s.split(',')).map(str::trim).filter(|p| !p.is_empty()).collect::<Vec<_>>(),
+                    "value": { "behavior": key },
+                    "vectors": {},
+                    "model": "",
+                });
+                if let Some(e) = r.row.exposure {
+                    entry["exposure"] = e.into();
+                }
+                if let Some(p) = r.row.pattern {
+                    entry["pattern"] = p.into();
+                }
+                if with_traits {
+                    entry["traits"] = r.row.traits.iter().map(|t| serde_json::json!({ "behavior": key, "trait": t })).collect();
+                }
+                entry
             })
-            .flatten()
-        else {
-            return Err(failure(
-                "behavior/texts: paths: expected a list of registry folders",
-            ));
-        };
-        let kind = match json.get("kind") {
-            None | Some(serde_json::Value::Null) => None,
-            Some(serde_json::Value::String(k)) => Some(k.as_str()),
-            Some(_) => return Err(failure("behavior/texts: kind: expected a string")),
-        };
-        let texts = crate::ports::behaviors_texts::texts(&paths, kind)
-            .map_err(|e| failure(format!("behavior/texts: {e}")))?;
-        from_json(serde_json::to_value(texts).map_err(|e| failure(e.to_string()))?)
+            .collect();
+        tracing::debug!(target: orbital_core::logging::ns::CLI, total_ms = started.elapsed().as_millis() as u64, "behavior/catalog answered");
+        from_json(serde_json::Value::Array(entries))
+    }
+
+    /// `behavior/describe`: a description without vectors; `options.knobVectors: true` is std's to attach.
+    fn describe(op: &str, value: Option<&Value>, options: Option<&Value>) -> Result<Value, SubstrateFailure> {
+        if option_flag(options, "knobVectors") == Some(true) {
+            return Err(failure(format!("{op}: knob vectors are attached by std")));
+        }
+        let described = reflect::describe(Self::describe_target(op, value)?, None).map_err(|e| failure(format!("{op}: {e}")))?;
+        from_json(described)
     }
 
     /// `behavior/packages`: each installed behavior package's `{ root, prefix, vectors }`, `vectors` being the
     /// `orb.vectors` snapshot the lock resolves (the cached sidecar when locked), `null` when none is declared.
     fn packages() -> Result<Value, SubstrateFailure> {
         let cwd = std::env::current_dir().map_err(|e| failure(e.to_string()))?;
-        let packages = crate::ports::npm_project::discover_from(&cwd)
+        let packages = discover_packages(&cwd)
             .map_err(|e| failure(format!("behavior/packages: {e}")))?;
         let mut out = Vec::new();
-        for (i, pkg) in packages.iter().enumerate() {
-            let vectors = crate::ports::sidecar_fetch::resolve_vectors(
+        for pkg in &packages {
+            let vectors = resolve_vectors(
                 pkg,
-                &crate::ports::sidecar_fetch::UreqFetcher,
+                &UreqFetcher,
             )
             .map_err(|e| failure(format!("behavior/packages: {e}")))?;
-            let fingerprint = crate::ports::behaviors_index::fingerprint(&packages, i)
-                .map_err(|e| failure(format!("behavior/packages: {e}")))?;
             out.push(serde_json::json!({
                 "root": pkg.root.to_string_lossy(),
                 "prefix": pkg.prefix,
                 "vectors": vectors.map(|v| v.to_string_lossy().into_owned()),
-                "fingerprint": fingerprint,
             }));
         }
         from_json(serde_json::Value::Array(out))
@@ -793,19 +1299,19 @@ impl ProgramHost {
     ) -> Result<Value, SubstrateFailure> {
         let behavior = Self::behavior_of(op, value)?;
         if option_flag(options, "file") == Some(true) {
-            let path = crate::ports::behaviors_catalog::behavior_source_path(&behavior)
+            let path = reflect::behavior_source_path(&behavior)
                 .map_err(|e| failure(format!("{op}: {e}")))?;
             let source = std::fs::read_to_string(&path)
                 .map_err(|e| failure(format!("{op}: {}: {e}", path.display())))?;
             return from_json(serde_json::json!({ "path": path, "source": source }));
         }
-        let source = crate::ports::behaviors_catalog::source(&behavior)
+        let source = reflect::source(&behavior)
             .map_err(|e| failure(format!("{op}: {e}")))?;
         from_json(source)
     }
 
     fn resolve_behavior(&self, behavior: &str) -> Result<Value, SubstrateFailure> {
-        let path = crate::ports::behaviors_catalog::behavior_source_path(behavior)
+        let path = reflect::behavior_source_path(behavior)
             .map_err(|e| failure(format!("behavior/resolve: {e}")))?;
         let schema = orbital_compiler::parse_file(&path)
             .map_err(|e| failure(format!("behavior/resolve: parse {}: {e}", path.display())))?;
@@ -869,7 +1375,7 @@ impl ProgramHost {
     fn dependencies(&self, program: serde_json::Value) -> Result<Value, SubstrateFailure> {
         let op = "behavior/dependencies";
         let cwd = std::env::current_dir().map_err(|e| failure(e.to_string()))?;
-        let packages = crate::ports::npm_project::discover_from(&cwd)
+        let packages = discover_packages(&cwd)
             .map_err(|e| failure(format!("{op}: {e}")))?;
         let mut loader = orbital_compiler::loader::ExternalOrbitalLoader::new(
             orbital_compiler::loader::LoaderConfig {
@@ -901,7 +1407,7 @@ impl ProgramHost {
             if behaviors.contains_key(&name) {
                 continue;
             }
-            let imported = crate::ports::behaviors_catalog::resolve_import(
+            let imported = reflect::resolve_import(
                 &mut loader,
                 &packages,
                 &spec,
@@ -1118,7 +1624,7 @@ impl ProgramHost {
                 )))
             }
         };
-        let report = crate::ports::execute::run_cascade_with(
+        let report = run_cascade(
             &path,
             &serde_json::Value::Array(steps),
             live,
@@ -1146,7 +1652,7 @@ impl ProgramHost {
             }
         };
         let renderer = if render {
-            let schema = crate::ports::execute::resolve_program(&path)
+            let schema = resolve_program(&path)
                 .map_err(|e| failure(format!("{op}: {e}")))?;
             let target = crate::utils::desktop::target()
                 .map_err(|e| failure(format!("{op}: options.render: {e}")))?;
@@ -1307,7 +1813,7 @@ impl ProgramHost {
             orbital_core::time_util::now_millis() as f64,
         );
         let load = |from: &str| {
-            crate::ports::behaviors_catalog::source_value_of(from)
+            reflect::source_value_of(from)
                 .map_err(|e| format!("behavior/source: {e}"))
         };
         let schema = orbital_compiler::composition::compose_programs(
@@ -1344,7 +1850,7 @@ impl SubstrateHandler for ProgramHost {
                     from_json(serde_json::to_value(embeds).map_err(|e| failure(e.to_string()))?)
                 }
                 Some(Value::String(text)) if option_flag(args.get(1), "findings") == Some(true) => {
-                    let found: Vec<serde_json::Value> = crate::ports::validate::source_findings(text)
+                    let found: Vec<serde_json::Value> = crate::utils::validation::source_findings(text)
                         .into_iter()
                         .map(|f| {
                             serde_json::json!({
@@ -1377,27 +1883,19 @@ impl SubstrateHandler for ProgramHost {
             },
             "program/validate" if option_flag(args.get(1), "report") == Some(true) => Self::validation_report(&to_json(&args[1])),
             "program/validate" => self.validate(program_arg(op, args.first())?, args.get(1)),
-            "behavior/catalog" => {
-                let embedder = ProviderEmbedder::from_env();
-                let embedder = embedder.as_ref().map(|e| e as &dyn Embedder);
-                Self::catalog(args.first(), args.get(1), embedder, None)
-            }
-            "behavior/describe" => {
-                let embedder = ProviderEmbedder::from_env();
-                let embedder = embedder.as_ref().map(|e| e as &dyn Embedder);
-                Self::describe(op, args.first(), args.get(1), embedder, None)
-            }
-            "behavior/texts" => Self::texts(args.first()),
+            "behavior/catalog" => Self::catalog(args.first(), args.get(1)),
+            "behavior/describe" => Self::describe(op, args.first(), args.get(1)),
+            "behavior/texts" => Err(failure("behavior/texts: the embedding texts are built by std (std-orb-vectors)")),
             "behavior/packages" => Self::packages(),
             "behavior/source" => Self::source(op, args.first(), args.get(1)),
             "behavior/resolve" if option_flag(args.get(1), "expects") == Some(true) => {
                 let spec = Self::behavior_of(op, args.first())?;
-                let derived = crate::ports::behaviors_catalog::expectations(&spec).map_err(|e| failure(format!("{op}: {e}")))?;
+                let derived = reflect::expectations(&spec).map_err(|e| failure(format!("{op}: {e}")))?;
                 from_json(derived)
             }
             "behavior/resolve" if option_flag(args.get(1), "path") == Some(true) => {
                 let spec = Self::behavior_of(op, args.first())?;
-                match crate::ports::npm_project::which(&spec).map_err(|e| failure(format!("{op}: {e}")))? {
+                match which(&spec).map_err(|e| failure(format!("{op}: {e}")))? {
                     Ok((path, owner)) => from_json(serde_json::json!({ "path": path.display().to_string(), "owner": owner })),
                     Err(refusal) => Err(failure(format!("{op}: {refusal}"))),
                 }
@@ -1444,6 +1942,12 @@ orbital NoteOrbital {
 }
 "#;
 
+    /// The canonical `.orb` text of `source`: the bytes `orb emit orb --output <file>` writes, from the live `orb_value` path.
+    fn orb_text(source: &str, source_path: &str) -> String {
+        let value = orb_value(source, source_path).unwrap();
+        serde_json::to_string_pretty(&orbital_core::util::canonical_json(&value)).unwrap()
+    }
+
     fn json(value: &Value) -> serde_json::Value {
         to_json(value)
     }
@@ -1484,7 +1988,7 @@ orbital O {
         let as_json = json(&program);
         assert_eq!(as_json["name"], "note-pad");
         let expected: serde_json::Value =
-            serde_json::from_str(&crate::ports::emit::orb_json(NOTE, "note.lolo").unwrap()).unwrap();
+            serde_json::from_str(&orb_text(NOTE, "note.lolo")).unwrap();
         assert_eq!(
             as_json,
             json(&from_json(expected).unwrap()),
@@ -1519,7 +2023,7 @@ orbital O {
         std::fs::write(&file, NOTE).unwrap();
         let options = from_json(serde_json::json!({ "resolve": true, "path": file.display().to_string() })).unwrap();
         let answer = json(&ProgramHost.run("program/read", &[Value::String(String::new().into()), options]).expect("resolves"));
-        let expected = crate::ports::parse::resolved_text(&file, None).expect("orb resolve");
+        let expected = resolved_read(&file, None).map(|r| r.text).expect("orb resolve");
         assert_eq!(answer["text"], serde_json::Value::String(expected.clone()));
         assert_eq!(answer["program"], serde_json::from_str::<serde_json::Value>(&expected).unwrap());
     }
@@ -1584,8 +2088,13 @@ orbital O {
         assert_eq!(bare["programPath"], app.display().to_string(), "{bare}");
         assert_eq!(bare["program"], again["program"]);
 
-        let refused = read(&source, None).unwrap_err();
-        assert!(refused.message.contains("declares locales"), "control: an authored source with locales still needs an output: {}", refused.message);
+        let in_memory = json(&read(&source, None).expect("an authored source with locales needs no output"));
+        let mut locales: Vec<&String> = in_memory["catalogs"].as_object().expect("catalogs").keys().collect();
+        locales.sort();
+        assert_eq!(locales, ["ar", "en"], "each declared locale's catalog is answered: {in_memory}");
+        assert!(in_memory.get("programPath").is_none(), "{in_memory}");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 3, "nothing new is written beside the source (note.lolo, dist, elsewhere)");
+        assert!(bare.get("catalogs").is_none(), "control: a resolved source carries no catalogs to answer: {bare}");
     }
 
     #[test]
@@ -1637,7 +2146,7 @@ orbital O {
         let dir = tempfile::tempdir().expect("tempdir");
         let source = dir.path().join("note.lolo");
         std::fs::write(&source, NOTE).unwrap();
-        let mut resolved: serde_json::Value = serde_json::from_str(&crate::ports::parse::resolved_text(&source, None).unwrap()).unwrap();
+        let mut resolved: serde_json::Value = serde_json::from_str(&resolved_read(&source, None).map(|r| r.text).unwrap()).unwrap();
         resolved["resolved"]["typeContractVersion"] = 999.into();
         let stale = dir.path().join("stale.orb");
         std::fs::write(&stale, resolved.to_string()).unwrap();
@@ -1663,7 +2172,7 @@ orbital O {
         let dir = tempfile::tempdir().expect("tempdir");
         let source = dir.path().join("note.lolo");
         std::fs::write(&source, NOTE).unwrap();
-        let resolved_text = crate::ports::parse::resolved_text(&source, None).expect("orb resolve");
+        let resolved_text = resolved_read(&source, None).map(|r| r.text).expect("orb resolve");
         let resolved_file = dir.path().join("note.orb");
         std::fs::write(&resolved_file, &resolved_text).unwrap();
         let read = |file: &std::path::Path| {
@@ -1681,14 +2190,14 @@ orbital O {
         let dir = tempfile::tempdir().expect("tempdir");
         let source = dir.path().join("note.lolo");
         std::fs::write(&source, NOTE).unwrap();
-        let printed: Value = serde_json::from_str::<Value>(&crate::ports::parse::resolved_text(&source, None).expect("orb resolve"))
+        let printed: Value = serde_json::from_str::<Value>(&resolved_read(&source, None).map(|r| r.text).expect("orb resolve"))
             .expect("reads back");
-        let direct = crate::ports::parse::resolved_value(&source).expect("resolved value");
+        let direct = resolved_value(&source).expect("resolved value");
         assert_eq!(direct.get_path("program"), Some(&printed));
         assert_eq!(direct.get_path("lazy"), Some(&Value::array(Vec::<Value>::new())));
         let other = std::fs::write(&source, NOTE.replacen("note-pad", "note-other", 1));
         other.unwrap();
-        let changed = crate::ports::parse::resolved_value(&source).expect("resolved value");
+        let changed = resolved_value(&source).expect("resolved value");
         assert_ne!(changed.get_path("program"), Some(&printed), "control: another program is another value");
     }
 
@@ -1706,8 +2215,9 @@ orbital O {
         let answer = json(&read(serde_json::json!({ "text": false })).expect("answers the program"));
         assert_eq!(answer["program"]["name"], "note-pad", "{answer}");
         assert!(answer.get("text").is_none(), "no text is printed: {answer}");
-        let refused = read(serde_json::json!({})).unwrap_err();
-        assert!(refused.message.contains("declares locales"), "control: the printed form still needs --output: {}", refused.message);
+        let printed = json(&read(serde_json::json!({})).expect("the printed form needs no output either"));
+        assert!(printed["text"].is_string() && printed["catalogs"]["en"].is_object(), "{printed}");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "nothing is written beside the source");
     }
 
     #[test]
@@ -1804,7 +2314,7 @@ orbital O {
         assert_eq!(legacy[0]["path"], "app:1");
         assert_eq!(read(format!("app Foo [version: \"1.0.0\"]\n{body}")), serde_json::json!([]), "control: the bracket header is clean");
         let report_input = serde_json::json!({ "findings": legacy });
-        assert!(serde_json::from_value::<Vec<crate::ports::validate::ProgramFinding>>(report_input["findings"].clone()).is_ok(), "the list feeds program/validate's `findings` as is");
+        assert!(serde_json::from_value::<Vec<orbital_compiler::phases::validation::report::ProgramFinding>>(report_input["findings"].clone()).is_ok(), "the list feeds program/validate's `findings` as is");
     }
 
     #[test]
@@ -1826,11 +2336,11 @@ orbital O {
         std::fs::write(&file, NOTE).unwrap();
         let path = file.display().to_string();
         let orb = json(&print_with(serde_json::json!({ "target": "orb", "path": path })).expect("emits orb"));
-        let expected = format!("{}\n", crate::ports::emit::orb_json(NOTE, &path).unwrap());
+        let expected = format!("{}\n", orb_text(NOTE, &path));
         assert_eq!(text_of(&orb, "text"), expected, "the bytes `orb emit orb` prints");
         assert_eq!(text_of(&orb, "stderr"), "");
         let lolo = json(&print_with(serde_json::json!({ "target": "lolo", "path": path })).expect("emits lolo"));
-        let expected = format!("{}\n", crate::ports::emit::lolo_text(NOTE, &path).unwrap());
+        let expected = format!("{}\n", lolo_text(NOTE, &path).unwrap());
         assert_eq!(text_of(&lolo, "text"), expected, "the bytes `orb emit lolo` prints");
         assert_ne!(text_of(&lolo, "text"), text_of(&orb, "text"), "control: the target picks the output");
     }
@@ -1847,7 +2357,7 @@ orbital O {
                 .expect("emits"),
         );
         assert_eq!(text_of(&answer, "text"), "");
-        assert_eq!(std::fs::read_to_string(&out).unwrap(), crate::ports::emit::orb_json(NOTE, &file.display().to_string()).unwrap());
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), orb_text(NOTE, &file.display().to_string()));
     }
 
     #[test]
@@ -1866,10 +2376,10 @@ orbital O {
         orbital_compiler::loader::register_source_lowerer(|path, _, _| crate::lower_lolo_file(path));
         let dir = tempfile::tempdir().expect("tempdir");
         let orb = dir.path().join("note.orb");
-        std::fs::write(&orb, crate::ports::emit::orb_json(NOTE, "note.lolo").unwrap()).unwrap();
+        std::fs::write(&orb, orb_text(NOTE, "note.lolo")).unwrap();
         let options = from_json(serde_json::json!({ "stamp": true, "path": orb.display().to_string() })).unwrap();
         let answer = json(&ProgramHost.run("program/read", &[Value::String(String::new().into()), options]).expect("stamps"));
-        let expected = crate::ports::stamp::stamped_json(&orb, None, None).expect("orb stamp");
+        let expected = stamped_json(&orb, None, None).expect("orb stamp");
         assert_eq!(answer["text"], serde_json::Value::String(expected.clone()));
         assert_eq!(answer["program"], serde_json::from_str::<serde_json::Value>(&expected).unwrap());
         let out = dir.path().join("stamped.orb");
@@ -1879,7 +2389,7 @@ orbital O {
         .unwrap();
         let written = json(&ProgramHost.run("program/read", &[Value::String(String::new().into()), options]).expect("stamps"));
         assert_eq!(std::fs::read_to_string(&out).unwrap(), text_of(&written, "text"), "--output writes the stamped text");
-        let with_prior = crate::ports::stamp::stamped_json(&orb, Some(&orb), None).unwrap();
+        let with_prior = stamped_json(&orb, Some(&orb), None).unwrap();
         assert_eq!(text_of(&written, "text"), with_prior, "--prior anchors the ids");
     }
 
@@ -1919,7 +2429,7 @@ orbital O {
         assert_eq!(std::fs::read_to_string(copied.join("assets/fonts/a.woff2")).unwrap(), "font");
         assert_eq!(std::fs::read_to_string(copied.join("program.client.orb")).unwrap(), "{\"name\":\"app\"}");
         assert_eq!(std::fs::read_to_string(copied.join("locales/en.json")).unwrap(), "{\"hi\":\"Hi\"}");
-        let report = crate::ports::compile::CompileReport { files: 3, ..Default::default() };
+        let report = orbital_compiler::mixed::CompileReport { files: 3, ..Default::default() };
         let answer = generate_answer(&report, Some(&copied));
         assert_eq!(answer["webClient"], copied.display().to_string());
         assert!(generate_answer(&report, None).get("webClient").is_some_and(serde_json::Value::is_null));
@@ -1964,7 +2474,7 @@ orbital O {
         let dir = tempfile::tempdir().expect("tempdir");
         let orb = dir.path().join("program.orb");
         std::fs::write(&orb, json(&program).to_string()).unwrap();
-        let expected = crate::ports::execute::run_cascade_with(&orb, &steps, false).expect("execute --steps");
+        let expected = run_cascade(&orb, &steps, false).expect("execute --steps");
         assert_eq!(answer, expected);
         assert_eq!(answer["success"], true, "{answer}");
     }
@@ -1987,7 +2497,7 @@ orbital O {
         let value = from_json(serde_json::json!({ "behavior": spec })).unwrap();
         let options = from_json(serde_json::json!({ "path": true })).unwrap();
         let answer = ProgramHost.run("behavior/resolve", &[value, options]);
-        match crate::ports::npm_project::which(spec).expect("packages discover") {
+        match which(spec).expect("packages discover") {
             Ok((path, owner)) => assert_eq!(
                 json(&answer.expect("resolves")),
                 serde_json::json!({ "path": path.display().to_string(), "owner": owner })
@@ -2007,7 +2517,7 @@ orbital O {
         let value = from_json(serde_json::json!({ "behavior": spec })).unwrap();
         let options = from_json(serde_json::json!({ "expects": true })).unwrap();
         let answer = json(&ProgramHost.run("behavior/resolve", &[value, options]).expect("derives"));
-        assert_eq!(answer, crate::ports::behaviors_catalog::expectations(&spec).unwrap());
+        assert_eq!(answer, reflect::expectations(&spec).unwrap());
         assert!(answer.get("NoteOrbital").is_some(), "{answer}");
     }
 
@@ -2026,7 +2536,7 @@ orbital O {
         std::fs::write(&file, NOTE).unwrap();
         let options = from_json(serde_json::json!({ "report": true, "path": file.display().to_string() })).unwrap();
         let answer = json(&ProgramHost.run("program/validate", &[Value::Null, options]).expect("reports"));
-        let expected = serde_json::to_value(crate::ports::validate::validation_report(&file, None, None, false, false, &[]).unwrap()).unwrap();
+        let expected = serde_json::to_value(crate::utils::validation::validation_report(&file, None, None, false, &[]).unwrap()).unwrap();
         assert_eq!(answer, expected);
         assert!(answer.get("valid").is_some(), "{answer}");
     }
@@ -2042,7 +2552,7 @@ orbital O {
             ProgramHost.run("program/validate", &[Value::Null, options]).map(|v| json(&v))
         };
         let plain = report(serde_json::json!([])).expect("reports");
-        let expected = serde_json::to_value(crate::ports::validate::validation_report(&file, None, None, false, false, &[]).unwrap()).unwrap();
+        let expected = serde_json::to_value(crate::utils::validation::validation_report(&file, None, None, false, &[]).unwrap()).unwrap();
         assert_eq!(plain, expected, "control: no findings leave the report as it is");
         let with = report(serde_json::json!([
             { "code": "ORB_LINT_E", "path": "orbitals[0].traits[0]", "message": "m", "suggestion": "", "severity": "error", "validValues": ["a", "b"] },
@@ -2112,7 +2622,7 @@ orbital O {
             panic!("text")
         };
         assert!(text.contains(";; the one note"), "{text}");
-        assert_eq!(text, crate::ports::parse::formatted_text(&commented, "x").unwrap(), "the same bytes as orb format");
+        assert_eq!(text, formatted_text(&commented, "x").unwrap(), "the same bytes as orb format");
     }
 
     #[test]
@@ -2171,7 +2681,7 @@ orbital O {
                 .run("behavior/source", &[value.clone()])
                 .expect("source"),
         );
-        let printed = crate::ports::behaviors_catalog::source("almadar-std/std-retry").unwrap();
+        let printed = reflect::source("almadar-std/std-retry").unwrap();
         assert_eq!(source, json(&from_json(printed).unwrap()));
         let described = json(
             &host
@@ -2220,7 +2730,7 @@ orbital O {
         let answered =
             json(&ProgramHost::source("behavior/source", Some(&value), Some(&file)).expect("file"));
         let path =
-            crate::ports::behaviors_catalog::behavior_source_path("almadar-std/std-retry")
+            reflect::behavior_source_path("almadar-std/std-retry")
                 .unwrap();
         assert_eq!(
             answered,
@@ -2236,7 +2746,7 @@ orbital O {
             program,
             json(
                 &from_json(
-                    crate::ports::behaviors_catalog::source("almadar-std/std-retry").unwrap()
+                    reflect::source("almadar-std/std-retry").unwrap()
                 )
                 .unwrap()
             ),
@@ -2245,198 +2755,68 @@ orbital O {
         assert!(program.get("path").is_none());
     }
 
-    /// An embedder that answers locally and counts the texts it embedded.
-    struct CountingEmbedder(std::sync::Mutex<usize>);
-
-    impl Embedder for CountingEmbedder {
-        fn model(&self) -> &str {
-            "test-model"
-        }
-        fn embed(&self, texts: &[String]) -> anyhow::Result<Vec<Vec<f32>>> {
-            *self.0.lock().unwrap() += texts.len();
-            Ok(texts
-                .iter()
-                .map(|t| vec![t.len() as f32, 1.0, -1.0, 0.5])
-                .collect())
-        }
-    }
-
     #[test]
-    fn describe_attaches_knob_vectors_only_with_the_knob_vectors_option_as_the_verb_does() {
+    fn describe_answers_a_trait_without_vectors_and_refuses_the_knob_vectors_std_attaches() {
         orbital_compiler::loader::register_source_lowerer(|path, _, _| crate::lower_lolo_file(path));
-        let store = Scratch::new("almadar-knob-vectors").unwrap();
-        let fake = CountingEmbedder(std::sync::Mutex::new(0));
-        let value =
-            from_json(serde_json::json!({ "behavior": "almadar-std/std-retry", "trait": "Retry" }))
-                .unwrap();
-        let with = from_json(serde_json::json!({ "knobVectors": true })).unwrap();
-        let attached = json(
-            &ProgramHost::describe(
-                "behavior/describe",
-                Some(&value),
-                Some(&with),
-                Some(&fake),
-                Some(&store.0),
-            )
-            .expect("describe with knob vectors"),
-        );
-        let knobs = attached["knobs"].as_array().unwrap();
-        assert_eq!(knobs.len(), 4, "{attached}");
-        assert!(knobs
-            .iter()
-            .all(|k| k["vector"].as_array().is_some_and(|v| v.len() == 4)));
-        assert_eq!(attached["model"], "test-model");
-        let verb = crate::ports::behaviors_catalog::describe_with(
-            crate::ports::behaviors_catalog::DescribeTarget::Spec(
-                "almadar-std/std-retry.traits.Retry".into(),
-            ),
-            None,
-            crate::ports::behaviors_catalog::Vectors::Attach(Some(&fake)),
-            Some(&store.0),
-        )
-        .unwrap();
-        assert_eq!(
-            attached,
-            json(&from_json(verb).unwrap()),
-            "the op answers what `describe --knob-vectors` prints"
-        );
-
-        let embedded = *fake.0.lock().unwrap();
-        let without = json(
-            &ProgramHost::describe(
-                "behavior/describe",
-                Some(&value),
-                None,
-                Some(&fake),
-                Some(&store.0),
-            )
-            .expect("describe"),
-        );
-        assert!(without["knobs"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|k| k.get("vector").is_none()));
-        assert_eq!(without["model"], "");
+        let value = from_json(serde_json::json!({ "behavior": "almadar-std/std-retry", "trait": "Retry" })).unwrap();
+        let plain = json(&ProgramHost::describe("behavior/describe", Some(&value), None).expect("describe"));
+        let knobs = plain["knobs"].as_array().unwrap();
+        assert_eq!(knobs.len(), 4, "{plain}");
+        assert!(knobs.iter().all(|k| k.get("vector").is_none()));
+        assert_eq!(plain["model"], "");
         let off = from_json(serde_json::json!({ "knobVectors": false })).unwrap();
-        let declined = json(
-            &ProgramHost::describe(
-                "behavior/describe",
-                Some(&value),
-                Some(&off),
-                Some(&fake),
-                Some(&store.0),
-            )
-            .expect("describe knobVectors false"),
-        );
-        assert_eq!(declined, without);
-        assert_eq!(
-            *fake.0.lock().unwrap(),
-            embedded,
-            "control: no knob vectors, no embedding"
-        );
+        assert_eq!(json(&ProgramHost::describe("behavior/describe", Some(&value), Some(&off)).unwrap()), plain);
+        let on = from_json(serde_json::json!({ "knobVectors": true })).unwrap();
+        let refused = ProgramHost::describe("behavior/describe", Some(&value), Some(&on)).unwrap_err();
+        assert!(refused.message.contains("std"), "{}", refused.message);
     }
 
     #[test]
-    fn catalog_with_vectors_false_reads_no_store_and_no_provider() {
+    fn catalog_lists_rows_with_no_vectors_and_refuses_what_std_computes() {
         orbital_compiler::loader::register_source_lowerer(|path, _, _| crate::lower_lolo_file(path));
-        let store = Scratch::new("almadar-catalog-vectors").unwrap();
-        let fake = CountingEmbedder(std::sync::Mutex::new(0));
-        let scope =
-            from_json(serde_json::json!({ "paths": ["almadar-std/ml/organisms"] })).unwrap();
+        let scope = from_json(serde_json::json!({ "paths": ["almadar-std/ml/organisms"] })).unwrap();
         let off = from_json(serde_json::json!({ "vectors": false })).unwrap();
-        let bare = json(
-            &ProgramHost::catalog(Some(&scope), Some(&off), Some(&fake), Some(&store.0))
-                .expect("catalog without vectors"),
-        );
+        let bare = json(&ProgramHost::catalog(Some(&scope), Some(&off)).expect("catalog without vectors"));
         let entries = bare.as_array().unwrap();
         assert!(!entries.is_empty());
-        assert!(entries
-            .iter()
-            .all(|e| e["vectors"] == serde_json::json!({}) && e["model"] == ""));
-        assert_eq!(*fake.0.lock().unwrap(), 0, "the provider is never asked");
-        assert_eq!(
-            std::fs::read_dir(&store.0).unwrap().count(),
-            0,
-            "the user store is never opened"
-        );
+        assert!(entries.iter().all(|e| e["vectors"] == serde_json::json!({}) && e["model"] == "" && e["traits"].is_array()));
+        let keys: Vec<&str> = entries.iter().map(|e| e["behavior"].as_str().unwrap()).collect();
+        assert!(keys.windows(2).all(|w| w[0] < w[1]), "rows come in `<prefix>/<name>` order: {keys:?}");
 
-        let full = json(
-            &ProgramHost::catalog(Some(&scope), None, Some(&fake), Some(&store.0))
-                .expect("catalog"),
-        );
-        assert!(
-            full.as_array()
-                .unwrap()
-                .iter()
-                .all(|e| e["model"] == "test-model"
-                    && e["vectors"].as_object().is_some_and(|v| !v.is_empty())),
-            "control: by default the vectors are attached"
-        );
+        let lean = from_json(serde_json::json!({ "vectors": false, "traits": false })).unwrap();
+        let lean = json(&ProgramHost::catalog(Some(&scope), Some(&lean)).unwrap());
+        assert!(lean.as_array().unwrap().iter().all(|e| e.get("traits").is_none()));
+
+        assert!(ProgramHost::catalog(Some(&scope), None).is_err(), "control: vectors are std's to attach");
+        let topics = from_json(serde_json::json!({ "vectors": false, "topics": true })).unwrap();
+        assert!(ProgramHost::catalog(Some(&scope), Some(&topics)).is_err(), "control: topics are std's");
+        let none = from_json(serde_json::json!({ "exposure": [] })).unwrap();
+        assert!(ProgramHost::catalog(Some(&none), Some(&off)).is_err(), "control: no paths fails");
+        let bad = from_json(serde_json::json!({ "paths": ["almadar-std/ml/organisms"], "exposure": ["nope"] })).unwrap();
+        assert!(ProgramHost::catalog(Some(&bad), Some(&off)).is_err(), "control: an unknown exposure fails");
     }
 
     #[test]
-    fn texts_answers_what_behaviors_texts_prints_in_embed_order() {
-        orbital_compiler::loader::register_source_lowerer(|path, _, _| crate::lower_lolo_file(path));
-        let paths = vec!["almadar-std/ml/organisms".to_string()];
-        let scope = from_json(serde_json::json!({ "paths": paths })).unwrap();
-        let all = json(&ProgramHost::texts(Some(&scope)).expect("texts"));
-        let printed = crate::ports::behaviors_texts::texts(&paths, None).unwrap();
-        assert_eq!(
-            all,
-            json(&from_json(serde_json::to_value(&printed).unwrap()).unwrap())
-        );
-        let keys: Vec<&str> = all
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|t| t["key"].as_str().unwrap())
-            .collect();
-        let organisms = keys
-            .iter()
-            .take_while(|k| !k.contains('#') && !k.contains('/'))
-            .count();
-        assert!(organisms > 0, "{keys:?}");
-        let capabilities = keys[organisms..]
-            .iter()
-            .take_while(|k| k.ends_with("#capabilities"))
-            .count();
-        assert!(
-            keys[organisms + capabilities..]
-                .iter()
-                .all(|k| k.contains('/')),
-            "organism texts, then capability texts, then knob texts: {keys:?}"
-        );
-
-        let only = from_json(serde_json::json!({ "paths": paths, "kind": "capability" })).unwrap();
-        let capability = json(&ProgramHost::texts(Some(&only)).expect("capability texts"));
-        assert_eq!(capability.as_array().unwrap().len(), capabilities);
-        let bad = from_json(serde_json::json!({ "paths": paths, "kind": "nope" })).unwrap();
-        assert!(
-            ProgramHost::texts(Some(&bad)).is_err(),
-            "control: an unknown kind fails"
-        );
-        let none = from_json(serde_json::json!({ "kind": "knob" })).unwrap();
-        assert!(
-            ProgramHost::texts(Some(&none)).is_err(),
-            "control: no paths fails"
-        );
+    fn texts_is_refused_until_std_builds_the_embedding_texts() {
+        let scope = from_json(serde_json::json!({ "paths": ["almadar-std/ml/organisms"] })).unwrap();
+        let refused = ProgramHost.run("behavior/texts", &[scope]).unwrap_err();
+        assert!(refused.message.contains("std"), "{}", refused.message);
     }
 
     #[test]
     fn packages_lists_each_installed_package_with_its_resolved_vectors() {
         let listed = json(&ProgramHost::packages().expect("packages"));
         let cwd = std::env::current_dir().unwrap();
-        let installed = crate::ports::npm_project::discover_from(&cwd).unwrap();
+        let installed = discover_packages(&cwd).unwrap();
         let entries = listed.as_array().unwrap();
         assert_eq!(entries.len(), installed.len());
         assert!(!entries.is_empty());
         for (entry, pkg) in entries.iter().zip(&installed) {
             assert_eq!(entry["prefix"], pkg.prefix.as_str());
             assert_eq!(entry["root"], pkg.root.to_string_lossy().as_ref());
-            let vectors = crate::ports::sidecar_fetch::resolve_vectors(
+            let vectors = resolve_vectors(
                 pkg,
-                &crate::ports::sidecar_fetch::UreqFetcher,
+                &UreqFetcher,
             )
             .unwrap();
             match vectors {
@@ -2448,22 +2828,6 @@ orbital O {
             }
         }
         assert!(entries.iter().any(|e| e["prefix"] == "almadar-std"));
-    }
-
-    #[test]
-    fn packages_carry_the_index_fingerprint_their_catalog_is_cached_under() {
-        let listed = json(&ProgramHost::packages().expect("packages"));
-        let cwd = std::env::current_dir().unwrap();
-        let installed = crate::ports::npm_project::discover_from(&cwd).unwrap();
-        let entries = listed.as_array().unwrap();
-        for (i, entry) in entries.iter().enumerate() {
-            let expected = crate::ports::behaviors_index::fingerprint(&installed, i).unwrap();
-            assert_eq!(entry["fingerprint"], expected.as_str(), "{}", entry["prefix"]);
-            assert_eq!(expected.len(), 64);
-        }
-        let distinct: std::collections::HashSet<&str> =
-            entries.iter().filter_map(|e| e["fingerprint"].as_str()).collect();
-        assert_eq!(distinct.len(), entries.len(), "control: each package has its own fingerprint");
     }
 
     #[test]

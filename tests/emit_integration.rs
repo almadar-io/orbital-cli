@@ -412,18 +412,18 @@ fn emit_manifest_writes_a_manifest_per_unit_signs_on_request_and_refuses_unknown
     assert!(ok, "signed emit failed. stderr:\n{stderr}");
     assert!(!stderr.contains("UNSIGNED"), "{stderr}");
     use base64::Engine;
-    use ring::signature::{KeyPair, UnparsedPublicKey, ED25519};
+    use orbital_core::codec::{ed25519_public_key, ed25519_verify};
     let mut signed: serde_json::Value = serde_json::from_str(&stdout).expect("signed manifest is JSON");
     let signature = signed.as_object_mut().unwrap().remove("signature").expect("a signed manifest carries its signature");
     assert_eq!((signature["alg"].as_str(), signature["key_id"].as_str()), (Some("ed25519"), Some("deploy-1")));
     assert_eq!(signed["program"], format!("sha256:{digest}"));
     assert_eq!(signed["credentials"], serde_json::json!({ "Orders": ["stripe"] }));
-    let public = ring::signature::Ed25519KeyPair::from_seed_unchecked(&[7; 32]).expect("key").public_key().as_ref().to_vec();
-    let sig = base64::engine::general_purpose::STANDARD.decode(signature["sig"].as_str().expect("sig")).expect("base64");
+    let public = ed25519_public_key(&[7; 32]);
+    let sig: [u8; 64] = base64::engine::general_purpose::STANDARD.decode(signature["sig"].as_str().expect("sig")).expect("base64").try_into().expect("64 bytes");
     let canonical = canonical_json(&signed);
-    assert!(UnparsedPublicKey::new(&ED25519, &public).verify(canonical.as_bytes(), &sig).is_ok(), "the signature covers the canonical manifest");
+    assert!(ed25519_verify(&public, canonical.as_bytes(), &sig), "the signature covers the canonical manifest");
     signed["program"] = serde_json::json!("sha256:tampered");
-    assert!(UnparsedPublicKey::new(&ED25519, &public).verify(canonical_json(&signed).as_bytes(), &sig).is_err(), "control: a changed manifest no longer verifies");
+    assert!(!ed25519_verify(&public, canonical_json(&signed).as_bytes(), &sig), "control: a changed manifest no longer verifies");
 }
 
 // --- `orb compile` keeps what the program authored --------------------------

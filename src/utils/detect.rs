@@ -654,7 +654,7 @@ pub(crate) fn typed_parse_error_to_json(
             let LowerError::LanguageData(e) = inner.innermost() else {
                 unreachable!("guard matched LanguageData")
             };
-            vec![crate::ports::validate::language_data_json_error(e)]
+            vec![language_data_json_error(e)]
         }
         TypedParseError::Lolo(LoloError::Lower { path, inner })
             if matches!(
@@ -1432,4 +1432,28 @@ fn innermost_open_delimiter(
         .0
         .last()
         .copied()
+}
+
+/// The JSON error for a missing/incompatible installed `@almadar/core` / `@almadar/std` (language data): validator
+/// infrastructure, never a schema authoring error.
+pub(crate) fn language_data_json_error(e: &orbital_core::language_data::LanguageDataError) -> ValidationJsonError {
+    let suggestion = match e {
+        orbital_core::language_data::LanguageDataError::NotInstalled { package } => format!(
+            "Run `{}`, then retry — the schema was NOT evaluated.",
+            orbital_core::language_data::install_command(package)
+        ),
+        _ => "Validator environment error — run `orb update --global`, then retry; the schema was NOT evaluated, do not edit the schema"
+            .to_string(),
+    };
+    ValidationJsonError {
+        code: e.code().to_string(),
+        path: String::new(),
+        message: e.to_string(),
+        suggestion: Some(suggestion),
+        fix_guidance: None,
+        expected_shape: None,
+        valid_values: None,
+        position: None,
+        needs_install: e.needs_install().then_some(true),
+    }
 }

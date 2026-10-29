@@ -47,7 +47,7 @@ fn resolve_schema_into(parent: &Path, schema: orbital_core::OrbitalSchema, path:
     std::fs::write(&out, serde_json::to_string(&resolved)?)?;
     let program_dir = path.parent().unwrap_or(Path::new("."));
     orbital_compiler::phases::messages::write_catalogs(&out, &resolved, program_dir)?;
-    crate::ports::parse::write_lazy(program.dir.path(), &lazy, program_dir)?;
+    orbital_compiler::phases::lazy::write_resolved_lazy(program.dir.path(), &lazy, program_dir)?;
     Ok(program)
 }
 
@@ -66,7 +66,7 @@ pub(crate) fn resolve_in_memory(
 pub(crate) fn resolve_command_to_temp(path: &Path) -> anyhow::Result<ResolvedProgram> {
     match std_command_key(path)? {
         Some((stem, key)) => cached_resolve(
-            &crate::ports::behaviors_index::derived_dir().join("programs"),
+            &derived_dir().join("programs"),
             &std::env::temp_dir(),
             &stem,
             &key,
@@ -76,12 +76,63 @@ pub(crate) fn resolve_command_to_temp(path: &Path) -> anyhow::Result<ResolvedPro
     }
 }
 
+/// The derived-data directory the command caches live under.
+fn derived_dir() -> PathBuf {
+    match std::env::var_os("ALMADAR_DERIVED_CACHE") {
+        Some(d) if !d.is_empty() => PathBuf::from(d),
+        _ => PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".almadar").join("derived"),
+    }
+}
+
+/// A path as the bytes the file system holds, so two paths that differ only in non-UTF-8 bytes key differently.
+fn path_bytes(path: &Path) -> &[u8] {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        path.as_os_str().as_bytes()
+    }
+    #[cfg(not(unix))]
+    {
+        path.as_os_str().as_encoded_bytes()
+    }
+}
+
+/// One length-framed field of a cache key.
+fn feed(hasher: &mut sha2::Sha256, label: &str, bytes: &[u8]) {
+    use sha2::Digest;
+    hasher.update((label.len() as u64).to_le_bytes());
+    hasher.update(label.as_bytes());
+    hasher.update((bytes.len() as u64).to_le_bytes());
+    hasher.update(bytes);
+}
+
+/// What a cached resolution depends on besides its sources: this binary and the installed language data.
+fn feed_toolchain(hasher: &mut sha2::Sha256) -> anyhow::Result<()> {
+    let exe = std::env::current_exe()?;
+    let meta = std::fs::metadata(&exe)?;
+    let modified = meta.modified()?.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    feed(hasher, "exe", format!("{}:{modified}", meta.len()).as_bytes());
+    let data = orbital_core::language_data::language_data().map_err(|e| anyhow::anyhow!("{}: {e}", e.code()))?;
+    for (label, text) in [
+        ("patterns", &data.patterns),
+        ("mapping", &data.component_mapping),
+        ("events", &data.event_contracts),
+        ("services", &data.services),
+        ("binding", &data.binding_rules),
+        ("types", &data.program_types),
+        ("protocols", &data.protocols),
+    ] {
+        feed(hasher, label, text.as_bytes());
+    }
+    Ok(())
+}
+
 /// The entry name of `program` resolved against the std tree at `roots`: one per tree, so trees never evict each other.
 fn entry_stem(program: &Path, roots: &[PathBuf]) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     for root in roots {
-        crate::ports::behaviors_index::feed(&mut hasher, "root", root.to_string_lossy().as_bytes());
+        feed(&mut hasher, "root", path_bytes(root));
     }
     let tree: String = hasher.finalize().iter().take(6).map(|b| format!("{b:02x}")).collect();
     format!("{}~{tree}", program_stem(program))
@@ -90,7 +141,6 @@ fn entry_stem(program: &Path, roots: &[PathBuf]) -> String {
 /// The cache entry name and key of a std command program, `None` for a program std does not ship. Std composes from no other
 /// package, so what resolution reads is std's own tree, this binary, the language data and the resolve options.
 fn std_command_key(path: &Path) -> anyhow::Result<Option<(String, String)>> {
-    use crate::ports::behaviors_index::{feed, feed_toolchain};
     use sha2::{Digest, Sha256};
     let options = orbital_compiler::CompilerOptions::from_env();
     if options.discovery_error.is_some() {
@@ -112,12 +162,13 @@ fn std_command_key(path: &Path) -> anyhow::Result<Option<(String, String)>> {
     feed(&mut hasher, "resolve", b"1");
     feed_toolchain(&mut hasher)?;
     feed(&mut hasher, "package", format!("{}@{}:{}", std.name, std.version, std.prefix).as_bytes());
-    feed(&mut hasher, "program", program.to_string_lossy().as_bytes());
+    feed(&mut hasher, "program", path_bytes(&program));
     feed(&mut hasher, "nominalize", if options.nominalize { b"1" } else { b"0" });
     let app_root = options.inline.loader_config.scoped_paths.get(orbital_compiler::phases::APP_SCOPE);
-    feed(&mut hasher, "app-root", app_root.map(|p| p.to_string_lossy().into_owned()).unwrap_or_default().as_bytes());
+    feed(&mut hasher, "app-root", app_root.map_or(&[][..], |p| path_bytes(p)));
     for root in &roots {
-        feed(&mut hasher, &root.to_string_lossy(), tree_state(root)?.as_bytes());
+        feed(&mut hasher, "tree", path_bytes(root));
+        feed(&mut hasher, "state", tree_state(root)?.as_bytes());
     }
     let key = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
     Ok(Some((entry_stem(&program, &roots), key)))

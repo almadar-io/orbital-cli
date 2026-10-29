@@ -10,7 +10,7 @@ use serde::Serialize;
 use std::path::PathBuf;
 
 mod commands;
-mod ports;
+mod reflect;
 mod utils;
 
 pub use utils::{parse_schema_auto_typed, TypedParseError};
@@ -117,11 +117,7 @@ fn describe_trait_value(
     value: &serde_json::Value,
     from: Option<&std::path::Path>,
 ) -> Result<serde_json::Value, String> {
-    ports::behaviors_catalog::describe_from(
-        ports::behaviors_catalog::DescribeTarget::Value(value.clone()),
-        from,
-    )
-    .map_err(|e| e.to_string())
+    reflect::describe(reflect::DescribeTarget::Value(value.clone()), from).map_err(|e| e.to_string())
 }
 
 pub fn run() -> anyhow::Result<()> {
@@ -156,11 +152,27 @@ fn run_command(args: &[String]) -> anyhow::Result<i32> {
     use orbital_core::logging::ns;
     let cwd = std::env::current_dir()?;
     let store = orbital_core::behavior_packages::user_store_dir().unwrap_or_else(|| cwd.clone());
-    let program = tracing::info_span!(target: ns::CLI, "resolve command")
-        .in_scope(|| commands::program_command::resolve_program_command(args, &cwd, &store))?;
+    let resolve = || {
+        tracing::info_span!(target: ns::CLI, "resolve command")
+            .in_scope(|| commands::program_command::resolve_program_command(args, &cwd, &store))
+    };
+    let program = match resolve() {
+        Ok(Some(command)) => Some(command),
+        found if args.first().map(String::as_str) == Some("update") => {
+            let (pin, files) = utils::bootstrap::repair(&[cwd.as_path(), store.as_path()])
+                .map_err(|e| e.context(match &found {
+                    Ok(_) => "no installed program answers `orb update`".to_string(),
+                    Err(cause) => format!("the installed programs do not load ({cause})"),
+                }))?;
+            eprintln!("orb: reinstalled {}@{} ({files} files)", pin.name, pin.version);
+            resolve()?
+        }
+        found => found?,
+    };
     if let Some(command) = program {
         let answer = tracing::info_span!(target: ns::CLI, "program", hook = %command.command)
             .in_scope(|| commands::program_command::run_command_program(&command.program, &command.command, &command.argv, &cwd))?;
+        let ran = command.command.clone();
         drop(command);
         if answer.headers.contains_key("orb-run") {
             if let Some(text) = answer.stderr.as_deref().filter(|t| !t.is_empty()) {
@@ -171,6 +183,10 @@ fn run_command(args: &[String]) -> anyhow::Result<i32> {
             return Ok(code);
         }
         answer.write_to(&mut std::io::stdout(), &mut std::io::stderr())?;
+        if answer.code == 0 && ran != "notice" {
+            tracing::info_span!(target: ns::CLI, "update notice")
+                .in_scope(|| commands::program_command::update_notice(&[], &cwd, &store));
+        }
         return Ok(answer.code);
     }
 

@@ -342,6 +342,31 @@ fn answer_command(
     }
 }
 
+/// The daily updates-available notice: after a command, the installed program declaring `cli-notice`
+/// (`std-orb-update-notice`) is run with `argv` (`record` after `orb update` stamps the cache) and its answer's
+/// `stderr` line printed. The program owns the cache, the opt-outs and the registry lookup; a missing or failing
+/// notice never fails the command it follows.
+pub(crate) fn update_notice(argv: &[String], cwd: &Path, user_store: &Path) {
+    const COMMAND: &str = "notice";
+    let program = match cli_programs(cwd, user_store).and_then(|programs| programs.declaring(&hook_name(COMMAND))) {
+        Ok(Some(program)) => program,
+        Ok(None) => return,
+        Err(error) => {
+            tracing::warn!(target: orbital_core::logging::ns::CLI, %error, "update notice: no program resolved");
+            return;
+        }
+    };
+    match run_command_program(&program, COMMAND, argv, cwd) {
+        Ok(answer) if answer.code == 0 => {
+            if let Some(text) = answer.stderr.as_deref().filter(|text| !text.is_empty()) {
+                eprintln!("{text}");
+            }
+        }
+        Ok(answer) => tracing::warn!(target: orbital_core::logging::ns::CLI, code = answer.code, body = %answer.body, "update notice refused"),
+        Err(error) => tracing::warn!(target: orbital_core::logging::ns::CLI, %error, "update notice failed"),
+    }
+}
+
 /// `orb run <program>`, booted: the program on the substrate host, `INIT` mounted on every trait.
 pub(crate) fn boot_run(
     program: &Path,
@@ -508,6 +533,21 @@ orbital EchoOrbital {
         assert_eq!([200, 201, 299].map(exit_code), [0, 0, 0]);
         assert_eq!([400, 404, 422].map(exit_code), [2, 2, 2]);
         assert_eq!([500, 503, 100, 302].map(exit_code), [1, 1, 1, 1]);
+    }
+
+    #[test]
+    fn the_update_notice_runs_the_installed_notice_program_and_is_silent_without_one() {
+        let (cwd, store) = project("notice", "cli");
+        assert!(
+            find_command_program("notice", &cwd, &store).unwrap().is_none(),
+            "control: no program declares cli-notice yet"
+        );
+        update_notice(&["record".into()], &cwd, &store);
+        with_programs(&cwd, &["cli-notice"]);
+        let program = find_command_program("notice", &cwd, &store).unwrap().expect("the notice program is found");
+        let answer = run_command_program(&program, "notice", &["record".into()], &cwd).unwrap();
+        assert_eq!((answer.code, answer.body.as_str()), (0, "record"));
+        update_notice(&["record".into()], &cwd, &store);
     }
 
     #[test]
