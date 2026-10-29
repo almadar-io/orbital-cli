@@ -654,7 +654,7 @@ pub(crate) fn typed_parse_error_to_json(
             let LowerError::LanguageData(e) = inner.innermost() else {
                 unreachable!("guard matched LanguageData")
             };
-            vec![crate::commands::validate::language_data_json_error(e)]
+            vec![crate::ports::validate::language_data_json_error(e)]
         }
         TypedParseError::Lolo(LoloError::Lower { path, inner })
             if matches!(

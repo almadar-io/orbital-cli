@@ -23,7 +23,9 @@ orbital-compiler = { path = "../orbital-compiler" }
 orbital-lolo = { path = "../orbital-lolo" }
 orbital-shell-rust = { path = "../orbital-shell-rust" }
 # The sandbox manifest `orb emit manifest` builds and signs.
-io-gate = { path = "../io-gate" }
+ring = "0.17"
+thiserror = { workspace = true }
+base64 = "0.22"
 
 # CLI essentials only
 clap.workspace = true
@@ -42,7 +44,6 @@ indicatif = "0.18.0"
 sourcemap = "9"
 # Wire-shape fixture pass (`verify_server::run_fixture_pass`).
 ureq = { workspace = true, features = ["tls"] }
-semver = "1"
 # Embedding-text hashes (`behaviors texts`).
 sha2 = "0.10"
 # Run-owned scratch directories (`commands/dev.rs`), removed when the command ends.

@@ -43,7 +43,7 @@ orbital Probe {
       BUMP -> idle when (< @entity.count 10) (set @entity.count (+ @entity.count 1))
       RESET -> idle (set @entity.count 0) (emit CLEARED { at: now })
     }
-    emits { CLEARED -> external { at : timestamp } }
+    emits { CLEARED -> external { at : instant } }
   }
   page "/probe" as Probe -> Counter
 }

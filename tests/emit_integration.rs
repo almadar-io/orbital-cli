@@ -411,16 +411,35 @@ fn emit_manifest_writes_a_manifest_per_unit_signs_on_request_and_refuses_unknown
     ]);
     assert!(ok, "signed emit failed. stderr:\n{stderr}");
     assert!(!stderr.contains("UNSIGNED"), "{stderr}");
-    let manifest = io_gate::Manifest::parse(&stdout).expect("signed manifest parses");
-    let keys = io_gate::manifest::KeySet::from_keys([(
-        "deploy-1".to_string(),
-        io_gate::manifest::public_key_of(&[7; 32]).expect("public key"),
-    )]);
-    assert_eq!(manifest.verify(&keys, &digest), Ok(()));
-    assert!(manifest.credential_allowed("Orders", "stripe"));
+    use base64::Engine;
+    use ring::signature::{KeyPair, UnparsedPublicKey, ED25519};
+    let mut signed: serde_json::Value = serde_json::from_str(&stdout).expect("signed manifest is JSON");
+    let signature = signed.as_object_mut().unwrap().remove("signature").expect("a signed manifest carries its signature");
+    assert_eq!((signature["alg"].as_str(), signature["key_id"].as_str()), (Some("ed25519"), Some("deploy-1")));
+    assert_eq!(signed["program"], format!("sha256:{digest}"));
+    assert_eq!(signed["credentials"], serde_json::json!({ "Orders": ["stripe"] }));
+    let public = ring::signature::Ed25519KeyPair::from_seed_unchecked(&[7; 32]).expect("key").public_key().as_ref().to_vec();
+    let sig = base64::engine::general_purpose::STANDARD.decode(signature["sig"].as_str().expect("sig")).expect("base64");
+    let canonical = canonical_json(&signed);
+    assert!(UnparsedPublicKey::new(&ED25519, &public).verify(canonical.as_bytes(), &sig).is_ok(), "the signature covers the canonical manifest");
+    signed["program"] = serde_json::json!("sha256:tampered");
+    assert!(UnparsedPublicKey::new(&ED25519, &public).verify(canonical_json(&signed).as_bytes(), &sig).is_err(), "control: a changed manifest no longer verifies");
 }
 
 // --- `orb compile` keeps what the program authored --------------------------
+
+fn canonical_json(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut entries: Vec<_> = map.iter().collect();
+            entries.sort_by(|a, b| a.0.cmp(b.0));
+            let parts: Vec<String> = entries.into_iter().map(|(k, v)| format!("{}:{}", serde_json::Value::String(k.clone()), canonical_json(v))).collect();
+            format!("{{{}}}", parts.join(","))
+        }
+        serde_json::Value::Array(items) => format!("[{}]", items.iter().map(canonical_json).collect::<Vec<_>>().join(",")),
+        scalar => scalar.to_string(),
+    }
+}
 
 fn null_keys(value: &serde_json::Value, found: &mut Vec<String>) {
     match value {

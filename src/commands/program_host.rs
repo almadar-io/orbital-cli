@@ -4,7 +4,7 @@
 //! commands (`emit orb`, `emit lolo`, `stamp` + `validate --json --deny-warnings`, `behaviors catalog|describe|source
 //! --json`, `resolve`); each answer here is the value those commands print, staged the same way.
 
-use crate::commands::behaviors_vectors::{Embedder, ProviderEmbedder};
+use crate::ports::behaviors_vectors::{Embedder, ProviderEmbedder};
 use orbital_core::effects::executor::{SubstrateFailure, SubstrateHandler};
 use orbital_core::Value;
 use std::path::{Path, PathBuf};
@@ -159,7 +159,7 @@ impl PrintSource {
             (Some(path), _) if path.contains("[*]") => Err(failure("program/print: `node` names one construct; use `nodes` for a `[*]` path")),
             (Some(path), _) => Ok(Value::string(at(path)?.remove(0))),
             (None, Some(path)) => from_json(serde_json::Value::from(at(path)?)),
-            (None, None) => crate::commands::parse::formatted_text(&self.source, "source")
+            (None, None) => crate::ports::parse::formatted_text(&self.source, "source")
                 .map(Value::string)
                 .map_err(|e| failure(format!("program/print: {e}"))),
         }
@@ -255,13 +255,13 @@ fn stamp_and_validate(
         .map(|p| scratch.write("prior.orb", &p.to_string()))
         .transpose()?;
     let stamped_text =
-        match crate::commands::stamp::stamped_json(&input, prior_path.as_deref(), None) {
+        match crate::ports::stamp::stamped_json(&input, prior_path.as_deref(), None) {
             Ok(json) => json,
             Err(e) => return Ok(refused(issue("PROGRAM_STAMP_FAILED", e.to_string()))),
         };
     let stamped = scratch.write(&format!("{name}.stamped.orb"), &stamped_text)?;
     let report =
-        crate::commands::validate::validation_report(&stamped, None, None, true, final_program, &[])
+        crate::ports::validate::validation_report(&stamped, None, None, true, final_program, &[])
             .map_err(|e| failure(format!("{op}: {e}")))?;
     let report = serde_json::to_value(&report).map_err(|e| failure(e.to_string()))?;
     let (errors, warnings) = (issues(&report, "errors"), issues(&report, "warnings"));
@@ -315,7 +315,7 @@ fn copy_web_client(built: Option<&Path>, output: &Path) -> Result<PathBuf, Subst
 }
 
 /// `webClient` is the copied prebuilt web client, null when the generate asked for none.
-fn generate_answer(report: &crate::commands::compile::CompileReport, web_client: Option<&Path>) -> serde_json::Value {
+fn generate_answer(report: &crate::ports::compile::CompileReport, web_client: Option<&Path>) -> serde_json::Value {
     serde_json::json!({
         "lines": report.lines,
         "files": report.files,
@@ -361,12 +361,12 @@ impl ProgramHost {
             Some(_) => Err(failure(format!("{op}: `{key}` must be a path"))),
         };
         let (patterns, services) = (file("patterns")?, file("services")?);
-        let findings: Vec<crate::commands::validate::ProgramFinding> = match options.get("findings") {
+        let findings: Vec<crate::ports::validate::ProgramFinding> = match options.get("findings") {
             None | Some(serde_json::Value::Null) => Vec::new(),
             Some(list) => serde_json::from_value(list.clone())
                 .map_err(|e| failure(format!("{op}: `findings` must be a list of {{ code, path, message, suggestion, severity: \"error\" | \"warning\" }}: {e}")))?,
         };
-        let report = crate::commands::validate::validation_report(
+        let report = crate::ports::validate::validation_report(
             path,
             patterns.as_deref(),
             services.as_deref(),
@@ -397,13 +397,13 @@ impl ProgramHost {
         let with_text = match options.get("text") {
             None | Some(serde_json::Value::Null) | Some(serde_json::Value::Bool(true)) => true,
             Some(serde_json::Value::Bool(false)) if output.is_none() => {
-                return crate::commands::parse::resolved_value(path)
+                return crate::ports::parse::resolved_value(path)
                     .map_err(|e| failure(format!("program/read: {e}")));
             }
             Some(serde_json::Value::Bool(false)) => false,
             Some(_) => return Err(failure("program/read: `text` must be a boolean")),
         };
-        let read = crate::commands::parse::resolved_read(path, output.as_deref())
+        let read = crate::ports::parse::resolved_read(path, output.as_deref())
             .map_err(|e| failure(format!("program/read: {e}")))?;
         let program: Value = serde_json::from_str(&read.text).map_err(|e| failure(e.to_string()))?;
         let mut fields = orbital_core::ValueMap::default();
@@ -429,7 +429,7 @@ impl ProgramHost {
         let prior = options.path("prior")?;
         let imports = options.path("imports")?;
         let output = options.path("output")?;
-        let text = crate::commands::stamp::stamped_json(&path, prior.as_deref(), imports.as_deref())
+        let text = crate::ports::stamp::stamped_json(&path, prior.as_deref(), imports.as_deref())
             .map_err(|e| failure(format!("program/read: {e}")))?;
         if let Some(out) = &output {
             std::fs::write(out, &text)
@@ -446,7 +446,7 @@ impl ProgramHost {
         let options = Options::of("program/read", options)?;
         options.only("references", &["references", "path"])?;
         let path = options.absolute("path", "references")?;
-        let (program, references) = crate::commands::parse::referenced_program(&path)
+        let (program, references) = crate::ports::parse::referenced_program(&path)
             .map_err(|e| failure(format!("program/read: {e}")))?;
         let references = serde_json::to_value(references).map_err(|e| failure(e.to_string()))?;
         from_json(serde_json::json!({ "program": program, "references": references }))
@@ -456,7 +456,7 @@ impl ProgramHost {
     /// out?, signKey?, keyId? }`: what `orb emit <target> <path>` prints, as `{ text, stderr }`; the files `orb emit`
     /// writes (`output`, the source map, `out`) are written.
     fn print_target(options: &serde_json::Value) -> Result<Value, SubstrateFailure> {
-        use crate::emit::{EmitFormat, EmitOptions, EmitTarget};
+        use crate::ports::emit::{EmitFormat, EmitOptions, EmitTarget};
         let options = Options::of("program/print", options)?;
         options.only(
             "target",
@@ -478,7 +478,7 @@ impl ProgramHost {
         if document_version.is_some() && inspect_source.is_none() {
             return Err(failure("program/print: `documentVersion` needs `inspectSource`"));
         }
-        let rendered = crate::emit::render(EmitOptions {
+        let rendered = crate::ports::emit::render(EmitOptions {
             target,
             path: Some(path),
             section: options.text("section")?,
@@ -501,7 +501,7 @@ impl ProgramHost {
     /// host?, listenHost?, port?, emitOrb?, webClient?, source? } }`: what `orb compile` does and prints, as `{ lines, files,
     /// warnings, nextSteps, webClient }`; `webClient: true` also copies the shell's prebuilt web client into the output. The program is validated before anything is generated, as the command does.
     fn eval_generate(options: &serde_json::Value) -> Result<Value, SubstrateFailure> {
-        use crate::commands::compile::{compile_run, CompileRequest};
+        use crate::ports::compile::{compile_run, CompileRequest};
         let op = "program/eval";
         Options::of(op, options)?.only("generate", &["generate"])?;
         let generate = options.get("generate").unwrap_or(&serde_json::Value::Null);
@@ -553,11 +553,11 @@ impl ProgramHost {
     fn read(&self, text: &str) -> Result<Value, SubstrateFailure> {
         let scratch = Scratch::new("almadar-program")?;
         let path = scratch.write("program.lolo", text)?;
-        match crate::emit::orb_value(text, &path.display().to_string()) {
+        match crate::ports::emit::orb_value(text, &path.display().to_string()) {
             Ok(json) => from_json(json),
             Err(lowering) => {
                 let report =
-                    crate::commands::validate::validation_report(&path, None, None, true, false, &[])
+                    crate::ports::validate::validation_report(&path, None, None, true, false, &[])
                         .map_err(|e| failure(format!("program/read: {e}")))?;
                 let report = serde_json::to_value(&report).map_err(|e| failure(e.to_string()))?;
                 let found: Vec<serde_json::Value> = issues(&report, "errors")
@@ -587,7 +587,7 @@ impl ProgramHost {
         let scratch = Scratch::new("almadar-program")?;
         let text = program.to_string();
         let path = scratch.write("program.orb", &text)?;
-        crate::emit::lolo_text(&text, &path.display().to_string())
+        crate::ports::emit::lolo_text(&text, &path.display().to_string())
             .map(Value::string)
             .map_err(|e| failure(format!("program/print: {e}")))
     }
@@ -634,8 +634,8 @@ impl ProgramHost {
     fn describe_target(
         op: &str,
         value: Option<&Value>,
-    ) -> Result<crate::commands::behaviors_catalog::DescribeTarget, SubstrateFailure> {
-        use crate::commands::behaviors_catalog::DescribeTarget;
+    ) -> Result<crate::ports::behaviors_catalog::DescribeTarget, SubstrateFailure> {
+        use crate::ports::behaviors_catalog::DescribeTarget;
         let json = value.map(to_json).unwrap_or(serde_json::Value::Null);
         let behavior = json
             .get("behavior")
@@ -675,7 +675,7 @@ impl ProgramHost {
         embedder: Option<&dyn Embedder>,
         user_dir: Option<&Path>,
     ) -> Result<Value, SubstrateFailure> {
-        use crate::commands::behaviors_catalog::{catalog_with, Vectors};
+        use crate::ports::behaviors_catalog::{catalog_with, Vectors};
         let vectors = match option_flag(options, "vectors") {
             Some(false) => Vectors::Omit,
             _ => Vectors::Attach(embedder),
@@ -701,9 +701,9 @@ impl ProgramHost {
             .map_err(|e| failure(format!("behavior/catalog: {e}")))?;
         let listed = started.elapsed().as_millis() as u64;
         let shaped = if option_flag(options, "topics") == Some(true) {
-            serde_json::to_value(crate::commands::behaviors_catalog::topics_of(&entries))
+            serde_json::to_value(crate::ports::behaviors_catalog::topics_of(&entries))
         } else if option_flag(options, "traits") == Some(false) {
-            serde_json::to_value(entries.into_iter().map(crate::commands::behaviors_catalog::CatalogEntryOut::without_traits).collect::<Vec<_>>())
+            serde_json::to_value(entries.into_iter().map(crate::ports::behaviors_catalog::CatalogEntryOut::without_traits).collect::<Vec<_>>())
         } else {
             serde_json::to_value(entries)
         };
@@ -721,7 +721,7 @@ impl ProgramHost {
         embedder: Option<&dyn Embedder>,
         user_dir: Option<&Path>,
     ) -> Result<Value, SubstrateFailure> {
-        use crate::commands::behaviors_catalog::{describe_with, Vectors};
+        use crate::ports::behaviors_catalog::{describe_with, Vectors};
         let target = Self::describe_target(op, value)?;
         let vectors = match option_flag(options, "knobVectors") {
             Some(true) => Vectors::Attach(embedder),
@@ -754,7 +754,7 @@ impl ProgramHost {
             Some(serde_json::Value::String(k)) => Some(k.as_str()),
             Some(_) => return Err(failure("behavior/texts: kind: expected a string")),
         };
-        let texts = crate::commands::behaviors_texts::texts(&paths, kind)
+        let texts = crate::ports::behaviors_texts::texts(&paths, kind)
             .map_err(|e| failure(format!("behavior/texts: {e}")))?;
         from_json(serde_json::to_value(texts).map_err(|e| failure(e.to_string()))?)
     }
@@ -763,16 +763,16 @@ impl ProgramHost {
     /// `orb.vectors` snapshot the lock resolves (the cached sidecar when locked), `null` when none is declared.
     fn packages() -> Result<Value, SubstrateFailure> {
         let cwd = std::env::current_dir().map_err(|e| failure(e.to_string()))?;
-        let packages = super::npm_project::discover_from(&cwd)
+        let packages = crate::ports::npm_project::discover_from(&cwd)
             .map_err(|e| failure(format!("behavior/packages: {e}")))?;
         let mut out = Vec::new();
         for (i, pkg) in packages.iter().enumerate() {
-            let vectors = crate::commands::sidecar_fetch::resolve_vectors(
+            let vectors = crate::ports::sidecar_fetch::resolve_vectors(
                 pkg,
-                &crate::commands::sidecar_fetch::UreqFetcher,
+                &crate::ports::sidecar_fetch::UreqFetcher,
             )
             .map_err(|e| failure(format!("behavior/packages: {e}")))?;
-            let fingerprint = crate::commands::behaviors_index::fingerprint(&packages, i)
+            let fingerprint = crate::ports::behaviors_index::fingerprint(&packages, i)
                 .map_err(|e| failure(format!("behavior/packages: {e}")))?;
             out.push(serde_json::json!({
                 "root": pkg.root.to_string_lossy(),
@@ -793,19 +793,19 @@ impl ProgramHost {
     ) -> Result<Value, SubstrateFailure> {
         let behavior = Self::behavior_of(op, value)?;
         if option_flag(options, "file") == Some(true) {
-            let path = crate::commands::behaviors_catalog::behavior_source_path(&behavior)
+            let path = crate::ports::behaviors_catalog::behavior_source_path(&behavior)
                 .map_err(|e| failure(format!("{op}: {e}")))?;
             let source = std::fs::read_to_string(&path)
                 .map_err(|e| failure(format!("{op}: {}: {e}", path.display())))?;
             return from_json(serde_json::json!({ "path": path, "source": source }));
         }
-        let source = crate::commands::behaviors_catalog::source(&behavior)
+        let source = crate::ports::behaviors_catalog::source(&behavior)
             .map_err(|e| failure(format!("{op}: {e}")))?;
         from_json(source)
     }
 
     fn resolve_behavior(&self, behavior: &str) -> Result<Value, SubstrateFailure> {
-        let path = crate::commands::behaviors_catalog::behavior_source_path(behavior)
+        let path = crate::ports::behaviors_catalog::behavior_source_path(behavior)
             .map_err(|e| failure(format!("behavior/resolve: {e}")))?;
         let schema = orbital_compiler::parse_file(&path)
             .map_err(|e| failure(format!("behavior/resolve: parse {}: {e}", path.display())))?;
@@ -869,7 +869,7 @@ impl ProgramHost {
     fn dependencies(&self, program: serde_json::Value) -> Result<Value, SubstrateFailure> {
         let op = "behavior/dependencies";
         let cwd = std::env::current_dir().map_err(|e| failure(e.to_string()))?;
-        let packages = super::npm_project::discover_from(&cwd)
+        let packages = crate::ports::npm_project::discover_from(&cwd)
             .map_err(|e| failure(format!("{op}: {e}")))?;
         let mut loader = orbital_compiler::loader::ExternalOrbitalLoader::new(
             orbital_compiler::loader::LoaderConfig {
@@ -901,7 +901,7 @@ impl ProgramHost {
             if behaviors.contains_key(&name) {
                 continue;
             }
-            let imported = crate::commands::behaviors_catalog::resolve_import(
+            let imported = crate::ports::behaviors_catalog::resolve_import(
                 &mut loader,
                 &packages,
                 &spec,
@@ -1118,7 +1118,7 @@ impl ProgramHost {
                 )))
             }
         };
-        let report = crate::commands::execute::run_cascade_with(
+        let report = crate::ports::execute::run_cascade_with(
             &path,
             &serde_json::Value::Array(steps),
             live,
@@ -1146,7 +1146,7 @@ impl ProgramHost {
             }
         };
         let renderer = if render {
-            let schema = crate::commands::execute::resolve_program(&path)
+            let schema = crate::ports::execute::resolve_program(&path)
                 .map_err(|e| failure(format!("{op}: {e}")))?;
             let target = crate::utils::desktop::target()
                 .map_err(|e| failure(format!("{op}: options.render: {e}")))?;
@@ -1307,7 +1307,7 @@ impl ProgramHost {
             orbital_core::time_util::now_millis() as f64,
         );
         let load = |from: &str| {
-            crate::commands::behaviors_catalog::source_value_of(from)
+            crate::ports::behaviors_catalog::source_value_of(from)
                 .map_err(|e| format!("behavior/source: {e}"))
         };
         let schema = orbital_compiler::composition::compose_programs(
@@ -1344,7 +1344,7 @@ impl SubstrateHandler for ProgramHost {
                     from_json(serde_json::to_value(embeds).map_err(|e| failure(e.to_string()))?)
                 }
                 Some(Value::String(text)) if option_flag(args.get(1), "findings") == Some(true) => {
-                    let found: Vec<serde_json::Value> = crate::commands::validate::source_findings(text)
+                    let found: Vec<serde_json::Value> = crate::ports::validate::source_findings(text)
                         .into_iter()
                         .map(|f| {
                             serde_json::json!({
@@ -1392,12 +1392,12 @@ impl SubstrateHandler for ProgramHost {
             "behavior/source" => Self::source(op, args.first(), args.get(1)),
             "behavior/resolve" if option_flag(args.get(1), "expects") == Some(true) => {
                 let spec = Self::behavior_of(op, args.first())?;
-                let derived = crate::commands::behaviors_catalog::expectations(&spec).map_err(|e| failure(format!("{op}: {e}")))?;
+                let derived = crate::ports::behaviors_catalog::expectations(&spec).map_err(|e| failure(format!("{op}: {e}")))?;
                 from_json(derived)
             }
             "behavior/resolve" if option_flag(args.get(1), "path") == Some(true) => {
                 let spec = Self::behavior_of(op, args.first())?;
-                match crate::commands::behaviors::which(&spec).map_err(|e| failure(format!("{op}: {e}")))? {
+                match crate::ports::npm_project::which(&spec).map_err(|e| failure(format!("{op}: {e}")))? {
                     Ok((path, owner)) => from_json(serde_json::json!({ "path": path.display().to_string(), "owner": owner })),
                     Err(refusal) => Err(failure(format!("{op}: {refusal}"))),
                 }
@@ -1484,7 +1484,7 @@ orbital O {
         let as_json = json(&program);
         assert_eq!(as_json["name"], "note-pad");
         let expected: serde_json::Value =
-            serde_json::from_str(&crate::emit::orb_json(NOTE, "note.lolo").unwrap()).unwrap();
+            serde_json::from_str(&crate::ports::emit::orb_json(NOTE, "note.lolo").unwrap()).unwrap();
         assert_eq!(
             as_json,
             json(&from_json(expected).unwrap()),
@@ -1519,7 +1519,7 @@ orbital O {
         std::fs::write(&file, NOTE).unwrap();
         let options = from_json(serde_json::json!({ "resolve": true, "path": file.display().to_string() })).unwrap();
         let answer = json(&ProgramHost.run("program/read", &[Value::String(String::new().into()), options]).expect("resolves"));
-        let expected = crate::commands::parse::resolved_text(&file, None).expect("orb resolve");
+        let expected = crate::ports::parse::resolved_text(&file, None).expect("orb resolve");
         assert_eq!(answer["text"], serde_json::Value::String(expected.clone()));
         assert_eq!(answer["program"], serde_json::from_str::<serde_json::Value>(&expected).unwrap());
     }
@@ -1637,7 +1637,7 @@ orbital O {
         let dir = tempfile::tempdir().expect("tempdir");
         let source = dir.path().join("note.lolo");
         std::fs::write(&source, NOTE).unwrap();
-        let mut resolved: serde_json::Value = serde_json::from_str(&crate::commands::parse::resolved_text(&source, None).unwrap()).unwrap();
+        let mut resolved: serde_json::Value = serde_json::from_str(&crate::ports::parse::resolved_text(&source, None).unwrap()).unwrap();
         resolved["resolved"]["typeContractVersion"] = 999.into();
         let stale = dir.path().join("stale.orb");
         std::fs::write(&stale, resolved.to_string()).unwrap();
@@ -1663,7 +1663,7 @@ orbital O {
         let dir = tempfile::tempdir().expect("tempdir");
         let source = dir.path().join("note.lolo");
         std::fs::write(&source, NOTE).unwrap();
-        let resolved_text = crate::commands::parse::resolved_text(&source, None).expect("orb resolve");
+        let resolved_text = crate::ports::parse::resolved_text(&source, None).expect("orb resolve");
         let resolved_file = dir.path().join("note.orb");
         std::fs::write(&resolved_file, &resolved_text).unwrap();
         let read = |file: &std::path::Path| {
@@ -1681,14 +1681,14 @@ orbital O {
         let dir = tempfile::tempdir().expect("tempdir");
         let source = dir.path().join("note.lolo");
         std::fs::write(&source, NOTE).unwrap();
-        let printed: Value = serde_json::from_str::<Value>(&crate::commands::parse::resolved_text(&source, None).expect("orb resolve"))
+        let printed: Value = serde_json::from_str::<Value>(&crate::ports::parse::resolved_text(&source, None).expect("orb resolve"))
             .expect("reads back");
-        let direct = crate::commands::parse::resolved_value(&source).expect("resolved value");
+        let direct = crate::ports::parse::resolved_value(&source).expect("resolved value");
         assert_eq!(direct.get_path("program"), Some(&printed));
         assert_eq!(direct.get_path("lazy"), Some(&Value::array(Vec::<Value>::new())));
         let other = std::fs::write(&source, NOTE.replacen("note-pad", "note-other", 1));
         other.unwrap();
-        let changed = crate::commands::parse::resolved_value(&source).expect("resolved value");
+        let changed = crate::ports::parse::resolved_value(&source).expect("resolved value");
         assert_ne!(changed.get_path("program"), Some(&printed), "control: another program is another value");
     }
 
@@ -1804,7 +1804,7 @@ orbital O {
         assert_eq!(legacy[0]["path"], "app:1");
         assert_eq!(read(format!("app Foo [version: \"1.0.0\"]\n{body}")), serde_json::json!([]), "control: the bracket header is clean");
         let report_input = serde_json::json!({ "findings": legacy });
-        assert!(serde_json::from_value::<Vec<crate::commands::validate::ProgramFinding>>(report_input["findings"].clone()).is_ok(), "the list feeds program/validate's `findings` as is");
+        assert!(serde_json::from_value::<Vec<crate::ports::validate::ProgramFinding>>(report_input["findings"].clone()).is_ok(), "the list feeds program/validate's `findings` as is");
     }
 
     #[test]
@@ -1826,11 +1826,11 @@ orbital O {
         std::fs::write(&file, NOTE).unwrap();
         let path = file.display().to_string();
         let orb = json(&print_with(serde_json::json!({ "target": "orb", "path": path })).expect("emits orb"));
-        let expected = format!("{}\n", crate::emit::orb_json(NOTE, &path).unwrap());
+        let expected = format!("{}\n", crate::ports::emit::orb_json(NOTE, &path).unwrap());
         assert_eq!(text_of(&orb, "text"), expected, "the bytes `orb emit orb` prints");
         assert_eq!(text_of(&orb, "stderr"), "");
         let lolo = json(&print_with(serde_json::json!({ "target": "lolo", "path": path })).expect("emits lolo"));
-        let expected = format!("{}\n", crate::emit::lolo_text(NOTE, &path).unwrap());
+        let expected = format!("{}\n", crate::ports::emit::lolo_text(NOTE, &path).unwrap());
         assert_eq!(text_of(&lolo, "text"), expected, "the bytes `orb emit lolo` prints");
         assert_ne!(text_of(&lolo, "text"), text_of(&orb, "text"), "control: the target picks the output");
     }
@@ -1847,7 +1847,7 @@ orbital O {
                 .expect("emits"),
         );
         assert_eq!(text_of(&answer, "text"), "");
-        assert_eq!(std::fs::read_to_string(&out).unwrap(), crate::emit::orb_json(NOTE, &file.display().to_string()).unwrap());
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), crate::ports::emit::orb_json(NOTE, &file.display().to_string()).unwrap());
     }
 
     #[test]
@@ -1866,10 +1866,10 @@ orbital O {
         orbital_compiler::loader::register_source_lowerer(|path, _, _| crate::lower_lolo_file(path));
         let dir = tempfile::tempdir().expect("tempdir");
         let orb = dir.path().join("note.orb");
-        std::fs::write(&orb, crate::emit::orb_json(NOTE, "note.lolo").unwrap()).unwrap();
+        std::fs::write(&orb, crate::ports::emit::orb_json(NOTE, "note.lolo").unwrap()).unwrap();
         let options = from_json(serde_json::json!({ "stamp": true, "path": orb.display().to_string() })).unwrap();
         let answer = json(&ProgramHost.run("program/read", &[Value::String(String::new().into()), options]).expect("stamps"));
-        let expected = crate::commands::stamp::stamped_json(&orb, None, None).expect("orb stamp");
+        let expected = crate::ports::stamp::stamped_json(&orb, None, None).expect("orb stamp");
         assert_eq!(answer["text"], serde_json::Value::String(expected.clone()));
         assert_eq!(answer["program"], serde_json::from_str::<serde_json::Value>(&expected).unwrap());
         let out = dir.path().join("stamped.orb");
@@ -1879,7 +1879,7 @@ orbital O {
         .unwrap();
         let written = json(&ProgramHost.run("program/read", &[Value::String(String::new().into()), options]).expect("stamps"));
         assert_eq!(std::fs::read_to_string(&out).unwrap(), text_of(&written, "text"), "--output writes the stamped text");
-        let with_prior = crate::commands::stamp::stamped_json(&orb, Some(&orb), None).unwrap();
+        let with_prior = crate::ports::stamp::stamped_json(&orb, Some(&orb), None).unwrap();
         assert_eq!(text_of(&written, "text"), with_prior, "--prior anchors the ids");
     }
 
@@ -1919,7 +1919,7 @@ orbital O {
         assert_eq!(std::fs::read_to_string(copied.join("assets/fonts/a.woff2")).unwrap(), "font");
         assert_eq!(std::fs::read_to_string(copied.join("program.client.orb")).unwrap(), "{\"name\":\"app\"}");
         assert_eq!(std::fs::read_to_string(copied.join("locales/en.json")).unwrap(), "{\"hi\":\"Hi\"}");
-        let report = crate::commands::compile::CompileReport { files: 3, ..Default::default() };
+        let report = crate::ports::compile::CompileReport { files: 3, ..Default::default() };
         let answer = generate_answer(&report, Some(&copied));
         assert_eq!(answer["webClient"], copied.display().to_string());
         assert!(generate_answer(&report, None).get("webClient").is_some_and(serde_json::Value::is_null));
@@ -1964,7 +1964,7 @@ orbital O {
         let dir = tempfile::tempdir().expect("tempdir");
         let orb = dir.path().join("program.orb");
         std::fs::write(&orb, json(&program).to_string()).unwrap();
-        let expected = crate::commands::execute::run_cascade_with(&orb, &steps, false).expect("execute --steps");
+        let expected = crate::ports::execute::run_cascade_with(&orb, &steps, false).expect("execute --steps");
         assert_eq!(answer, expected);
         assert_eq!(answer["success"], true, "{answer}");
     }
@@ -1987,7 +1987,7 @@ orbital O {
         let value = from_json(serde_json::json!({ "behavior": spec })).unwrap();
         let options = from_json(serde_json::json!({ "path": true })).unwrap();
         let answer = ProgramHost.run("behavior/resolve", &[value, options]);
-        match crate::commands::behaviors::which(spec).expect("packages discover") {
+        match crate::ports::npm_project::which(spec).expect("packages discover") {
             Ok((path, owner)) => assert_eq!(
                 json(&answer.expect("resolves")),
                 serde_json::json!({ "path": path.display().to_string(), "owner": owner })
@@ -2007,7 +2007,7 @@ orbital O {
         let value = from_json(serde_json::json!({ "behavior": spec })).unwrap();
         let options = from_json(serde_json::json!({ "expects": true })).unwrap();
         let answer = json(&ProgramHost.run("behavior/resolve", &[value, options]).expect("derives"));
-        assert_eq!(answer, crate::commands::behaviors_catalog::expectations(&spec).unwrap());
+        assert_eq!(answer, crate::ports::behaviors_catalog::expectations(&spec).unwrap());
         assert!(answer.get("NoteOrbital").is_some(), "{answer}");
     }
 
@@ -2026,7 +2026,7 @@ orbital O {
         std::fs::write(&file, NOTE).unwrap();
         let options = from_json(serde_json::json!({ "report": true, "path": file.display().to_string() })).unwrap();
         let answer = json(&ProgramHost.run("program/validate", &[Value::Null, options]).expect("reports"));
-        let expected = serde_json::to_value(crate::commands::validate::validation_report(&file, None, None, false, false, &[]).unwrap()).unwrap();
+        let expected = serde_json::to_value(crate::ports::validate::validation_report(&file, None, None, false, false, &[]).unwrap()).unwrap();
         assert_eq!(answer, expected);
         assert!(answer.get("valid").is_some(), "{answer}");
     }
@@ -2042,7 +2042,7 @@ orbital O {
             ProgramHost.run("program/validate", &[Value::Null, options]).map(|v| json(&v))
         };
         let plain = report(serde_json::json!([])).expect("reports");
-        let expected = serde_json::to_value(crate::commands::validate::validation_report(&file, None, None, false, false, &[]).unwrap()).unwrap();
+        let expected = serde_json::to_value(crate::ports::validate::validation_report(&file, None, None, false, false, &[]).unwrap()).unwrap();
         assert_eq!(plain, expected, "control: no findings leave the report as it is");
         let with = report(serde_json::json!([
             { "code": "ORB_LINT_E", "path": "orbitals[0].traits[0]", "message": "m", "suggestion": "", "severity": "error", "validValues": ["a", "b"] },
@@ -2112,7 +2112,7 @@ orbital O {
             panic!("text")
         };
         assert!(text.contains(";; the one note"), "{text}");
-        assert_eq!(text, crate::commands::parse::formatted_text(&commented, "x").unwrap(), "the same bytes as orb format");
+        assert_eq!(text, crate::ports::parse::formatted_text(&commented, "x").unwrap(), "the same bytes as orb format");
     }
 
     #[test]
@@ -2171,7 +2171,7 @@ orbital O {
                 .run("behavior/source", &[value.clone()])
                 .expect("source"),
         );
-        let printed = crate::commands::behaviors_catalog::source("almadar-std/std-retry").unwrap();
+        let printed = crate::ports::behaviors_catalog::source("almadar-std/std-retry").unwrap();
         assert_eq!(source, json(&from_json(printed).unwrap()));
         let described = json(
             &host
@@ -2220,7 +2220,7 @@ orbital O {
         let answered =
             json(&ProgramHost::source("behavior/source", Some(&value), Some(&file)).expect("file"));
         let path =
-            crate::commands::behaviors_catalog::behavior_source_path("almadar-std/std-retry")
+            crate::ports::behaviors_catalog::behavior_source_path("almadar-std/std-retry")
                 .unwrap();
         assert_eq!(
             answered,
@@ -2236,7 +2236,7 @@ orbital O {
             program,
             json(
                 &from_json(
-                    crate::commands::behaviors_catalog::source("almadar-std/std-retry").unwrap()
+                    crate::ports::behaviors_catalog::source("almadar-std/std-retry").unwrap()
                 )
                 .unwrap()
             ),
@@ -2286,12 +2286,12 @@ orbital O {
             .iter()
             .all(|k| k["vector"].as_array().is_some_and(|v| v.len() == 4)));
         assert_eq!(attached["model"], "test-model");
-        let verb = crate::commands::behaviors_catalog::describe_with(
-            crate::commands::behaviors_catalog::DescribeTarget::Spec(
+        let verb = crate::ports::behaviors_catalog::describe_with(
+            crate::ports::behaviors_catalog::DescribeTarget::Spec(
                 "almadar-std/std-retry.traits.Retry".into(),
             ),
             None,
-            crate::commands::behaviors_catalog::Vectors::Attach(Some(&fake)),
+            crate::ports::behaviors_catalog::Vectors::Attach(Some(&fake)),
             Some(&store.0),
         )
         .unwrap();
@@ -2381,7 +2381,7 @@ orbital O {
         let paths = vec!["almadar-std/ml/organisms".to_string()];
         let scope = from_json(serde_json::json!({ "paths": paths })).unwrap();
         let all = json(&ProgramHost::texts(Some(&scope)).expect("texts"));
-        let printed = crate::commands::behaviors_texts::texts(&paths, None).unwrap();
+        let printed = crate::ports::behaviors_texts::texts(&paths, None).unwrap();
         assert_eq!(
             all,
             json(&from_json(serde_json::to_value(&printed).unwrap()).unwrap())
@@ -2427,16 +2427,16 @@ orbital O {
     fn packages_lists_each_installed_package_with_its_resolved_vectors() {
         let listed = json(&ProgramHost::packages().expect("packages"));
         let cwd = std::env::current_dir().unwrap();
-        let installed = crate::commands::npm_project::discover_from(&cwd).unwrap();
+        let installed = crate::ports::npm_project::discover_from(&cwd).unwrap();
         let entries = listed.as_array().unwrap();
         assert_eq!(entries.len(), installed.len());
         assert!(!entries.is_empty());
         for (entry, pkg) in entries.iter().zip(&installed) {
             assert_eq!(entry["prefix"], pkg.prefix.as_str());
             assert_eq!(entry["root"], pkg.root.to_string_lossy().as_ref());
-            let vectors = crate::commands::sidecar_fetch::resolve_vectors(
+            let vectors = crate::ports::sidecar_fetch::resolve_vectors(
                 pkg,
-                &crate::commands::sidecar_fetch::UreqFetcher,
+                &crate::ports::sidecar_fetch::UreqFetcher,
             )
             .unwrap();
             match vectors {
@@ -2454,10 +2454,10 @@ orbital O {
     fn packages_carry_the_index_fingerprint_their_catalog_is_cached_under() {
         let listed = json(&ProgramHost::packages().expect("packages"));
         let cwd = std::env::current_dir().unwrap();
-        let installed = crate::commands::npm_project::discover_from(&cwd).unwrap();
+        let installed = crate::ports::npm_project::discover_from(&cwd).unwrap();
         let entries = listed.as_array().unwrap();
         for (i, entry) in entries.iter().enumerate() {
-            let expected = crate::commands::behaviors_index::fingerprint(&installed, i).unwrap();
+            let expected = crate::ports::behaviors_index::fingerprint(&installed, i).unwrap();
             assert_eq!(entry["fingerprint"], expected.as_str(), "{}", entry["prefix"]);
             assert_eq!(expected.len(), 64);
         }

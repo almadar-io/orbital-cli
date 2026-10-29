@@ -48,7 +48,7 @@ orbital ModalRecordOrbital {
         (notify error (str/concat "Couldn't load the record — " ?error))
       ;; stash only — a SEED never opens anything; OPEN reads it on demand
       SEED -> closed
-        (set @entity.seedRow (object/merge ?row {}))
+        (set @entity.seedRow (object/merge (default ?row {}) {}))
       ;; Mode-aware guard: in create mode the modal opens unconditionally
       ;; (no row exists yet); in edit mode the row must be present — on the
       ;; OPEN payload or already stashed by SEED — or the OPEN is rejected
@@ -69,7 +69,7 @@ orbital ModalRecordOrbital {
             type: stack
           }, { type: divider }, {
             cancelEvent: CLOSE
-            entity: (object/merge @entity.seedRow (object/merge ?row {}))
+            entity: (object/merge @entity.seedRow (object/merge (default ?row {}) {}))
             fieldOverrides: @config.fieldOverrides
             fields: @config.fields
             mode: @config.mode
@@ -87,7 +87,7 @@ orbital ModalRecordOrbital {
         (render-ui @config.detailSlot null)
       ;; a refetch echo while the modal is open refreshes the stash in place
       SEED -> open
-        (set @entity.seedRow (object/merge ?row {}))
+        (set @entity.seedRow (object/merge (default ?row {}) {}))
       CLOSE -> closed
         (render-ui @config.detailSlot null)
         (notify info Cancelled)

@@ -1,7 +1,6 @@
 //! Shared CLI utilities split out of `main.rs` during the module breakup.
 //! Public surface (`pub`/`pub(crate)`) is preserved verbatim.
 
-pub(crate) mod bun;
 pub(crate) mod desktop;
 pub(crate) mod detect;
 pub(crate) mod diagnostics;
@@ -10,7 +9,6 @@ pub(crate) mod patterns;
 pub(crate) mod shell_programs;
 pub(crate) mod terminal;
 
-pub(crate) use bun::find_bun;
 pub(crate) use detect::{
     detect_syntax, parse_schema_auto,
     typed_parse_error_to_json, InputSyntax,

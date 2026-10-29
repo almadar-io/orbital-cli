@@ -47,7 +47,7 @@ fn resolve_schema_into(parent: &Path, schema: orbital_core::OrbitalSchema, path:
     std::fs::write(&out, serde_json::to_string(&resolved)?)?;
     let program_dir = path.parent().unwrap_or(Path::new("."));
     orbital_compiler::phases::messages::write_catalogs(&out, &resolved, program_dir)?;
-    crate::commands::parse::write_lazy(program.dir.path(), &lazy, program_dir)?;
+    crate::ports::parse::write_lazy(program.dir.path(), &lazy, program_dir)?;
     Ok(program)
 }
 
@@ -66,7 +66,7 @@ pub(crate) fn resolve_in_memory(
 pub(crate) fn resolve_command_to_temp(path: &Path) -> anyhow::Result<ResolvedProgram> {
     match std_command_key(path)? {
         Some((stem, key)) => cached_resolve(
-            &crate::commands::behaviors_index::derived_dir().join("programs"),
+            &crate::ports::behaviors_index::derived_dir().join("programs"),
             &std::env::temp_dir(),
             &stem,
             &key,
@@ -81,7 +81,7 @@ fn entry_stem(program: &Path, roots: &[PathBuf]) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     for root in roots {
-        crate::commands::behaviors_index::feed(&mut hasher, "root", root.to_string_lossy().as_bytes());
+        crate::ports::behaviors_index::feed(&mut hasher, "root", root.to_string_lossy().as_bytes());
     }
     let tree: String = hasher.finalize().iter().take(6).map(|b| format!("{b:02x}")).collect();
     format!("{}~{tree}", program_stem(program))
@@ -90,7 +90,7 @@ fn entry_stem(program: &Path, roots: &[PathBuf]) -> String {
 /// The cache entry name and key of a std command program, `None` for a program std does not ship. Std composes from no other
 /// package, so what resolution reads is std's own tree, this binary, the language data and the resolve options.
 fn std_command_key(path: &Path) -> anyhow::Result<Option<(String, String)>> {
-    use crate::commands::behaviors_index::{feed, feed_toolchain};
+    use crate::ports::behaviors_index::{feed, feed_toolchain};
     use sha2::{Digest, Sha256};
     let options = orbital_compiler::CompilerOptions::from_env();
     if options.discovery_error.is_some() {

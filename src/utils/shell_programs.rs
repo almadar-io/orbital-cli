@@ -74,7 +74,7 @@ pub(crate) fn generate(
 ) -> anyhow::Result<GenerateResponse> {
     let shell = locate(name)?;
     let resolved = if shell.description.needs_resolved || shell.description.needs_served {
-        Some(crate::commands::compile::resolve_compiled_schema(compile_path, source_path)?)
+        Some(crate::ports::compile::resolve_compiled_schema(compile_path, source_path)?)
     } else {
         None
     };

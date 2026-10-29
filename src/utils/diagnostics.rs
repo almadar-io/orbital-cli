@@ -26,7 +26,7 @@ pub(crate) fn merge_post_inline_diagnostics(
     orbital_ref_diagnostics: &[OrbitalRefDiagnostic],
     uses_config_diagnostics: &[UsesConfigDiagnostic],
     schema: &OrbitalSchema,
-    findings: &mut Vec<crate::commands::validate::ProgramFinding>,
+    findings: &mut Vec<crate::ports::validate::ProgramFinding>,
 ) {
     result.merge(validate_orbital_ref_diagnostics(
         orbital_ref_diagnostics,

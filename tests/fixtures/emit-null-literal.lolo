@@ -26,7 +26,7 @@ orbital NullOrbital {
 
     emits {
       NULL_FAILED -> external {
-        code : string
+        code : string?
         message : string!
       }
         @description "The run failed: an optional code, absent here, and a message."

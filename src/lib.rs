@@ -9,9 +9,8 @@ use clap::{Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 use std::path::PathBuf;
 
-mod baked_engine_pins;
 mod commands;
-mod emit;
+mod ports;
 mod utils;
 
 pub use utils::{parse_schema_auto_typed, TypedParseError};
@@ -96,48 +95,6 @@ pub enum ShellMode {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Install what orb needs and is missing (the language data it pins, std, the
-    /// first-party language packs, the TypeScript shell, orb-desktop), update
-    /// every orb package within its range, and check each loads. Also the
-    /// first-run setup: the installers run `orb update --global`.
-    Update {
-        /// Target the user store (`~/.orb`) instead of the nearest project.
-        #[arg(long)]
-        global: bool,
-    },
-
-    /// Install orb packages — behaviors, a language pack, a shell
-    /// (`@almadar/orb-shell-<name>`), orb-desktop: any npm package whose
-    /// package.json declares orbLanguage, orb, orbVocabulary or orbProgram.
-    /// A package that does not load for this orb is removed again.
-    Add {
-        /// bun specs: `name` or `name@version`.
-        #[arg(required = true)]
-        packages: Vec<String>,
-        /// Target the user store (`~/.orb`) instead of the nearest project.
-        #[arg(long)]
-        global: bool,
-    },
-
-    /// Uninstall orb packages.
-    Remove {
-        #[arg(required = true)]
-        packages: Vec<String>,
-        /// Target the user store (`~/.orb`) instead of the nearest project.
-        #[arg(long)]
-        global: bool,
-    },
-
-    /// The orb packages installed for the project (or `--global`), each with
-    /// its kinds, version and whether it loads for this orb.
-    List {
-        #[arg(long)]
-        json: bool,
-        /// Target the user store (`~/.orb`) instead of the nearest project.
-        #[arg(long)]
-        global: bool,
-    },
-
     /// Run a long-lived program: boot it on the substrate host, mount INIT, and keep it
     /// running while it has an open stream or listener; SIGINT/SIGTERM cancels them and exits.
     Run {
@@ -145,35 +102,6 @@ enum Commands {
         program: PathBuf,
     },
 
-    /// Behavior packages: the one verb std's program cannot answer yet (`vectors snapshot`).
-    Behaviors {
-        #[command(subcommand)]
-        command: BehaviorsCommand,
-    },
-}
-
-#[derive(Subcommand)]
-enum VectorsCommand {
-    /// Write a package's vector snapshot (`dist/vectors.vec`): the vectors of its organism and
-    /// `#capabilities` texts, taken from the user store and embedding misses (needs an embedding
-    /// provider for those). The same inputs give the same bytes.
-    Snapshot {
-        /// The installed behavior package directory.
-        #[arg(long)]
-        package: std::path::PathBuf,
-        /// Where to write; defaults to `<package>/dist/vectors.vec`.
-        #[arg(long)]
-        out: Option<std::path::PathBuf>,
-    },
-}
-
-#[derive(Subcommand)]
-enum BehaviorsCommand {
-    /// The embedding vector store (`~/.almadar/vectors`).
-    Vectors {
-        #[command(subcommand)]
-        command: VectorsCommand,
-    },
 }
 
 /// The loader's `.lolo` lowerer: a relative import of a `.lolo`-only sibling.
@@ -189,8 +117,8 @@ fn describe_trait_value(
     value: &serde_json::Value,
     from: Option<&std::path::Path>,
 ) -> Result<serde_json::Value, String> {
-    commands::behaviors_catalog::describe_from(
-        commands::behaviors_catalog::DescribeTarget::Value(value.clone()),
+    ports::behaviors_catalog::describe_from(
+        ports::behaviors_catalog::DescribeTarget::Value(value.clone()),
         from,
     )
     .map_err(|e| e.to_string())
@@ -256,39 +184,18 @@ fn run_command(args: &[String]) -> anyhow::Result<i32> {
 
     let needs_language_data = !matches!(
         &cli.command,
-        None | Some(Commands::Update { .. })
-            | Some(Commands::Add { .. })
-            | Some(Commands::Remove { .. })
-            | Some(Commands::List { .. })
+        None
     );
     if needs_language_data {
         tracing::info_span!(target: ns::CLI, "language data").in_scope(crate::utils::require_language_data)?;
     }
-    let notify = !matches!(
-        &cli.command,
-        Some(Commands::Update { .. }) | Some(Commands::List { json: true, .. })
-    );
     let result = tracing::info_span!(target: ns::CLI, "run").in_scope(|| dispatch(cli));
-    if notify && result.is_ok() {
-        tracing::info_span!(target: ns::CLI, "update notice").in_scope(commands::update_notice::notice);
-    }
     result.map(|()| 0)
 }
 
 fn dispatch(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
-        Some(Commands::Behaviors { command }) => match command {
-            BehaviorsCommand::Vectors { command } => match command {
-                VectorsCommand::Snapshot { package, out } => {
-                    commands::behaviors_vectors_snapshot::run_snapshot(package, out)
-                }
-            },
-        },
         Some(Commands::Run { program }) => commands::program_command::run_program(&program),
-        Some(Commands::Update { global }) => commands::packages::run_update(global),
-        Some(Commands::Add { packages, global }) => commands::packages::run_add(packages, global),
-        Some(Commands::Remove { packages, global }) => commands::packages::run_remove(packages, global),
-        Some(Commands::List { json, global }) => commands::packages::run_list(json, global),
         None => {
             use clap::CommandFactory;
             Cli::command().print_help()?;

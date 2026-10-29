@@ -32,10 +32,6 @@ pub(crate) struct ProgramCommand {
 /// The bootloader's own words: clap takes them before any program discovery (so a broken package can be repaired
 /// with `orb update|add|remove`), and a `cli` program declaring `cli-<word>` or `cli-<word>-…` is refused.
 const RESERVED_COMMANDS: &[&str] = &[
-    "update",
-    "add",
-    "remove",
-    "list",
     "run",
     "help",
     "--help",
@@ -53,6 +49,15 @@ fn reserved_word_of(hook: &str) -> Option<&'static str> {
                 .strip_prefix(*word)
                 .is_some_and(|rest| rest.starts_with('-'))
     })
+}
+
+/// The package words: std's packages program answers all four on the one hook `cli-packages`, and reads the word
+/// itself from the first argument.
+const PACKAGE_WORDS: &[&str] = &["update", "add", "remove", "list"];
+const PACKAGES_COMMAND: &str = "packages";
+
+fn package_word(args: &[String]) -> bool {
+    args.first().is_some_and(|first| PACKAGE_WORDS.contains(&first.as_str()))
 }
 
 /// What bare `orb` runs: the program declaring `cli-launchpad`, else `orb`'s help.
@@ -88,7 +93,11 @@ pub(crate) fn resolve_program_command(
     {
         return Ok(None);
     }
-    let candidates = command_candidates(args);
+    let candidates = if package_word(args) {
+        vec![(PACKAGES_COMMAND.to_string(), args)]
+    } else {
+        command_candidates(args)
+    };
     if candidates.is_empty() {
         return Ok(None);
     }
@@ -116,6 +125,12 @@ pub(crate) fn resolve_program_command(
 pub(crate) fn not_installed(args: &[String]) -> Option<String> {
     use clap::CommandFactory;
     let word = args.first().filter(|w| !w.starts_with('-'))?;
+    if package_word(args) {
+        return Some(format!(
+            "ORB_COMMAND_NOT_INSTALLED: `orb {word}` is not a bootloader command and no installed program declares `{}`; orb's commands ship in @almadar/std, which the installer puts in the user store",
+            hook_name(PACKAGES_COMMAND)
+        ));
+    }
     if crate::Cli::command().find_subcommand(word).is_some() {
         return None;
     }
@@ -723,15 +738,12 @@ orbital EchoOrbital {
     }
 
     #[test]
-    fn program_first_a_clap_subcommand_word_resolves_to_the_program_declaring_it() {
-        use clap::CommandFactory;
+    fn program_first_a_word_resolves_to_the_program_declaring_it() {
         let (cwd, store) = project("program-first", "cli");
         with_programs(
             &cwd,
             &["cli-run2", "cli-behaviors", "cli-behaviors-describe"],
         );
-        let clap = crate::Cli::command();
-        assert!(clap.find_subcommand("behaviors").is_some());
         assert_eq!(
             routed(&["run2", "a"], &cwd, &store),
             Some(("run2".into(), words(&["a"])))
@@ -882,7 +894,7 @@ orbital EchoOrbital {
             "{message}"
         );
         assert_eq!(
-            not_installed(&words(&["update"])),
+            not_installed(&words(&["run", "a.lolo"])),
             None,
             "control: a bootloader command reaches clap"
         );
@@ -924,11 +936,7 @@ orbital EchoOrbital {
     fn a_reserved_word_reaches_clap_even_with_a_broken_cli_program() {
         let (cwd, store) = project("reserved-broken", "cli");
         with_broken_program(&cwd);
-        let lines: [&[&str]; 6] = [
-            &["update"],
-            &["add", "@x/y"],
-            &["remove", "@x/y"],
-            &["list"],
+        let lines: [&[&str]; 2] = [
             &["--version"],
             &["--help"],
         ];
@@ -956,7 +964,7 @@ orbital EchoOrbital {
     #[test]
     fn a_program_declaring_a_reserved_word_is_refused() {
         let (cwd, store) = project("reserved-declared", "cli");
-        with_programs(&cwd, &["cli-update"]);
+        with_programs(&cwd, &["cli-run"]);
         assert_eq!(
             routed(&["echo", "hi"], &cwd, &store),
             Some(("echo".into(), words(&["hi"]))),
@@ -966,28 +974,45 @@ orbital EchoOrbital {
             .unwrap_err()
             .to_string();
         assert!(
-            error.contains("`cli-update`") && error.contains("`update` is a reserved"),
+            error.contains("`cli-run`") && error.contains("`run` is a reserved"),
             "{error}"
         );
         assert_eq!(
-            routed(&["update"], &cwd, &store),
+            routed(&["run"], &cwd, &store),
             None,
             "the reserved word itself still reaches clap"
         );
     }
 
     #[test]
+    fn each_package_word_reaches_the_packages_program_with_its_word_in_argv() {
+        let (cwd, store) = project("package-words", "cli");
+        with_broken_program(&cwd);
+        std::fs::remove_file(cwd.join("node_modules/@fake/cli/behaviors/lolo/cli/atoms/fake-broken.lolo")).unwrap();
+        with_programs(&cwd, &["cli-packages"]);
+        for (args, argv) in [
+            (&["update"][..], &["update"][..]),
+            (&["add", "@x/y"], &["add", "@x/y"]),
+            (&["remove", "@x/y"], &["remove", "@x/y"]),
+            (&["list", "--json"], &["list", "--json"]),
+        ] {
+            assert_eq!(routed(args, &cwd, &store), Some(("packages".into(), words(argv))), "{args:?}");
+        }
+        assert_eq!(routed(&["lists"], &cwd, &store), None, "control: a lookalike word is not a package word");
+    }
+
+    #[test]
     fn a_hook_under_a_reserved_word_is_reserved_and_a_lookalike_is_not() {
-        assert_eq!(reserved_word_of("cli-update"), Some("update"));
+        assert_eq!(reserved_word_of("cli-run"), Some("run"));
         assert_eq!(
             reserved_word_of("cli-validate"),
             None,
             "validate is a std program now"
         );
-        assert_eq!(reserved_word_of("cli-list-foo"), Some("list"));
-        assert_eq!(reserved_word_of("cli-lister"), None);
+        assert_eq!(reserved_word_of("cli-run-foo"), Some("run"));
+        assert_eq!(reserved_word_of("cli-runner"), None);
         assert_eq!(reserved_word_of("cli-status"), None);
-        assert_eq!(reserved_word_of("update"), None);
+        assert_eq!(reserved_word_of("run"), None);
     }
 
     const LISTENER: &str = r#"app fake-listener [
