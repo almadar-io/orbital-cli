@@ -1191,12 +1191,14 @@ fn describe_a_behavior_whose_own_imports_leave_a_record_unmapped() {
     ));
     assert_eq!(shelf["orbitals"][0]["value"]["orbital"], "ShelfItem");
 
-    // Control: the library itself still names what an import of its item must map.
+    // Control: the library itself still names what an import of its item must map. `borrows` is std's answer
+    // (std-orb-behaviors asks std-orb-lint-orbital-ref-closure), not the host's description.
     let lib = json(&orb(
         p.path(),
         &["behaviors", "describe", "--json", "./orbitals/lib"],
     ));
     assert_eq!(lib["orbitals"][0]["borrows"], serde_json::json!(["Note"]));
+    assert_eq!(lib["orbitals"][1]["borrows"], serde_json::json!([]));
 }
 
 const THING_ORB: &str = r#"{"name":"thing","orbitals":[{"name":"ThingOrbital","entity":{"name":"Thing","fields":[{"name":"id","type":"string","required":true}]},"traits":[{"name":"ThingView","linkedEntity":"Thing","stateMachine":{"states":[{"name":"s","isInitial":true}],"transitions":[{"from":"s","to":"s","event":"INIT"}]}}],"pages":[{"name":"ThingPage","path":"/things","traits":[{"ref":"ThingView"}]}]}]}"#;

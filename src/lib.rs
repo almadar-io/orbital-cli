@@ -6,7 +6,6 @@
 #![allow(unexpected_cfgs)]
 
 use clap::{Parser, Subcommand, ValueEnum};
-use serde::Serialize;
 use std::path::PathBuf;
 
 mod commands;
@@ -221,87 +220,14 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
     }
 }
 
-// ============================================================================
-// JSON Output Types for validate --json
-// ============================================================================
+pub(crate) use orbital_core::validation_report::{SourcePosition, ValidationJsonError, ValidationJsonOutput, ValidationJsonWarning, ValidationStats};
 
-/// JSON output for validation results (matches TypeScript DeepAgent tool expectations)
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct ValidationJsonOutput {
-    pub(crate) success: bool,
-    pub(crate) valid: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) errors: Option<Vec<ValidationJsonError>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) warnings: Option<Vec<ValidationJsonWarning>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) stats: Option<ValidationStats>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct ValidationJsonError {
-    pub(crate) code: String,
-    pub(crate) path: String,
-    pub(crate) message: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) suggestion: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) fix_guidance: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) expected_shape: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) valid_values: Option<Vec<String>>,
-    #[serde(flatten)]
-    pub(crate) position: Option<SourcePosition>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) needs_install: Option<bool>,
-}
-
-/// Where a diagnostic sits in the `.lolo` source: 1-based `line`/`column`,
-/// `endColumn` just past the last character. `approximate`: the span is the
-/// enclosing construct's, not the offending token's.
-#[derive(Debug, Clone, Copy, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct SourcePosition {
-    pub(crate) line: u32,
-    pub(crate) column: u32,
-    pub(crate) end_line: u32,
-    pub(crate) end_column: u32,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    pub(crate) approximate: bool,
-}
-
-impl SourcePosition {
-    pub(crate) fn of(span: orbital_lolo::Span, exact: bool) -> Self {
-        Self {
-            line: span.line,
-            column: span.col,
-            end_line: span.line,
-            end_column: span.col + u32::from(span.len.max(1)),
-            approximate: !exact,
-        }
+pub(crate) fn source_position(span: orbital_lolo::Span, exact: bool) -> SourcePosition {
+    SourcePosition {
+        line: span.line,
+        column: span.col,
+        end_line: span.line,
+        end_column: span.col + u32::from(span.len.max(1)),
+        approximate: !exact,
     }
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct ValidationJsonWarning {
-    pub(crate) code: String,
-    pub(crate) path: String,
-    pub(crate) message: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) suggestion: Option<String>,
-    #[serde(flatten)]
-    pub(crate) position: Option<SourcePosition>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct ValidationStats {
-    pub(crate) orbitals: usize,
-    pub(crate) entities: usize,
-    pub(crate) traits: usize,
-    pub(crate) pages: usize,
 }

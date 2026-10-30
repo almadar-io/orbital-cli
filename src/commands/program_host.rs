@@ -770,7 +770,7 @@ fn resolve_parsed(schema: orbital_core::OrbitalSchema, path: &Path) -> anyhow::R
 /// native program host instead of leaving keyed ones pending (G-ORB-459).
 fn run_cascade(path: &Path, steps: &serde_json::Value, live: bool) -> anyhow::Result<serde_json::Value> {
     use orbital_core::runtime::{EntitySource, InMemoryEntityCache, RuntimeKernel};
-    use orbital_core::step_replay::{play_steps, replay_dispatch, trait_definitions, with_step_config, StepClock};
+    use orbital_core::step_replay::{play_steps, replay_dispatch, trait_definitions, with_step_config, StepClock, StepCredentials};
     let steps = steps.as_array().ok_or_else(|| anyhow::anyhow!("--steps must be a JSON array"))?;
     let text = std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("Failed to read {}: {e}", path.display()))?;
     let text = with_step_config(&text, steps).map_err(|e| anyhow::anyhow!(e))?.unwrap_or(text);
@@ -803,15 +803,17 @@ fn run_cascade(path: &Path, steps: &serde_json::Value, live: bool) -> anyhow::Re
             &replay_kernel
         }
     };
-    play_steps(kernel, &clock, &defs, steps, live, &mut |trait_name, event, payload, settle_ms| match &live_host {
+    let credentials = StepCredentials::new();
+    play_steps(kernel, &clock, &credentials, &defs, steps, live, &mut |trait_name, event, payload, settle_ms| match &live_host {
         Some((host, _files)) => {
             let played = host.dispatch(trait_name, orbital_core::RUNTIME_SINGLETON, event, payload).map_err(|e| e.to_string());
             settle_open_calls(host, settle_ms);
             played
         }
-        None => replay_dispatch(kernel, trait_name, event, payload),
+        None => replay_dispatch(kernel, &credentials, trait_name, event, payload),
     })
     .map_err(|e| anyhow::anyhow!(e))
+    .and_then(|report| Ok(serde_json::to_value(report)?))
 }
 
 /// A live step waits for its open keyed calls to end; with `settleMs`, one still open after it is cancelled.
@@ -863,36 +865,36 @@ impl ProgramHost {
                 .map_err(|e| failure(format!("{op}: {e}")))?
                 .0
         };
-        let findings: Vec<serde_json::Value> = orbital_core::proof::prove(&schema)
-            .into_iter()
-            .filter_map(|f| {
-                use orbital_core::proof::{obligations::Proposition, Verdict};
-                let proposition = |kind: &str, fields: serde_json::Value, expr: &orbital_core::schema::SExpression| {
-                    let mut p = fields;
-                    p["kind"] = serde_json::Value::String(kind.to_string());
-                    p["expr"] = serde_json::to_value(expr).unwrap_or(serde_json::Value::Null);
-                    p
-                };
-                let proposition = match &f.proposition {
-                    Proposition::Row { entity, expr } => proposition("row", serde_json::json!({ "entity": entity }), expr),
-                    Proposition::State { trait_name, state, expr } => proposition("state", serde_json::json!({ "trait": trait_name, "state": state }), expr),
-                    Proposition::Transition { trait_name, from, event, to, expr } => {
-                        proposition("transition", serde_json::json!({ "trait": trait_name, "from": from, "event": event, "to": to }), expr)
-                    }
-                };
-                let (verdict, reason, counterexample) = match f.verdict {
-                    Verdict::Proved => return None,
-                    Verdict::Violated { counterexample } => ("violated", "the evaluator confirmed a counterexample".to_string(), Some(counterexample)),
-                    Verdict::Unproved { reason, counterexample } => ("unproved", reason, counterexample),
-                };
-                let mut finding = serde_json::json!({ "verdict": verdict, "reason": reason, "site": f.site, "proposition": proposition });
-                if let Some(c) = counterexample {
-                    finding["counterexample"] = c;
-                }
-                Some(finding)
-            })
-            .collect();
-        from_json(serde_json::json!({ "findings": findings }))
+        from_json(serde_json::to_value(orbital_core::proof::prove_report(&schema)).map_err(|e| failure(e.to_string()))?)
+    }
+
+    /// `program/os-grants program { path?, final? }`: the static `os/` grant check of the lowered program as typed findings
+    /// `{ findings: [{ code, orbital?, call?, entry?, site, grant?, app?, argument?, via? }] }` (`code` is `missing`, `unused`,
+    /// `entry-invalid` or `target-not-static`). With `final` the finished program is checked, where a config-fed target is
+    /// a literal; otherwise the program as written. With `path` (absolute) the file is resolved first.
+    fn os_grants(args: &[Value]) -> Result<Value, SubstrateFailure> {
+        let op = "program/os-grants";
+        let options = to_json(args.get(1).unwrap_or(&Value::Null));
+        let (schema, pass): (orbital_core::OrbitalSchema, _) = if options.is_null() {
+            let program = program_arg(op, args.first())?;
+            (serde_json::from_value(program).map_err(|e| failure(format!("{op}: not a program: {e}")))?, orbital_core::runtime::os_grants::OsGrantPass::Written)
+        } else {
+            let options = Options::of(op, &options)?;
+            options.only("path", &["path", "final"])?;
+            let pass = if options.flag("final")? { orbital_core::runtime::os_grants::OsGrantPass::Final } else { orbital_core::runtime::os_grants::OsGrantPass::Written };
+            if options.map.contains_key("path") {
+                let path = options.absolute("path", "path")?;
+                let resolved = super::dev::resolve_in_memory(parsed(&path).map_err(|e| failure(format!("{op}: {e}")))?, &path)
+                    .map_err(|e| failure(format!("{op}: {e}")))?
+                    .0;
+                (resolved, pass)
+            } else {
+                let program = program_arg(op, args.first())?;
+                (serde_json::from_value(program).map_err(|e| failure(format!("{op}: not a program: {e}")))?, pass)
+            }
+        };
+        let findings = orbital_core::runtime::os_grants::os_grant_findings(&schema, pass);
+        from_json(serde_json::to_value(orbital_core::runtime::os_grants::OsGrantsReport { findings }).map_err(|e| failure(e.to_string()))?)
     }
 
     /// `program/validate { report: true, path, final?, denyWarnings?, findings? }`: the report `orb validate --json` prints
@@ -1639,6 +1641,11 @@ impl ProgramHost {
                     "{op}: a request's config must be an object of knob values"
                 )));
             }
+            if r.get("credentials").is_some_and(|c| !c.is_object()) {
+                return Err(failure(format!(
+                    "{op}: a request's credentials must be an object of credential values"
+                )));
+            }
             if r.get("now").is_some_and(|n| !n.is_number()) {
                 return Err(failure(format!(
                     "{op}: a request's now must be a number (ms since the epoch)"
@@ -1652,7 +1659,7 @@ impl ProgramHost {
                 if let Some(from) = r.get("from") {
                     step["from"] = from.clone();
                 }
-                for key in ["entity", "config", "now", "settleMs", "viewer"] {
+                for key in ["entity", "config", "now", "settleMs", "viewer", "credentials"] {
                     if let Some(v) = r.get(key) {
                         step[key] = v.clone();
                     }
@@ -1929,6 +1936,7 @@ impl SubstrateHandler for ProgramHost {
                 None => self.print(program_arg(op, args.first())?),
             },
             "program/prove" => Self::prove(args),
+            "program/os-grants" => Self::os_grants(args),
             "program/validate" if option_flag(args.get(1), "report") == Some(true) => Self::validation_report(&to_json(&args[1])),
             "program/validate" => self.validate(program_arg(op, args.first())?, args.get(1)),
             "behavior/catalog" => Self::catalog(args.first(), args.get(1)),
@@ -2391,6 +2399,10 @@ orbital O {
         assert_eq!(findings[0]["proposition"]["entity"], "Order");
         assert_eq!(findings[0]["proposition"]["expr"], serde_json::json!([">=", "@entity.total", 0]));
         assert!(findings[0]["site"].as_str().unwrap().contains("Checkout"), "{answer}");
+        let reason = findings[0]["reason"].as_str().unwrap();
+        assert!(reason.contains("(>= @entity.total 0)") && reason.contains("false on the counterexample"), "the violation names what failed: {reason}");
+        let unproved = prove_program(prover_program(Some(serde_json::json!([">=", "@payload.total", 0])), serde_json::json!([">", ["str/len", "@entity.status"], 0])), None).expect("answers");
+        assert_ne!(unproved["findings"][0]["reason"], findings[0]["reason"], "control: an unproved finding keeps the prover's own reason");
     }
 
     #[test]
@@ -2428,6 +2440,65 @@ orbital O {
         let unknown = from_json(serde_json::json!({ "path": file.display().to_string(), "bogus": true })).unwrap();
         assert!(ProgramHost.run("program/prove", &[Value::Null, unknown]).unwrap_err().message.contains("unsupported option"));
         assert!(prove_program(serde_json::json!({ "name": "x" }), None).unwrap_err().message.contains("not a program"));
+    }
+
+    fn os_grants_program(grants: serde_json::Value, call: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({ "name": "App", "version": "1.0.0", "orbitals": [{
+            "name": "Files", "osGrants": grants,
+            "entity": { "name": "Row", "persistence": "runtime", "fields": [{ "name": "id", "type": "string", "required": true }] },
+            "traits": [{ "name": "Reader", "linkedEntity": "Row", "stateMachine": {
+                "states": [{ "name": "idle", "isInitial": true }],
+                "events": [{ "key": "INIT", "name": "Init" }],
+                "transitions": [{ "from": "idle", "to": "idle", "event": "INIT", "effects": [call] }] } }],
+            "pages": [] }] })
+    }
+
+    fn os_grants_of(program: serde_json::Value, options: Option<serde_json::Value>) -> Result<serde_json::Value, SubstrateFailure> {
+        let mut args = vec![from_json(program).unwrap()];
+        args.extend(options.map(|o| from_json(o).unwrap()));
+        ProgramHost.run("program/os-grants", &args).map(|v| json(&v))
+    }
+
+    #[test]
+    fn os_grants_answers_a_missing_grant_and_control_a_covered_call_has_no_finding() {
+        let grants = serde_json::json!({ "fs": [{ "glob": "/data/**", "modes": ["read"] }] });
+        let answer = os_grants_of(os_grants_program(grants.clone(), serde_json::json!(["os/read-file", "/etc/passwd"])), None).expect("answers");
+        let findings = answer["findings"].as_array().expect("a list");
+        assert_eq!(findings.len(), 2, "{answer}");
+        assert_eq!(findings[0]["code"], "missing");
+        assert_eq!(findings[0]["orbital"], "Files");
+        assert_eq!(findings[0]["call"], "os/read-file");
+        assert_eq!(findings[0]["grant"], "fs: { \"/etc/passwd\": [read] }");
+        assert_eq!(findings[1]["code"], "unused");
+        let covered = os_grants_of(os_grants_program(grants, serde_json::json!(["os/read-file", "/data/a"])), None).expect("answers");
+        assert_eq!(covered, serde_json::json!({ "findings": [] }));
+    }
+
+    #[test]
+    fn os_grants_answers_a_computed_target_and_the_final_pass_reads_config() {
+        let computed = os_grants_of(os_grants_program(serde_json::json!({}), serde_json::json!(["os/read-file", "@payload.path"])), None).expect("answers");
+        assert_eq!(computed["findings"][0]["code"], "target-not-static");
+        assert_eq!(computed["findings"][0]["argument"], 1);
+        let mut fed = os_grants_program(serde_json::json!({ "exec": ["ls"] }), serde_json::json!(["os/spawn", "@config.cmd", []]));
+        fed["orbitals"][0]["traits"][0]["config"] = serde_json::json!({ "cmd": { "type": "string", "default": "git" } });
+        let written = os_grants_of(fed.clone(), None).expect("answers");
+        assert_eq!(written["findings"][0]["code"], "unused", "control: the written pass defers a config target: {written}");
+        let finished = os_grants_of(fed, Some(serde_json::json!({ "final": true }))).expect("answers");
+        assert_eq!(finished["findings"][0]["code"], "missing");
+        assert_eq!(finished["findings"][0]["via"], "config");
+    }
+
+    #[test]
+    fn os_grants_reads_the_file_at_an_absolute_path_and_refuses_the_rest() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("files.orb");
+        std::fs::write(&file, os_grants_program(serde_json::json!({}), serde_json::json!(["os/memory-info"])).to_string()).unwrap();
+        let by_path = |options: serde_json::Value| ProgramHost.run("program/os-grants", &[Value::Null, from_json(options).unwrap()]).map(|v| json(&v));
+        let answer = by_path(serde_json::json!({ "path": file.display().to_string() })).expect("answers");
+        assert_eq!(answer["findings"][0]["code"], "missing", "{answer}");
+        assert!(by_path(serde_json::json!({ "path": "files.orb" })).unwrap_err().message.contains("absolute `path`"));
+        assert!(by_path(serde_json::json!({ "path": file.display().to_string(), "bogus": true })).unwrap_err().message.contains("unsupported option"));
+        assert!(os_grants_of(serde_json::json!({ "name": "x" }), None).unwrap_err().message.contains("not a program"));
     }
 
     #[test]
@@ -2722,6 +2793,28 @@ orbital O {
         assert!(warning["line"].is_number(), "positioned: {warning}");
         let refused = report(serde_json::json!([{ "code": "X", "path": "p", "message": "m", "severity": "fatal" }])).unwrap_err();
         assert!(refused.message.contains("`findings` must be a list"), "{}", refused.message);
+    }
+
+    #[test]
+    fn a_finding_carries_its_structured_entity_and_field_into_the_report() {
+        orbital_compiler::loader::register_source_lowerer(|path, _, _| crate::lower_lolo_file(path));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("note.lolo");
+        std::fs::write(&file, NOTE).unwrap();
+        let options = from_json(serde_json::json!({ "report": true, "path": file.display().to_string(), "findings": [
+            { "code": "ORB_LINT_E", "path": "orbitals[0]", "message": "m", "suggestion": "", "severity": "error", "entity": "Other", "field": "otherId" },
+            { "code": "ORB_LINT_W", "path": "orbitals[0]", "message": "w", "suggestion": "", "severity": "warning", "entity": "Other" },
+            { "code": "ORB_LINT_P", "path": "orbitals[0]", "message": "p", "suggestion": "", "severity": "warning" }
+        ] })).unwrap();
+        let report = ProgramHost.run("program/validate", &[Value::Null, options]).map(|v| json(&v)).expect("reports");
+        let error = report["errors"].as_array().unwrap().iter().find(|e| e["code"] == "ORB_LINT_E").expect("error");
+        assert_eq!((error["entity"].as_str(), error["field"].as_str()), (Some("Other"), Some("otherId")));
+        let warnings = report["warnings"].as_array().unwrap();
+        let warned = warnings.iter().find(|w| w["code"] == "ORB_LINT_W").expect("warning");
+        assert_eq!(warned["entity"], "Other");
+        assert!(warned.get("field").is_none(), "unset members stay out: {warned}");
+        let plain = warnings.iter().find(|w| w["code"] == "ORB_LINT_P").expect("control");
+        assert!(plain.get("entity").is_none(), "control: a finding with no entity carries none: {plain}");
     }
 
     #[test]

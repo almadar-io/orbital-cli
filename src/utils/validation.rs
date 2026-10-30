@@ -50,6 +50,7 @@ fn position(p: Position) -> SourcePosition {
 }
 
 fn from_json_error(e: ValidationJsonError) -> Finding {
+    let at = e.position();
     Finding {
         code: e.code,
         path: e.path,
@@ -58,7 +59,7 @@ fn from_json_error(e: ValidationJsonError) -> Finding {
         fix_guidance: e.fix_guidance,
         expected_shape: e.expected_shape,
         valid_values: e.valid_values,
-        position: e.position.map(|p| Position {
+        position: at.map(|p| Position {
             line: p.line,
             column: p.column,
             end_line: p.end_line,
@@ -66,6 +67,8 @@ fn from_json_error(e: ValidationJsonError) -> Finding {
             approximate: p.approximate,
         }),
         needs_install: e.needs_install,
+        entity: e.entity,
+        field: e.field,
     }
 }
 
@@ -78,9 +81,16 @@ fn json_error(f: Finding) -> ValidationJsonError {
         fix_guidance: f.fix_guidance,
         expected_shape: f.expected_shape,
         valid_values: f.valid_values,
-        position: f.position.map(position),
+        line: None,
+        column: None,
+        end_line: None,
+        end_column: None,
+        approximate: false,
         needs_install: f.needs_install,
+        entity: f.entity,
+        field: f.field,
     }
+    .placed(f.position.map(position))
 }
 
 fn json_warning(f: Finding) -> ValidationJsonWarning {
@@ -89,8 +99,15 @@ fn json_warning(f: Finding) -> ValidationJsonWarning {
         path: f.path,
         message: f.message,
         suggestion: f.suggestion,
-        position: f.position.map(position),
+        line: None,
+        column: None,
+        end_line: None,
+        end_column: None,
+        approximate: false,
+        entity: f.entity,
+        field: f.field,
     }
+    .placed(f.position.map(position))
 }
 
 /// The finding for a missing/incompatible installed language data package, when there is one.
@@ -136,6 +153,8 @@ pub(crate) fn findings_report(
             for pf in program_findings {
                 let mut f = Finding::new(pf.code.clone(), pf.path.clone(), pf.message.clone(), Some(pf.suggestion.clone()).filter(|s| !s.is_empty()));
                 f.valid_values = pf.valid_values.clone();
+                f.entity = pf.entity.clone();
+                f.field = pf.field.clone();
                 match pf.severity {
                     FindingSeverity::Error => report.errors.push(f),
                     FindingSeverity::Warning => report.warnings.push(f),
@@ -219,12 +238,12 @@ mod tests {
         std::fs::write(&path, "app probe [ this does not parse").unwrap();
         let report = validation_report(&path, None, None, false, &[]).expect("report");
         let errors = report.errors.expect("errors");
-        assert!(errors[0].position.is_some(), "{errors:?}");
+        assert!(errors[0].position().is_some(), "{errors:?}");
         assert!(!report.valid);
     }
 
     fn lint_finding(severity: FindingSeverity) -> ProgramFinding {
-        ProgramFinding { code: "LINT_PASSED".into(), path: "app".into(), message: "the lint ran".into(), suggestion: String::new(), severity, valid_values: None }
+        ProgramFinding { code: "LINT_PASSED".into(), path: "app".into(), message: "the lint ran".into(), suggestion: String::new(), severity, valid_values: None, entity: None, field: None }
     }
 
     #[test]
@@ -235,7 +254,7 @@ mod tests {
         let report = validation_report(&path, None, None, false, &findings).expect("report");
         let errors = report.errors.expect("errors");
         assert!(errors.iter().any(|e| e.code == "LINT_PASSED"), "{errors:?}");
-        assert!(errors.iter().any(|e| e.position.is_some()), "{errors:?}");
+        assert!(errors.iter().any(|e| e.position().is_some()), "{errors:?}");
         assert!(report.warnings.expect("warnings").iter().any(|w| w.code == "LINT_PASSED"));
     }
 

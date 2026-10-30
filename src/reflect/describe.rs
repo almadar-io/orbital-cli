@@ -1,4 +1,4 @@
-//! A behavior, orbital or trait described from its resolved program: knobs, events, entity, traits, pages, borrows and
+//! A behavior, orbital or trait described from its resolved program: knobs, events, entity, traits, pages and
 //! expectations. The knob vectors a description may carry are attached by std, never here.
 
 use super::{behavior_part, resolve_from, Resolved, TRAITS_SEGMENT};
@@ -134,7 +134,6 @@ struct OrbitalOut {
     knobs: Vec<KnobField>,
     #[serde(skip_serializing_if = "Option::is_none")]
     entity: Option<EntityOut>,
-    borrows: BTreeSet<String>,
     expects: Vec<orbital_core::schema::ExpectDeclaration>,
     traits: Vec<TraitOut>,
     pages: Vec<PageOut>,
@@ -315,71 +314,6 @@ fn uses_of(schema: &OrbitalSchema) -> Vec<String> {
     set.into_iter().collect()
 }
 
-/// What an import of each orbital must map: a probe program imports every orbital with no `entities {}` and the
-/// compiler's own import check names the entities each one references but a sibling owns.
-fn borrowed_entities(
-    path: &Path,
-    source: &OrbitalSchema,
-    program: &OrbitalSchema,
-    options: &CompilerOptions,
-) -> anyhow::Result<BTreeMap<String, BTreeSet<String>>> {
-    if !orbital_compiler::phases::lazy::split_lazy(&mut source.clone()).is_empty() {
-        return Ok(BTreeMap::new());
-    }
-    let file = path
-        .file_name()
-        .and_then(|f| f.to_str())
-        .ok_or_else(|| anyhow::anyhow!("{} has no file name", path.display()))?;
-    let names: Vec<String> = program.orbitals.iter().map(|o| o.name.clone()).collect();
-    let orbitals: Vec<Value> = program
-        .orbitals
-        .iter()
-        .map(|o| {
-            let mut reference = serde_json::json!({ "ref": format!("Source.orbitals.{}", o.name) });
-            if let EntityRef::Inline(e) = &o.entity {
-                reference["entity"] = Value::String(e.name.clone());
-            }
-            serde_json::json!({
-                "name": o.name,
-                "uses": [{ "from": format!("./{file}"), "as": "Source" }],
-                "entity": format!("Source.orbitals.{}.entity", o.name),
-                "traits": [],
-                "pages": [],
-                "reference": reference,
-            })
-        })
-        .collect();
-    let mut probe: OrbitalSchema = serde_json::from_value(serde_json::json!({ "name": "DescribeProbe", "orbitals": orbitals }))?;
-    let probe_path = path.with_file_name("__describe_probe__.orb");
-    let mut orbital_ref = Vec::new();
-    orbital_compiler::phases::inline::inline_schema_with_orbital_diagnostics(
-        &mut probe,
-        &options.inline,
-        Some(&probe_path),
-        &mut orbital_ref,
-        &mut Vec::new(),
-    )
-    .map_err(|e| anyhow::anyhow!("cannot import the orbitals of {}: {e}", path.display()))?;
-    let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    for d in orbital_ref {
-        let Some(index) = d
-            .path
-            .strip_prefix("orbitals[")
-            .and_then(|r| r.strip_suffix(']'))
-            .and_then(|i| i.parse::<usize>().ok())
-        else {
-            continue;
-        };
-        let name = names
-            .get(index)
-            .ok_or_else(|| anyhow::anyhow!("import diagnostic for orbital #{index} of {}", names.len()))?;
-        out.entry(name.clone())
-            .or_default()
-            .extend(d.entity_unmapped.into_iter().map(|(_, e)| e));
-    }
-    Ok(out)
-}
-
 fn canonical_name(resolved: &Resolved, fallback: &str) -> String {
     match (&resolved.package, resolved.path.file_stem().and_then(|s| s.to_str())) {
         (Some(pkg), Some(name)) => format!("{}/{name}", pkg.prefix),
@@ -389,10 +323,8 @@ fn canonical_name(resolved: &Resolved, fallback: &str) -> String {
 
 fn describe_behavior(behavior: &str, only_orbital: Option<&str>) -> anyhow::Result<BehaviorDescription> {
     let resolved = resolve_from(behavior, None)?;
-    let options = CompilerOptions::from_env();
     let program = resolved_program(&resolved, behavior)?;
     let canonical = canonical_name(&resolved, behavior);
-    let borrows = borrowed_entities(&resolved.path, &resolved.schema, &program, &options)?;
     let program_json = serde_json::to_value(&program)?;
     let program_events: HashSet<String> = program.orbitals.iter().flat_map(orbital_event_names).collect();
     let mut orbitals = Vec::new();
@@ -460,7 +392,6 @@ fn describe_behavior(behavior: &str, only_orbital: Option<&str>) -> anyhow::Resu
                     member: &orbital_events,
                 },
             )?,
-            borrows: borrows.get(&orbital.name).cloned().unwrap_or_default(),
             expects: orbital_core::expects::derive_expectations(&program_json, &orbital.name, None)
                 .map_err(|e| anyhow::anyhow!("cannot derive `{}` expectations: {e}", orbital.name))?
                 .expectations,

@@ -2,7 +2,7 @@
 //! parse-error mapping consumed by `orbital validate --json`.
 
 use crate::utils::i18n::translate_schema_content;
-use crate::{SourcePosition, ValidationJsonError};
+use crate::ValidationJsonError;
 use orbital_compiler::phases::validation::ErrorCode;
 
 /// Syntax variant detected from file content.
@@ -171,8 +171,14 @@ pub(crate) fn typed_parse_error_to_json(
             fix_guidance: None,
             expected_shape: None,
             valid_values: None,
-            position: None,
+            line: None,
+            column: None,
+            end_line: None,
+            end_column: None,
+            approximate: false,
             needs_install: None,
+            entity: None,
+            field: None,
         }],
         TypedParseError::RetiredKeys(rows) => rows
             .iter()
@@ -184,8 +190,14 @@ pub(crate) fn typed_parse_error_to_json(
                 fix_guidance: None,
                 expected_shape: None,
                 valid_values: None,
-                position: None,
+                line: None,
+                column: None,
+                end_line: None,
+                end_column: None,
+                approximate: false,
                 needs_install: None,
+                entity: None,
+                field: None,
             })
             .collect(),
         TypedParseError::Lolo(LoloError::Io { path, message }) => vec![ValidationJsonError {
@@ -196,8 +208,14 @@ pub(crate) fn typed_parse_error_to_json(
             fix_guidance: None,
             expected_shape: None,
             valid_values: None,
-            position: None,
+            line: None,
+            column: None,
+            end_line: None,
+            end_column: None,
+            approximate: false,
             needs_install: None,
+            entity: None,
+            field: None,
         }],
         TypedParseError::Lolo(LoloError::Parse { path, inner }) => {
             let span = inner.span();
@@ -567,9 +585,15 @@ pub(crate) fn typed_parse_error_to_json(
                 fix_guidance,
                 expected_shape: None,
                 valid_values: None,
-                position: Some(SourcePosition::of(span, true)),
+                line: None,
+                column: None,
+                end_line: None,
+                end_column: None,
+                approximate: false,
                 needs_install: None,
-            }]
+                entity: None,
+                field: None,
+            }.placed(Some(crate::source_position(span, true)))]
         }
         TypedParseError::Lolo(LoloError::Lower {
             path,
@@ -631,7 +655,7 @@ pub(crate) fn typed_parse_error_to_json(
                     )),
                 ),
                 TypeError::GenericTypeForbidden { name, .. } => (
-                    "ORB_T_GENERIC_TYPE_DEPRECATED",
+                    "ELOLO_T_GENERIC_TYPE",
                     Some(format!(
                         "replace `{name}`: a relation → the related entity's name (`Order`, `[Order]`); renderable content → `node`; structured data → an inline shape, a named `type` alias, or `Map K V`; a value of several kinds → a named tagged-union `type` alias, or the concrete primitive; the row of an entity → `@entity` / `@entity @config.<knob>`"
                     )),
@@ -664,9 +688,15 @@ pub(crate) fn typed_parse_error_to_json(
                 fix_guidance: None,
                 expected_shape: None,
                 valid_values: None,
-                position: Some(SourcePosition::of(span, true)),
+                line: None,
+                column: None,
+                end_line: None,
+                end_column: None,
+                approximate: false,
                 needs_install: None,
-            }]
+                entity: None,
+                field: None,
+            }.placed(Some(crate::source_position(span, true)))]
         }
         TypedParseError::Lolo(LoloError::Lower { inner, .. })
             if matches!(inner.innermost(), LowerError::LanguageData(_)) =>
@@ -694,8 +724,14 @@ pub(crate) fn typed_parse_error_to_json(
                 fix_guidance: None,
                 expected_shape: None,
                 valid_values: None,
-                position: None,
+                line: None,
+                column: None,
+                end_line: None,
+                end_column: None,
+                approximate: false,
                 needs_install: Some(true),
+                entity: None,
+                field: None,
             }]
         }
         TypedParseError::Lolo(LoloError::Lower { path, inner }) => vec![ValidationJsonError {
@@ -706,11 +742,15 @@ pub(crate) fn typed_parse_error_to_json(
             fix_guidance: None,
             expected_shape: None,
             valid_values: None,
-            position: inner
-                .span()
-                .map(|span| SourcePosition::of(span, inner.span_is_exact())),
+            line: None,
+            column: None,
+            end_line: None,
+            end_column: None,
+            approximate: false,
             needs_install: None,
-        }],
+            entity: None,
+            field: None,
+        }.placed(inner.span().map(|span| crate::source_position(span, inner.span_is_exact())))],
     }
 }
 
@@ -741,6 +781,22 @@ mod tests {
             "describe() must carry the teaching hint: {}",
             err.describe()
         );
+    }
+
+    #[test]
+    fn the_author_time_generic_type_error_has_its_own_elolo_code_and_a_clean_array_parses() {
+        let source = |ty: &str| {
+            format!(
+                "orbital OrbArr {{\n  entity Rec [persistent: recs] {{ id : string! }}\n  trait RecTrait -> Rec {{\n    emits {{ UPLOAD -> external {{ files : {ty}! }} }}\n    state idle {{ INIT -> idle (fetch Rec) }}\n  }}\n  page \"/recs\" -> RecTrait\n}}\n"
+            )
+        };
+        let bad = source("array");
+        let err = parse_schema_auto_typed(&bad, "x.lolo").expect_err("a bare array is refused");
+        let rows = typed_parse_error_to_json(&err, Some(&bad));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].code, "ELOLO_T_GENERIC_TYPE");
+        assert_ne!(rows[0].code, "ORB_T_GENERIC_TYPE_DEPRECATED");
+        assert!(parse_schema_auto_typed(&source("[string]"), "x.lolo").is_ok());
     }
 
     #[test]
@@ -1473,7 +1529,13 @@ pub(crate) fn language_data_json_error(e: &orbital_core::language_data::Language
         fix_guidance: None,
         expected_shape: None,
         valid_values: None,
-        position: None,
+        line: None,
+        column: None,
+        end_line: None,
+        end_column: None,
+        approximate: false,
         needs_install: e.needs_install().then_some(true),
+        entity: None,
+        field: None,
     }
 }
