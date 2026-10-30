@@ -334,6 +334,34 @@ impl orbital_core::sidecar_store::SidecarFetcher for UreqFetcher {
     }
 }
 
+/// Where a package's resolved `orb.vectors` snapshot sits relative to a fixed anchor.
+struct VectorsPlace {
+    kind: &'static str,
+    rel: Option<String>,
+}
+
+fn slash_path(path: &Path) -> String {
+    path.components().map(|c| c.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/")
+}
+
+/// The anchor `vectors` lies under: `<cwd>/node_modules` by its real path (a linked package whose real path is
+/// elsewhere, or a `node_modules` higher up, is outside), or the default sidecar store `~/.almadar/sidecars` when
+/// `cache` is that directory.
+fn vectors_place(vectors: &Path, cwd: &Path, cache: &Path) -> VectorsPlace {
+    let outside = VectorsPlace { kind: "outside", rel: None };
+    let real = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let home_store = std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".almadar").join("sidecars"));
+    if home_store.is_some_and(|store| real(&store) == real(cache)) {
+        if let Ok(rel) = real(vectors).strip_prefix(real(cache)) {
+            return VectorsPlace { kind: "sidecars", rel: Some(slash_path(rel)) };
+        }
+    }
+    match real(vectors).strip_prefix(real(&cwd.join("node_modules"))) {
+        Ok(rel) => VectorsPlace { kind: "node-modules", rel: Some(slash_path(rel)) },
+        Err(_) => outside,
+    }
+}
+
 /// The readable path of the package's `orb.vectors` snapshot: a package file as-is, a lock-resolved one from the cache,
 /// downloaded and verified first when absent. `None` when none is declared.
 pub(crate) fn resolve_vectors(
@@ -1317,8 +1345,11 @@ impl ProgramHost {
         from_json(described)
     }
 
-    /// `behavior/packages`: each installed behavior package's `{ root, prefix, vectors }`, `vectors` being the
-    /// `orb.vectors` snapshot the lock resolves (the cached sidecar when locked), `null` when none is declared.
+    /// `behavior/packages`: each installed behavior package's `{ root, prefix, vectors, vectorsRel, vectorsIn }`,
+    /// `vectors` being the `orb.vectors` snapshot the lock resolves (the cached sidecar when locked), `null` when none
+    /// is declared. `vectorsIn` is a fixed anchor a program spells as a literal and `vectorsRel` the snapshot relative
+    /// to it: `"node-modules"` (`<cwd>/node_modules`, rel starting at the package name), `"sidecars"` (the default
+    /// `~/.almadar/sidecars`, rel the cached name) or `"outside"` (anything else, rel `null`).
     fn packages() -> Result<Value, SubstrateFailure> {
         let cwd = std::env::current_dir().map_err(|e| failure(e.to_string()))?;
         let packages = discover_packages(&cwd)
@@ -1330,10 +1361,13 @@ impl ProgramHost {
                 &UreqFetcher,
             )
             .map_err(|e| failure(format!("behavior/packages: {e}")))?;
+            let place = vectors.as_deref().map(|path| vectors_place(path, &cwd, &orbital_core::behavior_packages::sidecar_cache_dir()));
             out.push(serde_json::json!({
                 "root": pkg.root.to_string_lossy(),
                 "prefix": pkg.prefix,
-                "vectors": vectors.map(|v| v.to_string_lossy().into_owned()),
+                "vectors": vectors.as_ref().map(|v| v.to_string_lossy().into_owned()),
+                "vectorsRel": place.as_ref().and_then(|p| p.rel.clone()),
+                "vectorsIn": place.as_ref().map(|p| p.kind),
             }));
         }
         from_json(serde_json::Value::Array(out))
@@ -3059,14 +3093,77 @@ orbital O {
             )
             .unwrap();
             match vectors {
-                Some(path) => assert_eq!(entry["vectors"], path.to_string_lossy().as_ref()),
+                Some(path) => {
+                    assert_eq!(entry["vectors"], path.to_string_lossy().as_ref());
+                    let kind = entry["vectorsIn"].as_str().unwrap();
+                    assert!(["node-modules", "sidecars", "outside"].contains(&kind));
+                    assert_eq!(entry["vectorsRel"].is_null(), kind == "outside");
+                }
                 None => assert!(
-                    entry["vectors"].is_null(),
+                    entry["vectors"].is_null() && entry["vectorsRel"].is_null() && entry["vectorsIn"].is_null(),
                     "control: no orb.vectors is null"
                 ),
             }
         }
         assert!(entries.iter().any(|e| e["prefix"] == "almadar-std"));
+    }
+
+    fn write_package(dir: &Path, name: &str) {
+        std::fs::create_dir_all(dir.join("behaviors/registry")).unwrap();
+        std::fs::write(dir.join("behaviors/registry/pa-x.orb"), "{}").unwrap();
+        std::fs::create_dir_all(dir.join("dist")).unwrap();
+        std::fs::write(dir.join("dist/vectors.vec"), "x").unwrap();
+        let manifest = serde_json::json!({
+            "name": name, "version": "1.0.0",
+            "orb": { "prefix": "pa", "registry": "behaviors/registry", "vectors": "dist/vectors.vec", "compiler": ">=4.10.0" },
+        });
+        std::fs::write(dir.join("package.json"), manifest.to_string()).unwrap();
+    }
+
+    #[test]
+    fn packages_answer_each_snapshot_relative_to_a_fixed_anchor() {
+        use orbital_core::behavior_packages::discover_with_cache;
+        let tmp = tempfile::tempdir().unwrap();
+        let store = tmp.path().join("store");
+        let cache = tmp.path().join("cache");
+        let installed = tmp.path().join("node_modules/@fake/pkg-a");
+        write_package(&installed, "@fake/pkg-a");
+        let found = discover_with_cache(tmp.path(), &store, &cache).unwrap();
+        let vectors = found[0].vectors.clone().unwrap();
+        let place = vectors_place(&vectors, tmp.path(), &cache);
+        assert_eq!((place.kind, place.rel.as_deref()), ("node-modules", Some("@fake/pkg-a/dist/vectors.vec")));
+
+        let below = tmp.path().join("deeper");
+        std::fs::create_dir_all(&below).unwrap();
+        let higher = vectors_place(&vectors, &below, &cache);
+        assert_eq!((higher.kind, higher.rel), ("outside", None), "control: a node_modules higher up the ancestors");
+
+        let elsewhere = vectors_place(Path::new("/nowhere/orb.vectors"), tmp.path(), &cache);
+        assert_eq!((elsewhere.kind, elsewhere.rel), ("outside", None), "control: no anchor holds it");
+    }
+
+    #[test]
+    fn the_default_sidecar_store_is_an_anchor_and_a_custom_cache_is_outside() {
+        let home = std::env::var_os("HOME").map(PathBuf::from).expect("HOME");
+        let store = home.join(".almadar/sidecars");
+        let cached = vectors_place(&store.join("abc123"), Path::new("/nowhere"), &store);
+        assert_eq!((cached.kind, cached.rel.as_deref()), ("sidecars", Some("abc123")));
+        let tmp = tempfile::tempdir().unwrap();
+        let custom = vectors_place(&tmp.path().join("abc123"), Path::new("/nowhere"), tmp.path());
+        assert_eq!((custom.kind, custom.rel), ("outside", None), "control: a cache that is not the default");
+    }
+
+    #[test]
+    fn a_linked_package_whose_real_path_is_outside_the_anchor_is_outside() {
+        use orbital_core::behavior_packages::discover_with_cache;
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("workspace/pkg-b");
+        write_package(&real, "pkg-b");
+        std::fs::create_dir_all(tmp.path().join("node_modules")).unwrap();
+        std::os::unix::fs::symlink(&real, tmp.path().join("node_modules/pkg-b")).unwrap();
+        let found = discover_with_cache(tmp.path(), &tmp.path().join("store"), &tmp.path().join("cache")).unwrap();
+        let place = vectors_place(found[0].vectors.as_deref().unwrap(), tmp.path(), &tmp.path().join("cache"));
+        assert_eq!((place.kind, place.rel), ("outside", None));
     }
 
     #[test]
