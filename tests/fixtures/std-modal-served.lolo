@@ -3,7 +3,7 @@ app std-modal-served [
   env: ["CORS_ORIGIN", "PORT", "VAPID_PUBLIC_KEY", "ORB_TICK_INVOKER", "ALMADAR_API_KEY_SALT", "NODE_ENV", "AUTH_PROVIDER", "OIDC_ISSUER_URL", "OIDC_AUDIENCE", "FIREBASE_PROJECT_ID", "FIREBASE_SERVICE_ACCOUNT_PATH", "FIREBASE_AUTH_EMULATOR_HOST", "FIRESTORE_EMULATOR_HOST", "ALMADAR_INTEGRATIONS_MODE"],
   egress: ["https://www.googleapis.com"],
   fs: { cwd: "dist/client/**": [read] },
-  net: { "127.0.0.1:3000": [listen], "127.0.0.1", env PORT: [listen] },
+  net: { "127.0.0.1:3000": [listen], "127.0.0.1", env PORT: [listen], "www.googleapis.com:443": [tcp] },
   description: "std-modal composed with the std HTTP server, so the program declares the endpoint a server compile needs"
 ]
 

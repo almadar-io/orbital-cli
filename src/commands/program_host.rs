@@ -1772,6 +1772,7 @@ impl ProgramHost {
                 }).collect::<Vec<_>>(),
                 "ensures": outcome.get("ensures").cloned().unwrap_or(serde_json::json!([])),
                 "entityAfter": report["steps"][i]["entityAfter"],
+                "pendingAsks": report["steps"][i]["pendingAsks"],
                 "outcomes": moved.iter().map(|o| serde_json::json!({
                     "orbital": o["orbital"],
                     "trait": o["trait"],
@@ -3231,6 +3232,7 @@ orbital O {
             inc["effects"][0]["routed"], false,
             "an executed set routes nothing"
         );
+        assert_eq!(inc["pendingAsks"], serde_json::json!([]), "no ask left pending: {inc}");
         assert_eq!(inc["ensures"][0]["verdict"], "held", "{inc}");
         assert_eq!(inc["ensures"][1]["verdict"], "broken");
         assert_eq!(
