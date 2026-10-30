@@ -398,18 +398,18 @@ pub(crate) fn resolved_value(path: &Path) -> anyhow::Result<Value> {
 
 /// The program at `path` as it reads before resolution, and every trait and orbital reference its resolution resolves,
 /// each paired with the upstream declaration it resolved to (`program/read { references: true }`).
-fn referenced_program(path: &Path) -> anyhow::Result<(serde_json::Value, Vec<orbital_compiler::phases::inline::ReferencePair>)> {
+fn referenced_program(path: &Path) -> anyhow::Result<(Value, Vec<orbital_compiler::phases::inline::ReferencePair>)> {
     let mut options = orbital_compiler::CompilerOptions::from_env();
     let session = orbital_compiler::phases::inline::InlineSession::default();
     session.collect_references();
     options.inline.session = Some(session.clone());
     let mut schema = parsed(path)?;
-    let unresolved = serde_json::to_value(&schema).map_err(|e| anyhow::anyhow!("Failed to serialize {}: {}", path.display(), e))?;
+    let unresolved = orbital_core::value_serialize::to_canonical_value(&schema).map_err(|e| anyhow::anyhow!("Failed to serialize {}: {}", path.display(), e))?;
     let failed = |e: orbital_compiler::CompilerError| anyhow::anyhow!("Failed to resolve {}: {}", path.display(), e);
     orbital_compiler::phases::lazy::split_lazy_and_resolve(&mut schema, &options, Some(path)).map_err(failed)?;
     session.take_references();
     orbital_compiler::resolve_schema_with_path(schema, &options, Some(path)).map_err(failed)?;
-    Ok((orbital_core::util::canonical_json(&unresolved), session.take_references()))
+    Ok((unresolved, session.take_references()))
 }
 
 /// What reading the program at `path` as resolved answers (`program/read { resolve }`).
@@ -481,6 +481,10 @@ fn to_json(value: &Value) -> serde_json::Value {
 /// holds its own, so the process peaks at the largest step and not at the sum of the pages the steps left mapped.
 fn release_transients() {
     orbital_core::runtime::memory_release::release_freed_memory();
+}
+
+fn serialized<T: serde::Serialize + ?Sized>(value: &T) -> Result<Value, SubstrateFailure> {
+    orbital_core::value_serialize::to_value(value).map_err(|e| failure(e.to_string()))
 }
 
 fn from_json(value: serde_json::Value) -> Result<Value, SubstrateFailure> {
@@ -840,7 +844,7 @@ fn run_cascade(path: &Path, steps: &serde_json::Value, live: bool) -> anyhow::Re
         }
         None => replay_dispatch(kernel, &credentials, trait_name, event, payload),
     })
-    .map_err(|e| anyhow::anyhow!(e))
+    .map_err(|refusal| anyhow::anyhow!(refusal.error))
     .and_then(|report| Ok(serde_json::to_value(report)?))
 }
 
@@ -893,7 +897,7 @@ impl ProgramHost {
                 .map_err(|e| failure(format!("{op}: {e}")))?
                 .0
         };
-        from_json(serde_json::to_value(orbital_core::proof::prove_report(&schema)).map_err(|e| failure(e.to_string()))?)
+        serialized(&orbital_core::proof::prove_report(&schema))
     }
 
     /// `program/os-grants program { path?, final? }`: the static `os/` grant check of the lowered program as typed findings
@@ -922,7 +926,7 @@ impl ProgramHost {
             }
         };
         let findings = orbital_core::runtime::os_grants::os_grant_findings(&schema, pass);
-        from_json(serde_json::to_value(orbital_core::runtime::os_grants::OsGrantsReport { findings }).map_err(|e| failure(e.to_string()))?)
+        serialized(&orbital_core::runtime::os_grants::OsGrantsReport { findings })
     }
 
     /// `program/validate { report: true, path, final?, denyWarnings?, findings? }`: the report `orb validate --json` prints
@@ -968,7 +972,7 @@ impl ProgramHost {
             &findings,
         )
             .map_err(|e| failure(format!("{op}: {e}")))?;
-        from_json(serde_json::to_value(report).map_err(|e| failure(e.to_string()))?)
+        serialized(&report)
     }
 
     /// `program/read { resolve: true, path, output? }`: what `orb resolve <path> [--output]` prints
@@ -1052,8 +1056,8 @@ impl ProgramHost {
         let path = options.absolute("path", "references")?;
         let (program, references) = referenced_program(&path)
             .map_err(|e| failure(format!("program/read: {e}")))?;
-        let references = serde_json::to_value(references).map_err(|e| failure(e.to_string()))?;
-        from_json(serde_json::json!({ "program": program, "references": references }))
+        let references = orbital_core::value_serialize::to_value(&references).map_err(|e| failure(e.to_string()))?;
+        Ok(Value::object(orbital_core::ValueMap::from_iter([("program".into(), program), ("references".into(), references)])))
     }
 
     /// `program/print { target, path, section?, format?, only?, map?, output?, inspectSource?, documentVersion?, unit?,
@@ -1748,105 +1752,28 @@ impl ProgramHost {
         } else {
             None
         };
-        let emitted_of = |o: &serde_json::Value, i: usize| -> Vec<serde_json::Value> {
-            o.get("emits")
-                .and_then(serde_json::Value::as_array)
-                .into_iter()
-                .flatten()
-                .map(|e| {
-                    let mut out = serde_json::json!({ "type": e["event"], "timestamp": i });
-                    if let Some(p) = e.get("payload").filter(|p| !p.is_null()) {
-                        out["payload"] = p.clone();
-                    }
-                    out
-                })
-                .collect()
-        };
-        let mut played = Vec::new();
-        for (i, request) in requests.iter().enumerate() {
-            let trait_name = request["trait"].as_str().unwrap_or_default();
-            let moved = report["steps"][i]["outcomes"]
-                .as_array()
-                .cloned()
-                .unwrap_or_default();
-            let outcome = moved
-                .iter()
-                .find(|o| o.get("trait").and_then(serde_json::Value::as_str) == Some(trait_name))
-                .cloned()
-                .ok_or_else(|| failure(format!("{op}: trait \"{trait_name}\" did not run")))?;
-            let fired = outcome.get("firedArm").filter(|v| !v.is_null()).cloned();
-            let guards = outcome
-                .get("guards")
-                .and_then(serde_json::Value::as_array)
-                .cloned()
-                .unwrap_or_default();
-            let fired_guarded = fired
-                .as_ref()
-                .is_some_and(|f| guards.iter().any(|g| g.get("arm") == Some(f)));
-            let guard = if fired_guarded {
-                "pass"
-            } else if fired.is_none() && !guards.is_empty() {
-                "fail"
-            } else {
-                "none"
-            };
-            let mut result = serde_json::json!({
-                "trait": outcome["trait"],
-                "event": request["event"],
-                "transitionFired": outcome["executed"],
-                "guard": guard,
-                "state": { "before": outcome["previousState"], "after": outcome["newState"] },
-                "effects": outcome.get("effects").cloned().unwrap_or(serde_json::json!([])),
-                "failure": outcome.get("failure").cloned().unwrap_or(serde_json::Value::Null),
-                "emitted": emitted_of(&outcome, i),
-                "guards": guards.iter().map(|g| {
-                    let mut out = serde_json::json!({ "arm": g["arm"], "guard": g["guard"], "passed": g["passed"], "trace": [] });
-                    if let Some(e) = g.get("error") { out["error"] = e.clone(); }
-                    out
-                }).collect::<Vec<_>>(),
-                "ensures": outcome.get("ensures").cloned().unwrap_or(serde_json::json!([])),
-                "entityAfter": report["steps"][i]["entityAfter"],
-                "pendingAsks": report["steps"][i]["pendingAsks"],
-                "outcomes": moved.iter().map(|o| serde_json::json!({
-                    "orbital": o["orbital"],
-                    "trait": o["trait"],
-                    "event": o["event"],
-                    "from": o["previousState"],
-                    "to": o["newState"],
-                    "arm": o["firedArm"],
-                    "fired": o["executed"],
-                    "effects": o.get("effects").cloned().unwrap_or(serde_json::json!([])),
-                    "emitted": emitted_of(o, i),
-                })).collect::<Vec<_>>(),
-            });
-            if let Some(f) = fired {
-                result["firedArm"] = f;
-            }
-            if let Some((schema, target)) = &renderer {
-                let payload: orbital_core::Value = serde_json::from_value(
-                    request
-                        .get("payload")
-                        .cloned()
-                        .unwrap_or(serde_json::json!({})),
-                )
-                .map_err(|e| failure(format!("{op}: payload: {e}")))?;
+        let typed: Vec<orbital_core::program_machine::PlayRequest> =
+            serde_json::from_value(serde_json::Value::Array(requests))
+                .map_err(|e| failure(format!("{op}: {e}")))?;
+        let report: orbital_core::step_replay::StepReport =
+            serde_json::from_value(report).map_err(|e| failure(format!("{op}: {e}")))?;
+        let mut played = orbital_core::step_replay::played_steps(&typed, &report)
+            .map_err(|r| failure(format!("{op}: {}", r.error)))?;
+        if let Some((schema, target)) = &renderer {
+            for step in &mut played {
                 let slots = orbital_core::client::render_probe::played_render_facts(
                     schema,
-                    trait_name,
-                    request["event"].as_str().unwrap_or_default(),
-                    payload,
+                    &step.trait_name,
+                    &step.event,
+                    step.payload.clone(),
                     target,
                     |s, _| orbital_core::client::render_probe::probe_kernel(s),
                 )
                 .map_err(|e| failure(format!("{op}: render: {e}")))?;
-                result["rendered"] =
-                    serde_json::to_value(slots).map_err(|e| failure(e.to_string()))?;
+                step.result.rendered = Some(slots);
             }
-            let mut step = request.clone();
-            step["result"] = result;
-            played.push(step);
         }
-        from_json(serde_json::Value::Array(played))
+        serialized(&played)
     }
 }
 
@@ -1936,7 +1863,7 @@ impl SubstrateHandler for ProgramHost {
                 Some(Value::String(text)) if option_flag(args.get(1), "embeds") == Some(true) => {
                     let embeds = orbital_lolo::embeds::inline_embeds(text)
                         .map_err(|e| failure(format!("program/read: {e}")))?;
-                    from_json(serde_json::to_value(embeds).map_err(|e| failure(e.to_string()))?)
+                    serialized(&embeds)
                 }
                 Some(Value::String(text)) if option_flag(args.get(1), "findings") == Some(true) => {
                     let found: Vec<serde_json::Value> = crate::utils::validation::source_findings(text)
@@ -2372,6 +2299,25 @@ orbital O {
     }
 
     #[test]
+    fn read_with_references_equals_the_json_construction_for_two_references_to_one_import() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("atom.orb"), REFERENCED_ATOM).unwrap();
+        let consumer = r#"{ "name": "consumer", "version": "1.0.0", "orbitals": [ { "name": "Composer",
+          "uses": [ { "from": "./atom.orb", "as": "Up" } ],
+          "entity": { "name": "Rec", "persistence": "runtime", "fields": [ { "name": "id", "type": "string", "required": true } ] },
+          "traits": [ { "ref": "Up.traits.Widget", "name": "A", "linkedEntity": "Rec" }, { "ref": "Up.traits.Widget", "name": "B", "linkedEntity": "Rec", "config": { "k": { "type": "number", "default": 2 } } } ] } ] }"#;
+        let file = dir.path().join("consumer.orb");
+        std::fs::write(&file, consumer).unwrap();
+        let options = from_json(serde_json::json!({ "references": true, "path": file.display().to_string() })).unwrap();
+        let answer = ProgramHost.run("program/read", &[Value::String(String::new().into()), options]).expect("answers");
+        let (_, references) = referenced_program(&file).expect("references");
+        let program = orbital_core::util::canonical_json(&serde_json::to_value(parsed(&file).unwrap()).unwrap());
+        let previous = from_json(serde_json::json!({ "program": program, "references": serde_json::to_value(references).unwrap() })).unwrap();
+        assert_eq!(answer, previous);
+        assert_eq!(json(&answer)["references"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
     fn read_with_references_pairs_an_orbital_reference_with_the_other_orbitals_of_its_import() {
         let upstream = r#"{ "name": "up", "version": "1.0.0", "config": { "title": { "type": "string", "default": "t" } }, "orbitals": [
           { "name": "MainOrbital", "entity": { "name": "Widget", "persistence": "persistent", "fields": [ { "name": "id", "type": "string", "required": true } ] }, "traits": [] },
@@ -2438,6 +2384,16 @@ orbital O {
         assert!(reason.contains("(>= @entity.total 0)") && reason.contains("false on the counterexample"), "the violation names what failed: {reason}");
         let unproved = prove_program(prover_program(Some(serde_json::json!([">=", "@payload.total", 0])), serde_json::json!([">", ["str/len", "@entity.status"], 0])), None).expect("answers");
         assert_ne!(unproved["findings"][0]["reason"], findings[0]["reason"], "control: an unproved finding keeps the prover's own reason");
+    }
+
+    #[test]
+    fn serialized_builds_the_same_value_in_the_same_key_order_as_the_json_round_trip() {
+        let program = prover_program(None, serde_json::json!([">=", "@entity.total", 0]));
+        let schema: orbital_core::OrbitalSchema = serde_json::from_value(program).expect("a program");
+        let report = orbital_core::proof::prove_report(&schema);
+        let direct = serialized(&report).expect("serializes");
+        let round_trip = from_json(serde_json::to_value(&report).unwrap()).unwrap();
+        assert_eq!(serde_json::to_string(&json(&direct)).unwrap(), serde_json::to_string(&json(&round_trip)).unwrap());
     }
 
     #[test]

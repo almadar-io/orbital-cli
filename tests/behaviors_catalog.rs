@@ -538,9 +538,9 @@ orbital Probe {
       INIT -> idle
         (os/getenv "ALMADAR_VECTORS_DIR" { key: "dir" emit: { success: PROBE_ENV, failure: PROBE_ENV_FAILED } })
       PROBE_ENV -> idle when (!= (default @payload.value "") "")
-        (emit VECTOR_WRITE { path: (str/concat @payload.value "/m.vec"), anchor: "env", model: "m", records: [{ text: "alpha", vector: [0.5, 0.25, -0.5, 1.0] }, { text: "beta", vector: [0.1, 0.2, 0.3, 0.4] }] })
+        (emit VECTOR_WRITE { path: "m.vec", anchor: "env", model: "m", records: [{ text: "alpha", vector: [0.5, 0.25, -0.5, 1.0] }, { text: "beta", vector: [0.1, 0.2, 0.3, 0.4] }] })
       PROBE_ENV -> idle when (== (default @payload.value "") "")
-        (emit VECTOR_WRITE { path: "/home/.almadar/vectors/m.vec", anchor: "home", model: "m", records: [{ text: "alpha", vector: [0.5, 0.25, -0.5, 1.0] }, { text: "beta", vector: [0.1, 0.2, 0.3, 0.4] }] })
+        (emit VECTOR_WRITE { path: "m.vec", anchor: "home", model: "m", records: [{ text: "alpha", vector: [0.5, 0.25, -0.5, 1.0] }, { text: "beta", vector: [0.1, 0.2, 0.3, 0.4] }] })
       PROBE_ENV_FAILED -> idle
       VECTOR_WRITTEN -> idle
       VECTOR_WRITE_REFUSED -> idle
