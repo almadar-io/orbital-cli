@@ -273,8 +273,11 @@ fn cached_resolve(
     build: impl FnOnce() -> anyhow::Result<ResolvedProgram>,
 ) -> anyhow::Result<ResolvedProgram> {
     let entry = cache.join(format!("{stem}-{key}"));
-    if let Some(program) = cached_entry(&entry, parent, stem)? {
-        return Ok(program);
+    if entry.join("program.orb").is_file() {
+        let _read = entry_lock(cache, stem, key, false)?;
+        if let Some(program) = cached_entry(&entry, parent, stem)? {
+            return Ok(program);
+        }
     }
     orbital_core::read_set::begin();
     let built = build();
@@ -289,6 +292,7 @@ fn cached_resolve(
     copy_tree(program.dir.path(), staging.path())?;
     std::fs::write(staging.path().join(READS_FILE), serde_json::to_vec(&reads)?)?;
     let staged = staging.keep();
+    let _write = entry_lock(cache, stem, key, true)?;
     if entry.exists() {
         let retired = tempfile::Builder::new().prefix(&format!("{stem}-{key}.")).suffix(".old").tempdir_in(cache)?.keep();
         match std::fs::rename(&entry, retired.join("entry")) {
@@ -303,10 +307,12 @@ fn cached_resolve(
     tracing::debug!(target: "almadar:cli:resolve-cache", stem, outcome = "disk-miss", reads = reads.paths().count(), "command cache");
     for old in std::fs::read_dir(cache)?.flatten() {
         let name = old.file_name().to_string_lossy().into_owned();
-        let stale = (!name.contains('.') && name.rsplit_once('-').is_some_and(|(s, k)| s == stem && k != key))
+        let other_key = |n: &str| n.rsplit_once('-').is_some_and(|(s, k)| s == stem && k != key);
+        let stale = (!name.contains('.') && other_key(&name))
+            || name.strip_suffix(".lock").is_some_and(other_key)
             || (name.starts_with(&format!("{stem}-")) && name.ends_with(".old"));
         if stale {
-            let _ = std::fs::remove_dir_all(old.path());
+            let _ = if old.file_type().is_ok_and(|t| t.is_dir()) { std::fs::remove_dir_all(old.path()) } else { std::fs::remove_file(old.path()) };
         }
     }
     Ok(program)
@@ -339,6 +345,15 @@ fn cached_entry(entry: &Path, parent: &Path, stem: &str) -> anyhow::Result<Optio
     reads.replay();
     tracing::debug!(target: "almadar:cli:resolve-cache", stem, outcome = "disk-hit", "command cache");
     Ok(Some(program))
+}
+
+/// The lock that orders runs sharing one cache entry: readers copy it under a shared lock, a writer swaps it under an
+/// exclusive one, so no run reads an entry another run is replacing.
+fn entry_lock(cache: &Path, stem: &str, key: &str, exclusive: bool) -> std::io::Result<std::fs::File> {
+    std::fs::create_dir_all(cache)?;
+    let file = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(cache.join(format!("{stem}-{key}.lock")))?;
+    if exclusive { file.lock()? } else { file.lock_shared()? }
+    Ok(file)
 }
 
 /// The files a cache entry's resolution read, beside the resolved program.
@@ -422,7 +437,7 @@ mod tests {
         let mut entries: Vec<String> = std::fs::read_dir(cache.path()).unwrap().flatten()
             .map(|e| e.file_name().to_string_lossy().into_owned()).collect();
         entries.sort();
-        assert_eq!(entries, vec!["p-k2".to_string(), "q-k1".to_string()]);
+        assert_eq!(entries, vec!["p-k2".to_string(), "p-k2.lock".to_string(), "q-k1".to_string(), "q-k1.lock".to_string()], "the stem's older key and its lock go");
     }
 
     #[test]
@@ -469,12 +484,12 @@ mod tests {
         assert_eq!(calls.get(), 2);
         assert_eq!(std::fs::read_to_string(run().path()).unwrap(), "two");
         assert_eq!(calls.get(), 2, "the rebuilt entry is current again");
-        assert_eq!(entries(cache.path()), vec!["p-k1".to_string()], "one entry, nothing left from the swap");
+        assert_eq!(entries_without_locks(cache.path()), vec!["p-k1".to_string()], "one entry, nothing left from the swap");
         std::fs::create_dir_all(cache.path().join("p-k1.abc.old/entry")).unwrap();
         std::fs::create_dir_all(cache.path().join("p-k1.def.tmp")).unwrap();
         std::fs::write(&dep, "three").unwrap();
         run();
-        assert_eq!(entries(cache.path()), vec!["p-k1".to_string(), "p-k1.def.tmp".to_string()], "a retired entry left by a killed run goes; another run's staging stays");
+        assert_eq!(entries_without_locks(cache.path()), vec!["p-k1".to_string(), "p-k1.def.tmp".to_string()], "a retired entry left by a killed run goes; another run's staging stays");
     }
 
     #[test]
@@ -518,7 +533,7 @@ mod tests {
         for handle in handles {
             assert_eq!(handle.join().unwrap(), "two");
         }
-        assert_eq!(entries(cache.path()), vec!["p-k1".to_string()], "one entry is left");
+        assert_eq!(entries_without_locks(cache.path()), vec!["p-k1".to_string()], "one entry is left");
     }
 
     #[test]
@@ -553,6 +568,10 @@ mod tests {
         let again = cached_resolve(cache.path(), work.path(), &live, "k1", || built(work.path(), &calls, "X")).unwrap();
         assert_eq!(calls.get(), 2);
         assert_eq!(std::fs::read_to_string(again.path()).unwrap(), "L");
+    }
+
+    fn entries_without_locks(dir: &Path) -> Vec<String> {
+        entries(dir).into_iter().filter(|n| !n.ends_with(".lock")).collect()
     }
 
     fn entries(dir: &Path) -> Vec<String> {
@@ -674,7 +693,7 @@ mod tests {
         assert_eq!(entries(tmp.path()).len(), 2, "control: both runs hold their directory");
         drop((miss, hit));
         assert!(entries(tmp.path()).is_empty(), "{:?}", entries(tmp.path()));
-        assert_eq!(entries(cache.path()), vec!["p-k1".to_string()], "the cache entry stays");
+        assert_eq!(entries_without_locks(cache.path()), vec!["p-k1".to_string()], "the cache entry stays");
     }
 
     #[test]

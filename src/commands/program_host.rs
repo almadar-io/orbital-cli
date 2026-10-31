@@ -2505,12 +2505,13 @@ orbital O {
         let grants = serde_json::json!({ "fs": [{ "glob": "/data/**", "modes": ["read"] }] });
         let answer = os_grants_of(os_grants_program(grants.clone(), serde_json::json!(["os/read-file", "/etc/passwd"])), None).expect("answers");
         let findings = answer["findings"].as_array().expect("a list");
-        assert_eq!(findings.len(), 2, "{answer}");
+        assert_eq!(findings.len(), 1, "the written pass reports missing only; unused is the final pass's: {answer}");
         assert_eq!(findings[0]["code"], "missing");
         assert_eq!(findings[0]["orbital"], "Files");
         assert_eq!(findings[0]["call"], "os/read-file");
         assert_eq!(findings[0]["grant"], "fs: { \"/etc/passwd\": [read] }");
-        assert_eq!(findings[1]["code"], "unused");
+        let finished = os_grants_of(os_grants_program(grants.clone(), serde_json::json!(["os/read-file", "/etc/passwd"])), Some(serde_json::json!({ "final": true }))).expect("answers");
+        assert!(finished["findings"].as_array().expect("a list").iter().any(|f| f["code"] == "unused"), "the final pass reports the unused grant: {finished}");
         let covered = os_grants_of(os_grants_program(grants, serde_json::json!(["os/read-file", "/data/a"])), None).expect("answers");
         assert_eq!(covered, serde_json::json!({ "findings": [] }));
     }
@@ -2523,7 +2524,7 @@ orbital O {
         let mut fed = os_grants_program(serde_json::json!({ "exec": ["ls"] }), serde_json::json!(["os/spawn", "@config.cmd", []]));
         fed["orbitals"][0]["traits"][0]["config"] = serde_json::json!({ "cmd": { "type": "string", "default": "git" } });
         let written = os_grants_of(fed.clone(), None).expect("answers");
-        assert_eq!(written["findings"][0]["code"], "unused", "control: the written pass defers a config target: {written}");
+        assert_eq!(written, serde_json::json!({ "findings": [] }), "control: the written pass defers a config target and reports no unused: {written}");
         let finished = os_grants_of(fed, Some(serde_json::json!({ "final": true }))).expect("answers");
         assert_eq!(finished["findings"][0]["code"], "missing");
         assert_eq!(finished["findings"][0]["via"], "config");
