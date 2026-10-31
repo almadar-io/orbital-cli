@@ -841,9 +841,11 @@ fn run_cascade(path: &Path, steps: &serde_json::Value, live: bool) -> anyhow::Re
     let credentials = StepCredentials::new();
     play_steps(kernel, &clock, &credentials, &defs, steps, live, &mut |trait_name, event, payload, settle_ms| match &live_host {
         Some((host, _files)) => {
+            host.tap_completions();
             let played = host.dispatch(trait_name, orbital_core::RUNTIME_SINGLETON, event, payload).map_err(|e| e.to_string());
             settle_open_calls(host, settle_ms);
-            played
+            let completions = host.take_completions();
+            played.and_then(|dispatched| orbital_core::step_replay::with_completions(dispatched, completions))
         }
         None => replay_dispatch(kernel, &credentials, trait_name, event, payload),
     })
@@ -1756,6 +1758,20 @@ impl ProgramHost {
                 )))
             }
         };
+        let render_props = match options.map(to_json).as_ref().and_then(|o| o.get("renderProps")) {
+            None | Some(serde_json::Value::Null) => false,
+            Some(serde_json::Value::Bool(b)) => *b,
+            Some(other) => {
+                return Err(failure(format!(
+                    "{op}: options.renderProps must be a boolean, not {other}"
+                )))
+            }
+        };
+        if render_props && !render {
+            return Err(failure(format!(
+                "{op}: options.renderProps adds props to the render facts, so it needs options.render: true"
+            )));
+        }
         let renderer = if render {
             let schema = resolve_program(&path)
                 .map_err(|e| failure(format!("{op}: {e}")))?;
@@ -1780,6 +1796,7 @@ impl ProgramHost {
                     &step.event,
                     step.payload.clone(),
                     target,
+                    render_props,
                     |s, _| orbital_core::client::render_probe::probe_kernel(s),
                 )
                 .map_err(|e| failure(format!("{op}: render: {e}")))?;
@@ -3361,6 +3378,37 @@ orbital O {
     }
 
     #[test]
+    fn step_refuses_render_props_that_is_not_a_boolean_or_has_no_render_facts_to_extend() {
+        let host = ProgramHost;
+        let program = from_json(serde_json::json!({ "name": "CounterApp", "orbitals": [{ "name": "Counting",
+            "entity": { "name": "Counter", "persistence": "runtime", "fields": [{ "name": "id", "type": "string" }] },
+            "pages": [],
+            "traits": [{ "name": "Count", "linkedEntity": "Counter", "stateMachine": {
+                "states": [{ "name": "ready", "isInitial": true }],
+                "transitions": [{ "from": "ready", "to": "ready", "event": "INC", "effects": [] }] } }] }] }))
+        .unwrap();
+        let requests = from_json(serde_json::json!([
+            { "orbital": "Counting", "trait": "Count", "from": "ready", "event": "INC", "payload": {} }
+        ]))
+        .unwrap();
+        let run = |options: serde_json::Value| {
+            host.run("program/step", &[program.clone(), requests.clone(), from_json(options).unwrap()])
+        };
+        assert!(run(serde_json::json!({ "renderProps": "yes", "render": true }))
+            .unwrap_err()
+            .message
+            .contains("options.renderProps must be a boolean"));
+        assert!(run(serde_json::json!({ "renderProps": true }))
+            .unwrap_err()
+            .message
+            .contains("needs options.render: true"));
+        assert!(
+            run(serde_json::json!({ "renderProps": false })).is_ok(),
+            "control: renderProps false asks nothing extra"
+        );
+    }
+
+    #[test]
     fn step_seeds_the_entity_and_pins_now_for_that_request_only() {
         let host = ProgramHost;
         let program = from_json(serde_json::json!({ "name": "GateApp", "orbitals": [{ "name": "Gating",
@@ -3883,6 +3931,55 @@ orbital O {
             "{}",
             bad.message
         );
+    }
+
+    fn read_file_program(path: &str) -> Value {
+        from_json(serde_json::json!({ "name": "LiveRead",
+            "osGrants": { "fs": [{ "glob": path, "modes": ["read"] }], "exec": [], "net": [], "env": [], "stdio": [], "sys": [], "desktop": [] },
+            "orbitals": [{ "name": "Live",
+            "entity": { "name": "L", "persistence": "runtime", "fields": [{ "name": "id", "type": "string" }] },
+            "pages": [],
+            "traits": [{ "name": "T", "linkedEntity": "L", "stateMachine": {
+                "states": [{ "name": "idle", "isInitial": true }, { "name": "asking" }, { "name": "got" }, { "name": "failed" }],
+                "transitions": [
+                    { "from": "idle", "to": "asking", "event": "ASK", "effects": [
+                        ["os/read-file", path, { "key": "r", "emit": { "success": "GOT", "failure": "NOGO" } }]] },
+                    { "from": "asking", "to": "got", "event": "GOT" },
+                    { "from": "asking", "to": "failed", "event": "NOGO" }
+                ] } }] }] }))
+        .unwrap()
+    }
+
+    fn live_read(path: &str, options: serde_json::Value) -> serde_json::Value {
+        let requests = from_json(serde_json::json!([{ "orbital": "Live", "trait": "T", "from": "idle", "event": "ASK", "payload": {} }])).unwrap();
+        json(
+            &ProgramHost
+                .run("program/step", &[read_file_program(path), requests, from_json(options).unwrap()])
+                .expect("steps"),
+        )
+    }
+
+    #[test]
+    fn step_live_read_file_delivers_the_success_route() {
+        let dir = std::env::temp_dir().join(format!("almadar-live-read-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a.txt");
+        std::fs::write(&file, "hello").unwrap();
+        let path = file.display().to_string();
+        let live = live_read(&path, serde_json::json!({ "live": true }));
+        let events: Vec<&str> = live[0]["result"]["outcomes"].as_array().into_iter().flatten().filter_map(|o| o["event"].as_str()).collect();
+        assert_eq!(events, vec!["ASK", "GOT"], "{}", live[0]);
+        assert_eq!(live[0]["result"]["outcomes"][1]["to"], "got", "{}", live[0]);
+        assert_eq!(live[0]["result"]["outcomes"][0]["effects"][0]["status"], "executed", "{}", live[0]);
+        let replay = live_read(&path, serde_json::json!({}));
+        assert_eq!(replay[0]["result"]["state"]["after"], "asking", "control: without live the ask stays pending");
+        let missing = dir.join("missing.txt").display().to_string();
+        let miss = live_read(&missing, serde_json::json!({ "live": true }));
+        let events: Vec<&str> = miss[0]["result"]["outcomes"].as_array().into_iter().flatten().filter_map(|o| o["event"].as_str()).collect();
+        assert_eq!(events, vec!["ASK", "NOGO"], "control: a missing file delivers the failure route: {}", miss[0]);
+        assert_eq!(miss[0]["result"]["outcomes"][1]["to"], "failed", "{}", miss[0]);
+        let effect = &miss[0]["result"]["outcomes"][0]["effects"][0];
+        assert_eq!((effect["status"].as_str(), effect["routed"].as_bool()), (Some("failed"), Some(true)), "the failure was delivered to its route: {}", miss[0]);
     }
 
     #[test]

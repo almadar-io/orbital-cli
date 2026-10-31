@@ -112,7 +112,7 @@ const WELL_FORMED_PERSIST: &str = r#"{
                 "from": "browsing",
                 "to": "saving",
                 "effects": [
-                  ["persist", "create", "Note", { "emit": { "failure": "SAVE_FAILED", "success": "SAVED" }, "fields": { "body": "@payload.body" } }]
+                  ["persist", "create", "Note", { "body": "@payload.body" }, { "emit": { "failure": "SAVE_FAILED", "success": "SAVED" } }]
                 ]
               },
               { "event": "SAVED", "from": "saving", "to": "browsing" },

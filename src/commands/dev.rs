@@ -273,16 +273,8 @@ fn cached_resolve(
     build: impl FnOnce() -> anyhow::Result<ResolvedProgram>,
 ) -> anyhow::Result<ResolvedProgram> {
     let entry = cache.join(format!("{stem}-{key}"));
-    if entry.join("program.orb").is_file() {
-        let reads: orbital_core::read_set::ReadSet = serde_json::from_slice(&std::fs::read(entry.join(READS_FILE))?)?;
-        if reads.is_current() {
-            reads.replay();
-            let program = ResolvedProgram { dir: scratch_dir_in(parent, "orbital-cmd-")? };
-            copy_tree(&entry, program.dir.path())?;
-            tracing::debug!(target: "almadar:cli:resolve-cache", stem, outcome = "disk-hit", "command cache");
-            return Ok(program);
-        }
-        tracing::debug!(target: "almadar:cli:resolve-cache", stem, outcome = "disk-stale", "command cache");
+    if let Some(program) = cached_entry(&entry, parent, stem)? {
+        return Ok(program);
     }
     orbital_core::read_set::begin();
     let built = build();
@@ -299,7 +291,10 @@ fn cached_resolve(
     let staged = staging.keep();
     if entry.exists() {
         let retired = tempfile::Builder::new().prefix(&format!("{stem}-{key}.")).suffix(".old").tempdir_in(cache)?.keep();
-        std::fs::rename(&entry, retired.join("entry"))?;
+        match std::fs::rename(&entry, retired.join("entry")) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+            _ => {}
+        }
         let _ = std::fs::remove_dir_all(&retired);
     }
     if std::fs::rename(&staged, &entry).is_err() {
@@ -308,13 +303,42 @@ fn cached_resolve(
     tracing::debug!(target: "almadar:cli:resolve-cache", stem, outcome = "disk-miss", reads = reads.paths().count(), "command cache");
     for old in std::fs::read_dir(cache)?.flatten() {
         let name = old.file_name().to_string_lossy().into_owned();
-        let stale = !name.contains('.')
-            && name.rsplit_once('-').is_some_and(|(s, k)| s == stem && k != key);
+        let stale = (!name.contains('.') && name.rsplit_once('-').is_some_and(|(s, k)| s == stem && k != key))
+            || (name.starts_with(&format!("{stem}-")) && name.ends_with(".old"));
         if stale {
             let _ = std::fs::remove_dir_all(old.path());
         }
     }
     Ok(program)
+}
+
+/// The entry at `entry` copied to a fresh run-owned directory under `parent` while every file its resolution read is as
+/// it was read; `None` when there is no entry, it is stale, or another run replaced it while this one read it.
+fn cached_entry(entry: &Path, parent: &Path, stem: &str) -> anyhow::Result<Option<ResolvedProgram>> {
+    let vanished = |e: &std::io::Error| e.kind() == std::io::ErrorKind::NotFound;
+    let raw = match std::fs::read(entry.join(READS_FILE)) {
+        Ok(raw) => raw,
+        Err(e) if vanished(&e) => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    let reads: orbital_core::read_set::ReadSet = serde_json::from_slice(&raw)?;
+    if !reads.is_current() {
+        tracing::debug!(target: "almadar:cli:resolve-cache", stem, outcome = "disk-stale", "command cache");
+        return Ok(None);
+    }
+    let program = ResolvedProgram { dir: scratch_dir_in(parent, "orbital-cmd-")? };
+    match copy_tree(entry, program.dir.path()) {
+        Ok(()) if program.path().is_file() => {}
+        Ok(()) => return Ok(None),
+        Err(e) if vanished(&e) => {
+            tracing::debug!(target: "almadar:cli:resolve-cache", stem, outcome = "disk-replaced", "command cache");
+            return Ok(None);
+        }
+        Err(e) => return Err(e.into()),
+    }
+    reads.replay();
+    tracing::debug!(target: "almadar:cli:resolve-cache", stem, outcome = "disk-hit", "command cache");
+    Ok(Some(program))
 }
 
 /// The files a cache entry's resolution read, beside the resolved program.
@@ -446,6 +470,55 @@ mod tests {
         assert_eq!(std::fs::read_to_string(run().path()).unwrap(), "two");
         assert_eq!(calls.get(), 2, "the rebuilt entry is current again");
         assert_eq!(entries(cache.path()), vec!["p-k1".to_string()], "one entry, nothing left from the swap");
+        std::fs::create_dir_all(cache.path().join("p-k1.abc.old/entry")).unwrap();
+        std::fs::create_dir_all(cache.path().join("p-k1.def.tmp")).unwrap();
+        std::fs::write(&dep, "three").unwrap();
+        run();
+        assert_eq!(entries(cache.path()), vec!["p-k1".to_string(), "p-k1.def.tmp".to_string()], "a retired entry left by a killed run goes; another run's staging stays");
+    }
+
+    #[test]
+    fn an_entry_another_run_replaced_while_this_one_read_it_is_a_miss_not_a_failure() {
+        let cache = tempfile::tempdir().unwrap();
+        let work = tempfile::tempdir().unwrap();
+        let calls = Cell::new(0);
+        cached_resolve(cache.path(), work.path(), "p", "k1", || built(work.path(), &calls, "A")).unwrap();
+        let entry = cache.path().join("p-k1");
+        std::fs::remove_file(entry.join(READS_FILE)).unwrap();
+        let out = cached_resolve(cache.path(), work.path(), "p", "k1", || built(work.path(), &calls, "B")).unwrap();
+        assert_eq!(calls.get(), 2);
+        assert_eq!(std::fs::read_to_string(out.path()).unwrap(), "B");
+        std::fs::remove_file(cache.path().join("p-k1/program.orb")).unwrap();
+        let again = cached_resolve(cache.path(), work.path(), "p", "k1", || built(work.path(), &calls, "C")).unwrap();
+        assert_eq!((calls.get(), std::fs::read_to_string(again.path()).unwrap()), (3, "C".to_string()));
+        let hit = cached_resolve(cache.path(), work.path(), "p", "k1", || built(work.path(), &calls, "D")).unwrap();
+        assert_eq!((calls.get(), std::fs::read_to_string(hit.path()).unwrap()), (3, "C".to_string()), "control: a whole entry hits");
+    }
+
+    #[test]
+    fn runs_rebuilding_one_stale_entry_at_once_each_answer_their_program() {
+        let cache = tempfile::tempdir().unwrap();
+        let work = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        let dep = src.path().join("dep.lolo");
+        std::fs::write(&dep, "one").unwrap();
+        let calls = Cell::new(0);
+        cached_resolve(cache.path(), work.path(), "p", "k1", || built_reading(work.path(), &calls, &dep)).unwrap();
+        std::fs::write(&dep, "two").unwrap();
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let (cache, work, dep) = (cache.path().to_path_buf(), work.path().to_path_buf(), dep.clone());
+                std::thread::spawn(move || {
+                    let calls = Cell::new(0);
+                    let program = cached_resolve(&cache, &work, "p", "k1", || built_reading(&work, &calls, &dep)).unwrap();
+                    std::fs::read_to_string(program.path()).unwrap()
+                })
+            })
+            .collect();
+        for handle in handles {
+            assert_eq!(handle.join().unwrap(), "two");
+        }
+        assert_eq!(entries(cache.path()), vec!["p-k1".to_string()], "one entry is left");
     }
 
     #[test]
