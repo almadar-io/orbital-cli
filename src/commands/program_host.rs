@@ -397,8 +397,9 @@ pub(crate) fn resolved_value(path: &Path) -> anyhow::Result<Value> {
 }
 
 /// The program at `path` as it reads before resolution, and every trait and orbital reference its resolution resolves,
-/// each paired with the upstream declaration it resolved to (`program/read { references: true }`).
-fn referenced_program(path: &Path) -> anyhow::Result<(Value, Vec<orbital_compiler::phases::inline::ReferencePair>)> {
+/// each naming the upstream declaration it resolved to inside its imported file's orbitals, held once per file
+/// (`program/read { references: true }`).
+fn referenced_program(path: &Path) -> anyhow::Result<(Value, orbital_compiler::phases::inline::ReferenceAnswer)> {
     let mut options = orbital_compiler::CompilerOptions::from_env();
     let session = orbital_compiler::phases::inline::InlineSession::default();
     session.collect_references();
@@ -409,7 +410,9 @@ fn referenced_program(path: &Path) -> anyhow::Result<(Value, Vec<orbital_compile
     orbital_compiler::phases::lazy::split_lazy_and_resolve(&mut schema, &options, Some(path)).map_err(failed)?;
     session.take_references();
     orbital_compiler::resolve_schema_with_path(schema, &options, Some(path)).map_err(failed)?;
-    Ok((unresolved, session.take_references()))
+    let root = path.parent().ok_or_else(|| anyhow::anyhow!("{} has no directory", path.display()))?;
+    let root = std::fs::canonicalize(root).map_err(|e| anyhow::anyhow!("Failed to read {}: {}", root.display(), e))?;
+    Ok((unresolved, session.take_reference_answer(&root)))
 }
 
 /// What reading the program at `path` as resolved answers (`program/read { resolve }`).
@@ -1047,17 +1050,25 @@ impl ProgramHost {
         from_json(serde_json::json!({ "program": program, "text": text }))
     }
 
-    /// `program/read { references: true, path }`: `{ program, references }`, the program at the absolute `path` as it
-    /// reads before resolution and each trait or orbital reference it resolves through, as
-    /// `{ kind, alias, name, path, callSite, declaration }` (the reference as written, and the upstream declaration it resolved to).
+    /// `program/read { references: true, path }`: `{ program, files, references }`, the program at the absolute `path` as
+    /// it reads before resolution, each imported file's orbitals once under its key (the file's path relative to the
+    /// program's directory, `#2`, `#3`, ... for a file imported again under differing `config`), and each reference as
+    /// `{ kind, alias, name, path, callSite, declaration }`: the reference as written, and its declaration addressed as
+    /// `{ file, index }` (an orbital), `{ file, orbital, trait }` (a trait of that file's orbital) or, for a `uses`, the
+    /// import's app-level config.
     fn read_references(options: &serde_json::Value) -> Result<Value, SubstrateFailure> {
         let options = Options::of("program/read", options)?;
         options.only("references", &["references", "path"])?;
         let path = options.absolute("path", "references")?;
-        let (program, references) = referenced_program(&path)
+        let (program, answer) = referenced_program(&path)
             .map_err(|e| failure(format!("program/read: {e}")))?;
-        let references = orbital_core::value_serialize::to_value(&references).map_err(|e| failure(e.to_string()))?;
-        Ok(Value::object(orbital_core::ValueMap::from_iter([("program".into(), program), ("references".into(), references)])))
+        let files = orbital_core::value_serialize::to_value(&answer.files).map_err(|e| failure(e.to_string()))?;
+        let references = orbital_core::value_serialize::to_value(&answer.references).map_err(|e| failure(e.to_string()))?;
+        Ok(Value::object(orbital_core::ValueMap::from_iter([
+            ("program".into(), program),
+            ("files".into(), files),
+            ("references".into(), references),
+        ])))
     }
 
     /// `program/print { target, path, section?, format?, only?, map?, output?, inspectSource?, documentVersion?, unit?,
@@ -2294,12 +2305,14 @@ orbital O {
         assert_eq!(pair["name"], "Widget");
         assert_eq!(pair["path"], "orbitals[name=Composer].traits[0]");
         assert_eq!(pair["callSite"]["config"]["k"]["default"], 1);
-        assert_eq!(pair["declaration"]["name"], "Widget");
-        assert!(pair["declaration"].to_string().contains("@config.k"), "{}", pair["declaration"]);
+        assert_eq!(pair["declaration"], serde_json::json!({ "file": "atom.orb", "orbital": 0, "trait": 0 }), "{pair}");
+        let declared = &answer["files"]["atom.orb"]["orbitals"][0]["traits"][0];
+        assert_eq!(declared["name"], "Widget", "{answer}");
+        assert!(declared.to_string().contains("@config.k"), "{declared}");
     }
 
     #[test]
-    fn read_with_references_equals_the_json_construction_for_two_references_to_one_import() {
+    fn read_with_references_answers_one_import_once_for_two_references_to_it() {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(dir.path().join("atom.orb"), REFERENCED_ATOM).unwrap();
         let consumer = r#"{ "name": "consumer", "version": "1.0.0", "orbitals": [ { "name": "Composer",
@@ -2309,12 +2322,28 @@ orbital O {
         let file = dir.path().join("consumer.orb");
         std::fs::write(&file, consumer).unwrap();
         let options = from_json(serde_json::json!({ "references": true, "path": file.display().to_string() })).unwrap();
-        let answer = ProgramHost.run("program/read", &[Value::String(String::new().into()), options]).expect("answers");
-        let (_, references) = referenced_program(&file).expect("references");
-        let program = orbital_core::util::canonical_json(&serde_json::to_value(parsed(&file).unwrap()).unwrap());
-        let previous = from_json(serde_json::json!({ "program": program, "references": serde_json::to_value(references).unwrap() })).unwrap();
-        assert_eq!(answer, previous);
-        assert_eq!(json(&answer)["references"].as_array().unwrap().len(), 3);
+        let answer = json(&ProgramHost.run("program/read", &[Value::String(String::new().into()), options]).expect("answers"));
+        let references = answer["references"].as_array().expect("a list");
+        assert_eq!(references.len(), 3, "{answer}");
+        let files = answer["files"].as_object().expect("a map");
+        assert_eq!(files.keys().collect::<Vec<_>>(), ["atom.orb"], "one entry for the one import: {answer}");
+        assert_eq!(files["atom.orb"]["orbitals"].as_array().expect("orbitals").len(), 1);
+        assert_eq!(answer["files"].to_string().matches("\"stateMachine\"").count(), 1, "the declaration is serialized once: {answer}");
+        let traits: Vec<_> = references.iter().filter(|r| r["kind"] == "trait").collect();
+        assert_eq!(traits.len(), 2);
+        assert_eq!(traits[0]["declaration"], traits[1]["declaration"], "both name the same declaration");
+        assert!(references.iter().all(|r| r.get("aliasOrbitals").is_none()), "{answer}");
+    }
+
+    #[test]
+    fn read_with_references_answers_no_files_for_a_program_with_no_uses() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("atom.orb");
+        std::fs::write(&file, REFERENCED_ATOM).unwrap();
+        let options = from_json(serde_json::json!({ "references": true, "path": file.display().to_string() })).unwrap();
+        let answer = json(&ProgramHost.run("program/read", &[Value::String(String::new().into()), options]).expect("answers"));
+        assert_eq!(answer["files"], serde_json::json!({}), "{answer}");
+        assert_eq!(answer["references"], serde_json::json!([]), "{answer}");
     }
 
     #[test]
@@ -2333,11 +2362,13 @@ orbital O {
         let answer = json(&ProgramHost.run("program/read", &[Value::String(String::new().into()), options]).expect("answers"));
         let references = answer["references"].as_array().expect("a list");
         let orbital = references.iter().find(|r| r["kind"] == "orbital").expect("the orbital reference");
-        assert_eq!(orbital["declaration"]["name"], "MainOrbital", "{orbital}");
-        let siblings = orbital["aliasOrbitals"].as_array().expect("the other orbitals of the import");
-        assert_eq!(siblings.len(), 1, "{orbital}");
-        assert_eq!(siblings[0]["name"], "OtherOrbital");
-        assert_eq!(siblings[0]["entity"]["name"], "Other");
+        assert_eq!(orbital["declaration"], serde_json::json!({ "file": "up.orb", "index": 0 }), "{orbital}");
+        assert!(orbital.get("aliasOrbitals").is_none(), "{orbital}");
+        let declared = answer["files"]["up.orb"]["orbitals"].as_array().expect("the orbitals of the import");
+        assert_eq!(declared[0]["name"], "MainOrbital", "{answer}");
+        assert_eq!(declared.len(), 2, "{answer}");
+        assert_eq!(declared[1]["name"], "OtherOrbital");
+        assert_eq!(declared[1]["entity"]["name"], "Other");
         let uses = references.iter().find(|r| r["kind"] == "uses").expect("the uses import");
         assert_eq!(uses["callSite"]["config"]["title"]["default"], "x", "{uses}");
         assert!(uses["declaration"]["title"].is_object(), "the import's declared app-level knob: {uses}");

@@ -106,7 +106,7 @@ enum Commands {
 /// The loader's `.lolo` lowerer: a relative import of a `.lolo`-only sibling.
 fn lower_lolo_file(path: &std::path::Path) -> Result<orbital_core::schema::OrbitalSchema, String> {
     let _span = tracing::debug_span!(target: orbital_core::logging::ns::CLI, "lower import", file = %path.display()).entered();
-    let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let content = orbital_core::read_set::read_to_string(path).map_err(|e| e.to_string())?;
     crate::utils::parse_schema_auto_typed(&content, &path.to_string_lossy())
         .map_err(|e| e.describe())
 }

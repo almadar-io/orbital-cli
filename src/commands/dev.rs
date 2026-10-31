@@ -51,14 +51,58 @@ fn resolve_schema_into(parent: &Path, schema: orbital_core::OrbitalSchema, path:
     Ok(program)
 }
 
+/// A program resolved once, with every file its resolution read.
+pub(crate) struct ResolvedEntry {
+    schema: orbital_core::OrbitalSchema,
+    lazy: Vec<orbital_compiler::phases::lazy::ResolvedLazy>,
+    reads: orbital_core::read_set::ReadSet,
+    program: String,
+}
+
+type ResolvedKey = (PathBuf, String);
+
+static RESOLVED: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<ResolvedKey, std::sync::Arc<ResolvedEntry>>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// The program resolved once per path and compiler settings in this process, reused while the parsed program hashes the
+/// same and every file the resolution read is as it was read; a changed program replaces its path's entry.
+pub(crate) fn resolved_entry(schema: orbital_core::OrbitalSchema, path: &Path) -> anyhow::Result<std::sync::Arc<ResolvedEntry>> {
+    use sha2::{Digest, Sha256};
+    let options = orbital_compiler::CompilerOptions::from_env();
+    let value = serde_json::to_value(&schema).map_err(|e| anyhow::anyhow!("serialize {}: {e}", path.display()))?;
+    let program = format!("{:x}", Sha256::digest(serde_json::to_string(&orbital_core::util::canonical_json(&value))?.as_bytes()));
+    let mut hasher = Sha256::new();
+    for (label, bytes) in [
+        ("packages", format!("{:?}", options.inline.loader_config.packages).into_bytes()),
+        ("scopes", format!("{:?}", options.inline.loader_config.scoped_paths).into_bytes()),
+        ("nominalize", vec![u8::from(options.nominalize)]),
+    ] {
+        hasher.update(label.as_bytes());
+        hasher.update((bytes.len() as u64).to_le_bytes());
+        hasher.update(&bytes);
+    }
+    let key = (path.to_path_buf(), hasher.finalize().iter().map(|b| format!("{b:02x}")).collect::<String>());
+    let mut resolved = RESOLVED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(entry) = resolved.get(&key).filter(|entry| entry.program == program && entry.reads.is_current()) {
+        entry.reads.replay();
+        return Ok(std::sync::Arc::clone(entry));
+    }
+    orbital_core::read_set::begin();
+    let done = orbital_compiler::phases::lazy::resolve_program_with_path(schema, &options, Some(path));
+    let reads = orbital_core::read_set::end();
+    let (schema, lazy) = done.map_err(|e| anyhow::anyhow!("resolve {}: {e}", path.display()))?;
+    let entry = std::sync::Arc::new(ResolvedEntry { schema, lazy, reads, program });
+    resolved.insert(key, std::sync::Arc::clone(&entry));
+    Ok(entry)
+}
+
 /// The resolved program and its lazy behaviors, never written: for a reader that takes the program as data.
 pub(crate) fn resolve_in_memory(
     schema: orbital_core::OrbitalSchema,
     path: &Path,
 ) -> anyhow::Result<(orbital_core::OrbitalSchema, Vec<orbital_compiler::phases::lazy::ResolvedLazy>)> {
-    let options = orbital_compiler::CompilerOptions::from_env();
-    orbital_compiler::phases::lazy::resolve_program_with_path(schema, &options, Some(path))
-        .map_err(|e| anyhow::anyhow!("resolve {}: {e}", path.display()))
+    let entry = resolved_entry(schema, path)?;
+    Ok((entry.schema.clone(), entry.lazy.clone()))
 }
 
 /// [`resolve_to_temp`] for a command program: one std ships is resolved once per state of what it depends on and
@@ -193,23 +237,11 @@ fn tree_state(root: &Path) -> anyhow::Result<String> {
     files.sort();
     let mut state = String::new();
     for file in files {
-        let meta = std::fs::symlink_metadata(&file)?;
+        let stamp = orbital_core::read_set::stamp(&file).ok_or_else(|| anyhow::anyhow!("{} vanished while its tree was read", file.display()))?;
         let rel = file.strip_prefix(root).unwrap_or(&file).to_string_lossy();
-        state.push_str(&format!("{rel}\t{}\n", file_stamp(&meta)));
+        state.push_str(&format!("{rel}\t{stamp}\n"));
     }
     Ok(state)
-}
-
-#[cfg(unix)]
-fn file_stamp(meta: &std::fs::Metadata) -> String {
-    use std::os::unix::fs::MetadataExt;
-    format!("{} {}.{} {}.{} {}", meta.size(), meta.mtime(), meta.mtime_nsec(), meta.ctime(), meta.ctime_nsec(), meta.ino())
-}
-
-#[cfg(windows)]
-fn file_stamp(meta: &std::fs::Metadata) -> String {
-    use std::os::windows::fs::MetadataExt;
-    format!("{} {} {}", meta.file_size(), meta.last_write_time(), meta.creation_time())
 }
 
 fn program_stem(path: &Path) -> String {
@@ -407,6 +439,66 @@ mod tests {
         let path = dir.join(format!("{name}.orb"));
         std::fs::write(&path, format!(r#"{{"name":"{name}","version":"1.0.0","orbitals":[]}}"#)).unwrap();
         path
+    }
+
+    const POST: &str = r#"{"name":"Post","version":"1.0.0","orbitals":[{"name":"Post","entity":{"name":"PostState","persistence":"runtime","fields":[{"name":"id","type":"string","required":true}]},"traits":[],"pages":[]}]}"#;
+    const SITE: &str = r#"{"name":"site","version":"1.0.0","orbitals":[{"name":"Home","uses":[{"from":"./post.orb","as":"Why"}],"entity":{"name":"HomeState","persistence":"runtime","fields":[{"name":"id","type":"string","required":true}]},"traits":[],"pages":[]}]}"#;
+
+    fn resolve_file(path: &Path) -> std::sync::Arc<ResolvedEntry> {
+        resolved_entry(orbital_compiler::parse_file(path).unwrap(), path).unwrap()
+    }
+
+    #[test]
+    fn a_second_resolve_of_an_unchanged_program_reuses_the_first() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("post.orb"), POST).unwrap();
+        let path = dir.path().join("site.orb");
+        std::fs::write(&path, SITE).unwrap();
+        let first = resolve_file(&path);
+        assert!(std::sync::Arc::ptr_eq(&first, &resolve_file(&path)));
+        assert!(first.reads.paths().any(|f| f.ends_with("post.orb")));
+    }
+
+    #[test]
+    fn a_changed_direct_import_or_program_resolves_again() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("post.orb"), POST).unwrap();
+        let path = dir.path().join("site.orb");
+        std::fs::write(&path, SITE).unwrap();
+        let first = resolve_file(&path);
+        std::fs::write(dir.path().join("post.orb"), POST.replace("PostState", "PostStateRenamed")).unwrap();
+        let after_import = resolve_file(&path);
+        assert!(!std::sync::Arc::ptr_eq(&first, &after_import));
+        std::fs::write(&path, SITE.replace("HomeState", "HomeStateRenamed")).unwrap();
+        assert!(!std::sync::Arc::ptr_eq(&after_import, &resolve_file(&path)));
+    }
+
+    #[test]
+    fn a_program_edited_many_times_keeps_one_entry_for_its_path() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("post.orb"), POST).unwrap();
+        let path = dir.path().join("site.orb");
+        let held = |path: &Path| RESOLVED.lock().unwrap().keys().filter(|(p, _)| p == path).count();
+        for n in 0..4 {
+            std::fs::write(&path, SITE.replace("HomeState", &format!("HomeState{n}"))).unwrap();
+            resolve_file(&path);
+            assert_eq!(held(&path), 1, "edit {n}");
+        }
+    }
+
+    #[test]
+    fn a_changed_import_two_levels_down_resolves_again() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("post.orb"), POST).unwrap();
+        let mid = SITE.replace("\"Home\"", "\"Mid\"").replace("HomeState", "MidState").replace("\"name\":\"site\"", "\"name\":\"mid\"");
+        std::fs::write(dir.path().join("mid.orb"), mid).unwrap();
+        let path = dir.path().join("site.orb");
+        std::fs::write(&path, SITE.replace("./post.orb", "./mid.orb")).unwrap();
+        let first = resolve_file(&path);
+        assert!(first.reads.paths().any(|f| f.ends_with("post.orb")), "the nested import is in the read set");
+        assert!(std::sync::Arc::ptr_eq(&first, &resolve_file(&path)), "control: nothing changed");
+        std::fs::write(dir.path().join("post.orb"), POST.replace("PostState", "PostStateRenamed")).unwrap();
+        assert!(!std::sync::Arc::ptr_eq(&first, &resolve_file(&path)));
     }
 
     #[test]
