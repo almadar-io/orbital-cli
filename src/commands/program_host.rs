@@ -801,6 +801,14 @@ fn resolve_parsed(schema: orbital_core::OrbitalSchema, path: &Path) -> anyhow::R
     Ok(resolved)
 }
 
+/// The program at `path` resolved with each step's `config` knob values written over its trait's defaults, as
+/// [`run_cascade`] runs it.
+fn resolve_with_step_config(path: &Path, steps: &[serde_json::Value]) -> anyhow::Result<orbital_core::OrbitalSchema> {
+    let text = std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("Failed to read {}: {e}", path.display()))?;
+    let text = orbital_core::step_replay::with_step_config(&text, steps).map_err(|e| anyhow::anyhow!(e))?.unwrap_or(text);
+    resolve_parsed(parsed_text(&text, path)?, path)
+}
+
 /// Replays `steps` on the program at `path` (`orb execute --steps`); `live` answers their os/* and http asks on the
 /// native program host instead of leaving keyed ones pending (G-ORB-459).
 fn run_cascade(path: &Path, steps: &serde_json::Value, live: bool) -> anyhow::Result<serde_json::Value> {
@@ -1677,11 +1685,16 @@ impl ProgramHost {
                     "{op}: a request's entity must be an object of fields"
                 )));
             }
-            if r.get("viewer")
+            if r.get("viewer").is_some_and(|v| !v.is_null()) {
+                return Err(failure(format!(
+                    "{op}: a request's viewer is retired; a step names `identity`, the session's bound identity"
+                )));
+            }
+            if r.get("identity")
                 .is_some_and(|v| !v.is_object() && !v.is_null())
             {
                 return Err(failure(format!(
-                    "{op}: a request's viewer must be a user object or null"
+                    "{op}: a request's identity must be an identity object or null"
                 )));
             }
             if r.get("settleMs").is_some_and(|n| !n.is_number()) {
@@ -1712,7 +1725,7 @@ impl ProgramHost {
                 if let Some(from) = r.get("from") {
                     step["from"] = from.clone();
                 }
-                for key in ["entity", "config", "now", "settleMs", "viewer", "credentials"] {
+                for key in ["entity", "config", "now", "settleMs", "identity", "credentials"] {
                     if let Some(v) = r.get(key) {
                         step[key] = v.clone();
                     }
@@ -1733,7 +1746,7 @@ impl ProgramHost {
         };
         let report = run_cascade(
             &path,
-            &serde_json::Value::Array(steps),
+            &serde_json::Value::Array(steps.clone()),
             live,
         )
         .map_err(|e| failure(format!("{op}: {e}")))?;
@@ -1773,7 +1786,7 @@ impl ProgramHost {
             )));
         }
         let renderer = if render {
-            let schema = resolve_program(&path)
+            let schema = resolve_with_step_config(&path, &steps)
                 .map_err(|e| failure(format!("{op}: {e}")))?;
             let target = crate::utils::desktop::target()
                 .map_err(|e| failure(format!("{op}: options.render: {e}")))?;
@@ -1793,6 +1806,8 @@ impl ProgramHost {
                 let slots = orbital_core::client::render_probe::played_render_facts(
                     schema,
                     &step.trait_name,
+                    &step.from,
+                    step.seeds.entity.as_ref(),
                     &step.event,
                     step.payload.clone(),
                     target,
@@ -3379,6 +3394,29 @@ orbital O {
     }
 
     #[test]
+    fn the_render_probe_resolves_the_program_with_the_steps_config_knobs() {
+        let scratch = Scratch::new("almadar-step-config").unwrap();
+        let program = serde_json::json!({ "name": "KnobApp", "typeContractVersion": 1, "orbitals": [{ "name": "Knobs",
+            "entity": { "name": "Box", "persistence": "runtime", "fields": [{ "name": "id", "type": "string" }, { "name": "n", "type": "number", "default": 0 }] },
+            "pages": [],
+            "traits": [{ "name": "K", "linkedEntity": "Box", "config": { "limit": { "type": "number", "default": 1 } },
+                "stateMachine": { "states": [{ "name": "ready", "isInitial": true }],
+                    "transitions": [{ "from": "ready", "to": "ready", "event": "GO", "effects": [["set", "@entity.n", "@config.limit"]] }] } }] }] });
+        let path = scratch.write("program.orb", &program.to_string()).unwrap();
+        let effect = |steps: serde_json::Value| {
+            let schema = resolve_with_step_config(&path, steps.as_array().unwrap()).unwrap();
+            serde_json::to_value(&schema).unwrap()["orbitals"][0]["traits"][0]["stateMachine"]["transitions"][0]["effects"].to_string()
+        };
+        let seeded = effect(serde_json::json!([{ "trait": "K", "config": { "limit": 7 } }]));
+        let default = effect(serde_json::json!([{ "trait": "K" }]));
+        assert!(seeded.contains('7') && !default.contains('7'), "{seeded} vs {default}");
+        assert!(
+            resolve_with_step_config(&path, &[serde_json::json!({ "trait": "K", "config": { "nope": 1 } })]).is_err(),
+            "edge: an undeclared knob is refused"
+        );
+    }
+
+    #[test]
     fn step_refuses_render_props_that_is_not_a_boolean_or_has_no_render_facts_to_extend() {
         let host = ProgramHost;
         let program = from_json(serde_json::json!({ "name": "CounterApp", "orbitals": [{ "name": "Counting",
@@ -4079,7 +4117,7 @@ orbital O {
     }
 
     #[test]
-    fn step_dispatches_as_the_request_viewer() {
+    fn step_dispatches_with_the_request_identity_bound_to_the_replay_session() {
         let host = ProgramHost;
         let program = from_json(serde_json::json!({ "name": "SeeApp", "orbitals": [{ "name": "See",
             "entity": { "name": "V", "persistence": "runtime", "fields": [{ "name": "id", "type": "string" }] },
@@ -4091,10 +4129,10 @@ orbital O {
                     { "from": "idle", "to": "idle", "event": "MINE", "guard": ["=", "@user.id", "u1"] }
                 ] } }] }] }))
         .unwrap();
-        let req = |event: &str, viewer: Option<serde_json::Value>| {
+        let req = |event: &str, identity: Option<serde_json::Value>| {
             let mut r = serde_json::json!({ "orbital": "See", "trait": "T", "from": "idle", "event": event, "payload": {} });
-            if let Some(v) = viewer {
-                r["viewer"] = v;
+            if let Some(v) = identity {
+                r["identity"] = v;
             }
             r
         };
@@ -4118,27 +4156,25 @@ orbital O {
         );
         assert_eq!(
             played[0]["result"]["guard"], "pass",
-            "the viewer is @user: {}",
+            "the step identity is @user: {}",
             played[0]
         );
         assert_eq!(
             played[1]["result"]["guard"], "fail",
-            "control: without a viewer @user is nobody: {}",
+            "control: without an identity @user is the anonymous viewer: {}",
             played[1]
         );
         assert_eq!(played[2]["result"]["emitted"][0]["payload"]["id"], "u1");
-        assert!(
-            played[3]["result"]["emitted"][0]["payload"]
-                .get("id")
-                .is_none_or(serde_json::Value::is_null),
-            "control: a null viewer is nobody: {}",
+        assert_eq!(
+            played[3]["result"]["emitted"][0]["payload"]["id"], "anonymous",
+            "control: a null identity is the anonymous viewer: {}",
             played[3]
         );
         let bad = host
             .run(
                 "program/step",
                 &[
-                    program,
+                    program.clone(),
                     from_json(serde_json::json!([req(
                         "WHO",
                         Some(serde_json::json!("u1"))
@@ -4148,10 +4184,20 @@ orbital O {
             )
             .unwrap_err();
         assert!(
-            bad.message.contains("viewer must be a user object or null"),
+            bad.message.contains("identity must be an identity object or null"),
             "{}",
             bad.message
         );
+        let retired = host
+            .run(
+                "program/step",
+                &[
+                    program,
+                    from_json(serde_json::json!([{ "orbital": "See", "trait": "T", "from": "idle", "event": "WHO", "viewer": { "id": "u1" } }])).unwrap(),
+                ],
+            )
+            .unwrap_err();
+        assert!(retired.message.contains("`viewer` is retired") || retired.message.contains("viewer is retired"), "{}", retired.message);
     }
 
     #[test]
