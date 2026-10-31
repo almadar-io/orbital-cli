@@ -71,11 +71,12 @@ pub(crate) fn inspect(source: &str, options: &Value) -> Result<Value, SubstrateF
         {
             let text =
                 std::fs::read_to_string(&loaded.source_path).map_err(|e| failure(e.to_string()))?;
-            let (mapped_schema, map) = orbital_lolo::parse_and_lower_str_with_map(
+            let (mut mapped_schema, map) = orbital_lolo::parse_and_lower_str_with_map(
                 &text,
                 &loaded.source_path.to_string_lossy(),
             )
             .map_err(|e| failure(e.render_with_hint()))?;
+            orbital_compiler::loader::anchor_relative_uses(&mut mapped_schema, &loaded.source_path);
             if serde_json::to_value(&mapped_schema).map_err(|e| failure(e.to_string()))?
                 != serde_json::to_value(&loaded.schema).map_err(|e| failure(e.to_string()))?
             {

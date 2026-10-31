@@ -40,23 +40,37 @@ pub(crate) fn resolve_schema_to_temp(schema: orbital_core::OrbitalSchema, path: 
     resolve_schema_into(&std::env::temp_dir(), schema, path)
 }
 
+/// A resolution written to disk is kept there (a command's derived cache, the caller's own files), never also held in
+/// this process's resolve cache for the rest of the run.
 fn resolve_schema_into(parent: &Path, schema: orbital_core::OrbitalSchema, path: &Path) -> anyhow::Result<ResolvedProgram> {
-    let (resolved, lazy) = resolve_in_memory(schema, path)?;
+    let options = orbital_compiler::CompilerOptions::from_env();
+    let (resolved, lazy) = orbital_compiler::phases::lazy::resolve_program_with_path(schema, &options, Some(path))
+        .map_err(|e| anyhow::anyhow!("resolve {}: {e}", path.display()))?;
+    let (resolved, lazy) = (&resolved, &lazy);
     let program = ResolvedProgram { dir: scratch_dir_in(parent, "orbital-dev-")? };
     let out = program.path();
-    std::fs::write(&out, serde_json::to_string(&resolved)?)?;
+    std::fs::write(&out, serde_json::to_string(resolved)?)?;
     let program_dir = path.parent().unwrap_or(Path::new("."));
-    orbital_compiler::phases::messages::write_catalogs(&out, &resolved, program_dir)?;
-    orbital_compiler::phases::lazy::write_resolved_lazy(program.dir.path(), &lazy, program_dir)?;
+    orbital_compiler::phases::messages::write_catalogs(&out, resolved, program_dir)?;
+    orbital_compiler::phases::lazy::write_resolved_lazy(program.dir.path(), lazy, program_dir)?;
     Ok(program)
 }
 
-/// A program resolved once, with every file its resolution read.
+/// A program resolved once, with every file its resolution read. Readers share it; none copies it.
 pub(crate) struct ResolvedEntry {
     schema: orbital_core::OrbitalSchema,
     lazy: Vec<orbital_compiler::phases::lazy::ResolvedLazy>,
     reads: orbital_core::read_set::ReadSet,
-    program: String,
+}
+
+impl ResolvedEntry {
+    pub(crate) fn schema(&self) -> &orbital_core::OrbitalSchema {
+        &self.schema
+    }
+
+    pub(crate) fn lazy(&self) -> &[orbital_compiler::phases::lazy::ResolvedLazy] {
+        &self.lazy
+    }
 }
 
 type ResolvedKey = (PathBuf, String);
@@ -64,13 +78,9 @@ type ResolvedKey = (PathBuf, String);
 static RESOLVED: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<ResolvedKey, std::sync::Arc<ResolvedEntry>>>> =
     std::sync::LazyLock::new(Default::default);
 
-/// The program resolved once per path and compiler settings in this process, reused while the parsed program hashes the
-/// same and every file the resolution read is as it was read; a changed program replaces its path's entry.
-pub(crate) fn resolved_entry(schema: orbital_core::OrbitalSchema, path: &Path) -> anyhow::Result<std::sync::Arc<ResolvedEntry>> {
+/// The compiler settings a resolution depends on besides what it reads.
+fn settings_key(options: &orbital_compiler::CompilerOptions) -> String {
     use sha2::{Digest, Sha256};
-    let options = orbital_compiler::CompilerOptions::from_env();
-    let value = serde_json::to_value(&schema).map_err(|e| anyhow::anyhow!("serialize {}: {e}", path.display()))?;
-    let program = format!("{:x}", Sha256::digest(serde_json::to_string(&orbital_core::util::canonical_json(&value))?.as_bytes()));
     let mut hasher = Sha256::new();
     for (label, bytes) in [
         ("packages", format!("{:?}", options.inline.loader_config.packages).into_bytes()),
@@ -81,32 +91,63 @@ pub(crate) fn resolved_entry(schema: orbital_core::OrbitalSchema, path: &Path) -
         hasher.update((bytes.len() as u64).to_le_bytes());
         hasher.update(&bytes);
     }
-    let key = (path.to_path_buf(), hasher.finalize().iter().map(|b| format!("{b:02x}")).collect::<String>());
-    let mut resolved = RESOLVED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some(entry) = resolved.get(&key).filter(|entry| entry.program == program && entry.reads.is_current()) {
-        entry.reads.replay();
-        return Ok(std::sync::Arc::clone(entry));
-    }
-    orbital_core::read_set::begin();
-    let done = orbital_compiler::phases::lazy::resolve_program_with_path(schema, &options, Some(path));
+    hasher.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// `schema` resolved and stored under `key`, its reads recorded from `begin` (which the caller has already run).
+fn store(
+    resolved: &mut std::collections::HashMap<ResolvedKey, std::sync::Arc<ResolvedEntry>>,
+    key: ResolvedKey,
+    schema: orbital_core::OrbitalSchema,
+    options: &orbital_compiler::CompilerOptions,
+    path: &Path,
+) -> anyhow::Result<std::sync::Arc<ResolvedEntry>> {
+    let done = orbital_compiler::phases::lazy::resolve_program_with_path(schema, options, Some(path));
     let reads = orbital_core::read_set::end();
     let (schema, lazy) = done.map_err(|e| anyhow::anyhow!("resolve {}: {e}", path.display()))?;
-    let entry = std::sync::Arc::new(ResolvedEntry { schema, lazy, reads, program });
+    let entry = std::sync::Arc::new(ResolvedEntry { schema, lazy, reads });
     resolved.insert(key, std::sync::Arc::clone(&entry));
+    tracing::debug!(
+        target: "almadar:cli:resolve-cache",
+        path = %path.display(),
+        outcome = "miss",
+        resolved_bytes = ?serde_json::to_vec(&entry.schema).map(|b| b.len()).map_err(|e| e.to_string()),
+        entries = resolved.len(),
+        "resolve cache"
+    );
     Ok(entry)
 }
 
-/// The resolved program and its lazy behaviors, never written: for a reader that takes the program as data.
-pub(crate) fn resolve_in_memory(
-    schema: orbital_core::OrbitalSchema,
-    path: &Path,
-) -> anyhow::Result<(orbital_core::OrbitalSchema, Vec<orbital_compiler::phases::lazy::ResolvedLazy>)> {
-    let entry = resolved_entry(schema, path)?;
-    Ok((entry.schema.clone(), entry.lazy.clone()))
+/// The program at `path` resolved once per path and compiler settings in this process, reused while every file the
+/// resolution read, the program's own file included, is as it was read.
+pub(crate) fn resolved_file(path: &Path) -> anyhow::Result<std::sync::Arc<ResolvedEntry>> {
+    let options = orbital_compiler::CompilerOptions::from_env();
+    let key = (path.to_path_buf(), settings_key(&options));
+    let mut resolved = RESOLVED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(entry) = resolved.get(&key).filter(|entry| entry.reads.is_current()) {
+        entry.reads.replay();
+        tracing::debug!(target: "almadar:cli:resolve-cache", path = %path.display(), outcome = "hit", entries = resolved.len(), "resolve cache");
+        return Ok(std::sync::Arc::clone(entry));
+    }
+    orbital_core::read_set::begin();
+    let parsed = orbital_core::read_set::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("Failed to read {}: {}", path.display(), e))
+        .and_then(|content| {
+            crate::utils::parse_schema_auto(&content, &path.display().to_string())
+                .map_err(|e| anyhow::anyhow!("Failed to parse {}: {}", path.display(), e))
+        });
+    let schema = match parsed {
+        Ok(schema) => schema,
+        Err(e) => {
+            orbital_core::read_set::end();
+            return Err(e);
+        }
+    };
+    store(&mut resolved, key, schema, &options, path)
 }
 
-/// [`resolve_to_temp`] for a command program: one std ships is resolved once per state of what it depends on and
-/// cached under the derived-data directory; any other program resolves as usual.
+/// [`resolve_to_temp`] for a command program: one std ships is resolved once per state of the files its resolution
+/// read and cached under the derived-data directory; any other program resolves as usual.
 pub(crate) fn resolve_command_to_temp(path: &Path) -> anyhow::Result<ResolvedProgram> {
     match std_command_key(path)? {
         Some((stem, key)) => cached_resolve(
@@ -182,8 +223,8 @@ fn entry_stem(program: &Path, roots: &[PathBuf]) -> String {
     format!("{}~{tree}", program_stem(program))
 }
 
-/// The cache entry name and key of a std command program, `None` for a program std does not ship. Std composes from no other
-/// package, so what resolution reads is std's own tree, this binary, the language data and the resolve options.
+/// The cache entry name and key of a std command program, `None` for a program std does not ship. The key holds what
+/// resolution depends on besides the files it reads: this binary, the language data and the resolve options.
 fn std_command_key(path: &Path) -> anyhow::Result<Option<(String, String)>> {
     use sha2::{Digest, Sha256};
     let options = orbital_compiler::CompilerOptions::from_env();
@@ -203,7 +244,7 @@ fn std_command_key(path: &Path) -> anyhow::Result<Option<(String, String)>> {
         return Ok(None);
     }
     let mut hasher = Sha256::new();
-    feed(&mut hasher, "resolve", b"1");
+    feed(&mut hasher, "resolve", b"2");
     feed_toolchain(&mut hasher)?;
     feed(&mut hasher, "package", format!("{}@{}:{}", std.name, std.version, std.prefix).as_bytes());
     feed(&mut hasher, "program", path_bytes(&program));
@@ -212,45 +253,18 @@ fn std_command_key(path: &Path) -> anyhow::Result<Option<(String, String)>> {
     feed(&mut hasher, "app-root", app_root.map_or(&[][..], |p| path_bytes(p)));
     for root in &roots {
         feed(&mut hasher, "tree", path_bytes(root));
-        feed(&mut hasher, "state", tree_state(root)?.as_bytes());
     }
     let key = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
     Ok(Some((entry_stem(&program, &roots), key)))
-}
-
-/// The state of every file under `root`, by relative path: size, modification and change time, inode. A write,
-/// rename or replacement changes it, as git's index tracks a working tree.
-fn tree_state(root: &Path) -> anyhow::Result<String> {
-    fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
-        for entry in std::fs::read_dir(dir)? {
-            let entry = entry?;
-            if entry.file_type()?.is_dir() {
-                walk(&entry.path(), out)?;
-            } else {
-                out.push(entry.path());
-            }
-        }
-        Ok(())
-    }
-    let mut files = Vec::new();
-    walk(root, &mut files)?;
-    files.sort();
-    let mut state = String::new();
-    for file in files {
-        let stamp = orbital_core::read_set::stamp(&file).ok_or_else(|| anyhow::anyhow!("{} vanished while its tree was read", file.display()))?;
-        let rel = file.strip_prefix(root).unwrap_or(&file).to_string_lossy();
-        state.push_str(&format!("{rel}\t{stamp}\n"));
-    }
-    Ok(state)
 }
 
 fn program_stem(path: &Path) -> String {
     path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
 }
 
-/// The resolved program cached under `cache/<stem>-<key>`: a hit copies the entry to a fresh run-owned directory under
-/// `parent`, a miss runs `build` and stores its directory, replacing the stem's older entries. An entry appears whole
-/// or not at all.
+/// The resolved program cached under `cache/<stem>-<key>` with the files `build` read: a hit, while every one of them is
+/// as it was read, copies the entry to a fresh run-owned directory under `parent`; a miss runs `build` and stores its
+/// directory, replacing the stem's older entries. An entry appears whole or not at all.
 fn cached_resolve(
     cache: &Path,
     parent: &Path,
@@ -260,21 +274,38 @@ fn cached_resolve(
 ) -> anyhow::Result<ResolvedProgram> {
     let entry = cache.join(format!("{stem}-{key}"));
     if entry.join("program.orb").is_file() {
-        let program = ResolvedProgram { dir: scratch_dir_in(parent, "orbital-cmd-")? };
-        copy_tree(&entry, program.dir.path())?;
-        return Ok(program);
+        let reads: orbital_core::read_set::ReadSet = serde_json::from_slice(&std::fs::read(entry.join(READS_FILE))?)?;
+        if reads.is_current() {
+            reads.replay();
+            let program = ResolvedProgram { dir: scratch_dir_in(parent, "orbital-cmd-")? };
+            copy_tree(&entry, program.dir.path())?;
+            tracing::debug!(target: "almadar:cli:resolve-cache", stem, outcome = "disk-hit", "command cache");
+            return Ok(program);
+        }
+        tracing::debug!(target: "almadar:cli:resolve-cache", stem, outcome = "disk-stale", "command cache");
     }
-    let program = build()?;
+    orbital_core::read_set::begin();
+    let built = build();
+    let reads = orbital_core::read_set::end();
+    reads.replay();
+    let program = built?;
     std::fs::create_dir_all(cache)?;
     let staging = tempfile::Builder::new()
         .prefix(&format!("{stem}-{key}."))
         .suffix(".tmp")
         .tempdir_in(cache)?;
     copy_tree(program.dir.path(), staging.path())?;
+    std::fs::write(staging.path().join(READS_FILE), serde_json::to_vec(&reads)?)?;
     let staged = staging.keep();
+    if entry.exists() {
+        let retired = tempfile::Builder::new().prefix(&format!("{stem}-{key}.")).suffix(".old").tempdir_in(cache)?.keep();
+        std::fs::rename(&entry, retired.join("entry"))?;
+        let _ = std::fs::remove_dir_all(&retired);
+    }
     if std::fs::rename(&staged, &entry).is_err() {
         let _ = std::fs::remove_dir_all(&staged);
     }
+    tracing::debug!(target: "almadar:cli:resolve-cache", stem, outcome = "disk-miss", reads = reads.paths().count(), "command cache");
     for old in std::fs::read_dir(cache)?.flatten() {
         let name = old.file_name().to_string_lossy().into_owned();
         let stale = !name.contains('.')
@@ -286,10 +317,16 @@ fn cached_resolve(
     Ok(program)
 }
 
+/// The files a cache entry's resolution read, beside the resolved program.
+const READS_FILE: &str = "reads.json";
+
 fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(to)?;
     for entry in std::fs::read_dir(from)? {
         let entry = entry?;
+        if entry.file_name() == READS_FILE {
+            continue;
+        }
         let target = to.join(entry.file_name());
         if entry.file_type()?.is_dir() {
             copy_tree(&entry.path(), &target)?;
@@ -384,19 +421,47 @@ mod tests {
         assert_eq!(std::fs::read_dir(cache.path()).map(|d| d.count()).unwrap_or(0), 0);
     }
 
+    fn built_reading(parent: &Path, calls: &Cell<u32>, dep: &Path) -> anyhow::Result<ResolvedProgram> {
+        let text = orbital_core::read_set::read_to_string(dep)?;
+        built(parent, calls, &text)
+    }
+
     #[test]
-    fn the_tree_state_changes_with_any_file_and_only_then() {
-        let root = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(root.path().join("a/locales/en")).unwrap();
-        std::fs::write(root.path().join("a/x.lolo"), "one").unwrap();
-        std::fs::write(root.path().join("a/locales/en/x.json"), "{}").unwrap();
-        let base = tree_state(root.path()).unwrap();
-        assert_eq!(tree_state(root.path()).unwrap(), base, "unchanged tree, same state");
-        std::fs::write(root.path().join("a/locales/en/x.json"), "{\"k\":1}").unwrap();
-        let edited = tree_state(root.path()).unwrap();
-        assert_ne!(edited, base, "a non-.lolo dependency counts");
-        std::fs::write(root.path().join("a/new.txt"), "").unwrap();
-        assert_ne!(tree_state(root.path()).unwrap(), edited, "a new file counts");
+    fn an_entry_is_reused_until_a_file_its_build_read_changes_and_is_then_rebuilt_in_place() {
+        let cache = tempfile::tempdir().unwrap();
+        let work = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        let (dep, other) = (src.path().join("dep.lolo"), src.path().join("other.lolo"));
+        std::fs::write(&dep, "one").unwrap();
+        std::fs::write(&other, "x").unwrap();
+        let calls = Cell::new(0);
+        let run = || cached_resolve(cache.path(), work.path(), "p", "k1", || built_reading(work.path(), &calls, &dep)).unwrap();
+        run();
+        std::fs::write(&other, "y").unwrap();
+        assert_eq!(std::fs::read_to_string(run().path()).unwrap(), "one", "control: a file the build never read changed");
+        assert_eq!(calls.get(), 1);
+        std::fs::write(&dep, "two").unwrap();
+        assert_eq!(std::fs::read_to_string(run().path()).unwrap(), "two");
+        assert_eq!(calls.get(), 2);
+        assert_eq!(std::fs::read_to_string(run().path()).unwrap(), "two");
+        assert_eq!(calls.get(), 2, "the rebuilt entry is current again");
+        assert_eq!(entries(cache.path()), vec!["p-k1".to_string()], "one entry, nothing left from the swap");
+    }
+
+    #[test]
+    fn a_hit_counts_its_reads_in_the_open_recording() {
+        let cache = tempfile::tempdir().unwrap();
+        let work = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        let dep = src.path().join("dep.lolo");
+        std::fs::write(&dep, "one").unwrap();
+        let calls = Cell::new(0);
+        cached_resolve(cache.path(), work.path(), "p", "k1", || built_reading(work.path(), &calls, &dep)).unwrap();
+        orbital_core::read_set::begin();
+        cached_resolve(cache.path(), work.path(), "p", "k1", || built_reading(work.path(), &calls, &dep)).unwrap();
+        let outer = orbital_core::read_set::end();
+        assert_eq!(calls.get(), 1);
+        assert!(outer.paths().any(|p| p == &dep));
     }
 
     #[test]
@@ -417,17 +482,6 @@ mod tests {
         assert_eq!(std::fs::read_to_string(again.path()).unwrap(), "L");
     }
 
-    #[test]
-    fn the_tree_state_sees_a_same_size_rewrite() {
-        let root = tempfile::tempdir().unwrap();
-        std::fs::write(root.path().join("x.lolo"), "aaaa").unwrap();
-        let base = tree_state(root.path()).unwrap();
-        let tmp = root.path().join("x.lolo.new");
-        std::fs::write(&tmp, "bbbb").unwrap();
-        std::fs::rename(&tmp, root.path().join("x.lolo")).unwrap();
-        assert_ne!(tree_state(root.path()).unwrap(), base, "a replaced file has a new inode");
-    }
-
     fn entries(dir: &Path) -> Vec<String> {
         let mut out: Vec<String> =
             std::fs::read_dir(dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
@@ -445,7 +499,7 @@ mod tests {
     const SITE: &str = r#"{"name":"site","version":"1.0.0","orbitals":[{"name":"Home","uses":[{"from":"./post.orb","as":"Why"}],"entity":{"name":"HomeState","persistence":"runtime","fields":[{"name":"id","type":"string","required":true}]},"traits":[],"pages":[]}]}"#;
 
     fn resolve_file(path: &Path) -> std::sync::Arc<ResolvedEntry> {
-        resolved_entry(orbital_compiler::parse_file(path).unwrap(), path).unwrap()
+        resolved_file(path).unwrap()
     }
 
     #[test]
@@ -471,6 +525,25 @@ mod tests {
         assert!(!std::sync::Arc::ptr_eq(&first, &after_import));
         std::fs::write(&path, SITE.replace("HomeState", "HomeStateRenamed")).unwrap();
         assert!(!std::sync::Arc::ptr_eq(&after_import, &resolve_file(&path)));
+    }
+
+    /// The file path: no JSON hash of the program, the program's own file is in the read set, and a hit is the same shared
+    /// entry (never a copy).
+    #[test]
+    fn a_file_resolved_twice_is_one_shared_entry_until_the_file_or_an_import_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("post.orb"), POST).unwrap();
+        let path = dir.path().join("site.orb");
+        std::fs::write(&path, SITE).unwrap();
+        let first = resolved_file(&path).unwrap();
+        assert!(std::sync::Arc::ptr_eq(&first, &resolved_file(&path).unwrap()));
+        assert!(first.reads.paths().any(|f| f.ends_with("site.orb")), "the program's own file is read-tracked");
+        std::fs::write(&path, SITE.replace("HomeState", "HomeStateRenamed")).unwrap();
+        let edited = resolved_file(&path).unwrap();
+        assert!(!std::sync::Arc::ptr_eq(&first, &edited), "an edit to the program file resolves again");
+        assert!(serde_json::to_string(edited.schema()).unwrap().contains("HomeStateRenamed"));
+        std::fs::write(dir.path().join("post.orb"), POST.replace("PostState", "PostStateRenamed")).unwrap();
+        assert!(!std::sync::Arc::ptr_eq(&edited, &resolved_file(&path).unwrap()), "an edit to an import resolves again");
     }
 
     #[test]

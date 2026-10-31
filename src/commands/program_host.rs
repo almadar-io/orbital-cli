@@ -380,7 +380,8 @@ pub(crate) fn resolve_vectors(
 pub(crate) fn resolved_value(path: &Path) -> anyhow::Result<Value> {
     use orbital_compiler::phases::lazy::resolved_value as canonical;
     use orbital_core::value_serialize::to_value;
-    let (resolved, lazy) = super::dev::resolve_in_memory(parsed(path)?, path)?;
+    let entry = super::dev::resolved_file(path)?;
+    let (resolved, lazy) = (entry.schema(), entry.lazy());
     let lazy = lazy
         .iter()
         .map(|child| {
@@ -391,7 +392,7 @@ pub(crate) fn resolved_value(path: &Path) -> anyhow::Result<Value> {
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
     Ok(Value::object(orbital_core::ValueMap::from_iter([
-        ("program".into(), canonical(&resolved).map_err(anyhow::Error::msg)?),
+        ("program".into(), canonical(resolved).map_err(anyhow::Error::msg)?),
         ("lazy".into(), Value::array(lazy)),
     ])))
 }
@@ -447,19 +448,18 @@ pub(crate) fn resolved_read(path: &Path, output: Option<&Path>) -> anyhow::Resul
             .map_err(|e| anyhow::anyhow!("Failed to resolve {}: {}", path.display(), e))?;
         return Ok(ResolvedRead { text: content, loaded_resolved: true, program_path: Some(path.to_path_buf()), catalogs: Default::default() });
     }
-    let schema = crate::utils::parse_schema_auto(&content, &path.display().to_string())
-        .map_err(|e| anyhow::anyhow!("Failed to parse {}: {}", path.display(), e))?;
     drop(content);
     let locales = |schema: &orbital_core::OrbitalSchema| schema.locales.as_ref().is_some_and(|l| !l.is_empty());
-    let (resolved, lazy) = super::dev::resolve_in_memory(schema, path)?;
-    let text = orbital_compiler::phases::lazy::resolved_json(&resolved).map_err(anyhow::Error::msg)?;
+    let entry = super::dev::resolved_file(path)?;
+    let (resolved, lazy) = (entry.schema(), entry.lazy());
+    let text = orbital_compiler::phases::lazy::resolved_json(resolved).map_err(anyhow::Error::msg)?;
     match output {
         Some(out) => {
             std::fs::write(out, &text).map_err(|e| anyhow::anyhow!("Failed to write {}: {}", out.display(), e))?;
             let program_dir = path.parent().unwrap_or(Path::new("."));
-            orbital_compiler::phases::messages::write_catalogs(out, &resolved, program_dir)
+            orbital_compiler::phases::messages::write_catalogs(out, resolved, program_dir)
                 .map_err(|e| anyhow::anyhow!("Failed to write catalogs beside {}: {}", out.display(), e))?;
-            orbital_compiler::phases::lazy::write_resolved_lazy(out.parent().unwrap_or(Path::new(".")), &lazy, program_dir)
+            orbital_compiler::phases::lazy::write_resolved_lazy(out.parent().unwrap_or(Path::new(".")), lazy, program_dir)
                 .map_err(|e| anyhow::anyhow!("Failed to write lazy behaviors beside {}: {}", out.display(), e))?;
         }
         None if !lazy.is_empty() => anyhow::bail!(
@@ -470,7 +470,7 @@ pub(crate) fn resolved_read(path: &Path, output: Option<&Path>) -> anyhow::Resul
         None => {}
     }
     let catalogs = match output {
-        None if locales(&resolved) => orbital_compiler::phases::messages::program_catalogs(&resolved, &lazy, path.parent().unwrap_or(Path::new("."))),
+        None if locales(resolved) => orbital_compiler::phases::messages::program_catalogs(resolved, lazy, path.parent().unwrap_or(Path::new("."))),
         _ => Default::default(),
     };
     Ok(ResolvedRead { text, loaded_resolved: false, program_path: output.map(Path::to_path_buf), catalogs })
@@ -886,21 +886,23 @@ impl ProgramHost {
     fn prove(args: &[Value]) -> Result<Value, SubstrateFailure> {
         let op = "program/prove";
         let options = to_json(args.get(1).unwrap_or(&Value::Null));
-        let schema: orbital_core::OrbitalSchema = if options.is_null() || options.as_object().is_some_and(|o| !o.contains_key("path")) {
+        let given: orbital_core::OrbitalSchema;
+        let entry;
+        let schema: &orbital_core::OrbitalSchema = if options.is_null() || options.as_object().is_some_and(|o| !o.contains_key("path")) {
             let program = program_arg(op, args.first())?;
             if let Some(o) = options.as_object() {
                 Options { op, map: o }.only("program", &[])?;
             }
-            serde_json::from_value(program).map_err(|e| failure(format!("{op}: not a program: {e}")))?
+            given = serde_json::from_value(program).map_err(|e| failure(format!("{op}: not a program: {e}")))?;
+            &given
         } else {
             let options = Options::of(op, &options)?;
             options.only("path", &["path"])?;
             let path = options.absolute("path", "path")?;
-            super::dev::resolve_in_memory(parsed(&path).map_err(|e| failure(format!("{op}: {e}")))?, &path)
-                .map_err(|e| failure(format!("{op}: {e}")))?
-                .0
+            entry = super::dev::resolved_file(&path).map_err(|e| failure(format!("{op}: {e}")))?;
+            entry.schema()
         };
-        serialized(&orbital_core::proof::prove_report(&schema))
+        serialized(&orbital_core::proof::prove_report(schema))
     }
 
     /// `program/os-grants program { path?, final? }`: the static `os/` grant check of the lowered program as typed findings
@@ -910,25 +912,27 @@ impl ProgramHost {
     fn os_grants(args: &[Value]) -> Result<Value, SubstrateFailure> {
         let op = "program/os-grants";
         let options = to_json(args.get(1).unwrap_or(&Value::Null));
-        let (schema, pass): (orbital_core::OrbitalSchema, _) = if options.is_null() {
+        let given: orbital_core::OrbitalSchema;
+        let entry;
+        let (schema, pass): (&orbital_core::OrbitalSchema, _) = if options.is_null() {
             let program = program_arg(op, args.first())?;
-            (serde_json::from_value(program).map_err(|e| failure(format!("{op}: not a program: {e}")))?, orbital_core::runtime::os_grants::OsGrantPass::Written)
+            given = serde_json::from_value(program).map_err(|e| failure(format!("{op}: not a program: {e}")))?;
+            (&given, orbital_core::runtime::os_grants::OsGrantPass::Written)
         } else {
             let options = Options::of(op, &options)?;
             options.only("path", &["path", "final"])?;
             let pass = if options.flag("final")? { orbital_core::runtime::os_grants::OsGrantPass::Final } else { orbital_core::runtime::os_grants::OsGrantPass::Written };
             if options.map.contains_key("path") {
                 let path = options.absolute("path", "path")?;
-                let resolved = super::dev::resolve_in_memory(parsed(&path).map_err(|e| failure(format!("{op}: {e}")))?, &path)
-                    .map_err(|e| failure(format!("{op}: {e}")))?
-                    .0;
-                (resolved, pass)
+                entry = super::dev::resolved_file(&path).map_err(|e| failure(format!("{op}: {e}")))?;
+                (entry.schema(), pass)
             } else {
                 let program = program_arg(op, args.first())?;
-                (serde_json::from_value(program).map_err(|e| failure(format!("{op}: not a program: {e}")))?, pass)
+                given = serde_json::from_value(program).map_err(|e| failure(format!("{op}: not a program: {e}")))?;
+                (&given, pass)
             }
         };
-        let findings = orbital_core::runtime::os_grants::os_grant_findings(&schema, pass);
+        let findings = orbital_core::runtime::os_grants::os_grant_findings(schema, pass);
         serialized(&orbital_core::runtime::os_grants::OsGrantsReport { findings })
     }
 
@@ -1411,11 +1415,9 @@ impl ProgramHost {
     fn resolve_behavior(&self, behavior: &str) -> Result<Value, SubstrateFailure> {
         let path = reflect::behavior_source_path(behavior)
             .map_err(|e| failure(format!("behavior/resolve: {e}")))?;
-        let schema = orbital_compiler::parse_file(&path)
-            .map_err(|e| failure(format!("behavior/resolve: parse {}: {e}", path.display())))?;
-        let (resolved, _lazy) = crate::commands::dev::resolve_in_memory(schema, &path)
+        let entry = crate::commands::dev::resolved_file(&path)
             .map_err(|e| failure(format!("behavior/resolve: {e}")))?;
-        let mut program = serde_json::to_value(&resolved).map_err(|e| failure(e.to_string()))?;
+        let mut program = serde_json::to_value(entry.schema()).map_err(|e| failure(e.to_string()))?;
         with_client_metadata(&mut program);
         from_json(program)
     }
