@@ -354,8 +354,8 @@ fn two_unit_program() -> serde_json::Value {
             orbital(
                 "Orders",
                 serde_json::json!({ "exec": ["git"] }),
-                serde_json::json!([["http", "GET", "https://api.example.org", "/v1",
-                    { "auth": { "scheme": "bearer", "credential": "stripe" } }, { "emit": { "success": "OK" } }]]),
+                serde_json::json!([["os/send", "@payload.sock",
+                    [{ "bytes": ["bytes/from-string", "Authorization: Bearer "], "credential": "stripe" }], { "key": "s" }]]),
             ),
             orbital("Storefront", serde_json::json!({}), serde_json::json!([])),
         ]
