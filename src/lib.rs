@@ -120,6 +120,7 @@ fn describe_trait_value(
 }
 
 pub fn run() -> anyhow::Result<()> {
+    let _ = orbital_core::language_data::register_host_release(env!("CARGO_PKG_VERSION"));
     let raw: Vec<String> = std::env::args().skip(1).collect();
     let (log, args) = utils::terminal::split_log_args(&raw)?;
     let terminal = utils::terminal::init(&log);
