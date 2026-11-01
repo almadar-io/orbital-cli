@@ -94,7 +94,7 @@ fn compile_native(shell: &str, out_dir: &std::path::Path) {
 }
 
 #[test]
-#[ignore = "requires the full kflow.ai.builder workspace (packages/almadar-std, \
+#[ignore = "tool: compiles std-notes.orb with the real binary; requires the full kflow.ai.builder workspace (packages/almadar-std, \
             packages/almadar-behaviors) — not present in a standalone orbital-rust \
             checkout; run explicitly with --ignored"]
 fn ios_compile_embeds_resolved_schema_resource() {
@@ -120,7 +120,7 @@ fn ios_compile_embeds_resolved_schema_resource() {
 }
 
 #[test]
-#[ignore = "requires the full kflow.ai.builder workspace (packages/almadar-std, \
+#[ignore = "tool: compiles std-notes.orb with the real binary; requires the full kflow.ai.builder workspace (packages/almadar-std, \
             packages/almadar-behaviors) — not present in a standalone orbital-rust \
             checkout; run explicitly with --ignored"]
 fn android_compile_embeds_resolved_schema_resource() {

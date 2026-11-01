@@ -149,7 +149,6 @@ fn control_a_package_declaring_neither_registry_nor_source_is_refused() {
 /// validates real std organisms with no emitted `.orb` in play.
 #[cfg(unix)]
 #[test]
-#[ignore = "acceptance criteria for the std http atom; the std corpus still calls the retired http operator"]
 fn live_std_corpus_validates_real_organisms() {
     let std_root = orbital_test_support::installed_package(
         "almadar-std",

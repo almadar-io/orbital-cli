@@ -160,7 +160,7 @@ fn validate_one(repo: &Path, file: &Path) -> FileResult {
 }
 
 #[test]
-#[ignore = "Phase 4.0 differential harness: run explicitly with --ignored --release"]
+#[ignore = "tool: Phase 4.0 differential harness over the compat corpus; run explicitly with --ignored --release"]
 fn compat_differential_corpus() {
     let repo = repo_root();
     let mut files = Vec::new();
