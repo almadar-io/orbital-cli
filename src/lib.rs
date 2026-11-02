@@ -159,12 +159,14 @@ fn run_command(args: &[String]) -> anyhow::Result<i32> {
     let program = match resolve() {
         Ok(Some(command)) => Some(command),
         found if args.first().map(String::as_str) == Some("update") => {
-            let (pin, files) = utils::bootstrap::repair(&[cwd.as_path(), store.as_path()])
+            let installed = utils::bootstrap::repair(&[cwd.as_path(), store.as_path()], &store, env!("CARGO_PKG_VERSION"))
                 .map_err(|e| e.context(match &found {
                     Ok(_) => "no installed program answers `orb update`".to_string(),
                     Err(cause) => format!("the installed programs do not load ({cause})"),
                 }))?;
-            eprintln!("orb: reinstalled {}@{} ({files} files)", pin.name, pin.version);
+            for (pin, files) in installed {
+                eprintln!("orb: installed {}@{} ({files} files)", pin.name, pin.version);
+            }
             resolve()?
         }
         found => found?,
