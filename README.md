@@ -8,7 +8,7 @@
 
 </div>
 
-<p align="center"><sub>Part of <a href="https://github.com/almadar-io/orb"><b>Orb</b></a>: the language where the rule is the program. <a href="https://orb.almadar.io">orb.almadar.io</a></sub></p>
+<p align="center"><sub>Part of <a href="https://github.com/almadar-io/orb"><b>Orb</b></a>: a programming language of composable state machines. <a href="https://orb.almadar.io">orb.almadar.io</a></sub></p>
 
 `orbital-cli` builds two binaries, `orb` and `orbital`. Most `orb` commands are not written in Rust: `orb <command>` resolves an installed std behavior in the `cli` topic that declares the hook `cli-<command>`, boots it on the kernel and prints its answer. The one native subcommand is `orb run <program>`. Code generation (`--shell`) runs each shell as a separate `orb-shell-<name>` program.
 
