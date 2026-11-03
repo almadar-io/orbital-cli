@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    # GitHub-hosted on purpose: a public repo runs fork PRs, which must never reach a self-hosted runner.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # Language data the crate reads at run time; orbital-* siblings come from their own repos by git dependency.
+      - name: Install the Almadar language data
+        run: npm install --no-save --no-package-lock @almadar/core @almadar/std @almadar/lolo-ar @almadar/lolo-sl
+
+      - uses: dtolnay/rust-toolchain@1.93.0
+
+      - name: Test
+        run: cargo test

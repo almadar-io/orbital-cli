@@ -18,12 +18,12 @@ path = "src/bin/orb.rs"
 
 [dependencies]
 # Core crates
-orbital-core = { path = "../orbital-core", features = ["client-http"] }
+orbital-core = { git = "https://github.com/almadar-io/orbital-core", branch = "main", features = ["client-http"] }
 # The native orb answers `ffi/call`; feature unification turns it on in the runtime orbital-core embeds.
-orbital-core-runtime = { path = "../orbital-core/crates/runtime", default-features = false, features = ["ffi"] }
-orbital-compiler = { path = "../orbital-compiler" }
-orbital-lolo = { path = "../orbital-lolo" }
-orbital-shell-rust = { path = "../orbital-shell-rust" }
+orbital-core-runtime = { git = "https://github.com/almadar-io/orbital-core", branch = "main", default-features = false, features = ["ffi"] }
+orbital-compiler = { git = "https://github.com/almadar-io/orbital-compiler", branch = "main" }
+orbital-lolo = { git = "https://github.com/almadar-io/orbital-lolo", branch = "main" }
+orbital-shell-rust = { git = "https://github.com/almadar-io/orbital-shell-rust", branch = "main" }
 thiserror = { workspace = true }
 base64 = "0.22"
 
@@ -50,6 +50,6 @@ sha2 = "0.10"
 tempfile = "3.10"
 
 [dev-dependencies]
-orbital-test-support = { package = "orbital-integration-tests", path = "../orbital-integration-tests" }
+orbital-test-support = { package = "orbital-integration-tests", git = "https://github.com/almadar-io/orbital-integration-tests", branch = "main" }
 pretty_assertions.workspace = true
 syn = { version = "2", features = ["full"] }
