@@ -19,6 +19,8 @@ path = "src/bin/orb.rs"
 [dependencies]
 # Core crates
 orbital-core = { path = "../orbital-core", features = ["client-http"] }
+# The native orb answers `ffi/call`; feature unification turns it on in the runtime orbital-core embeds.
+orbital-core-runtime = { path = "../orbital-core/crates/runtime", default-features = false, features = ["ffi"] }
 orbital-compiler = { path = "../orbital-compiler" }
 orbital-lolo = { path = "../orbital-lolo" }
 orbital-shell-rust = { path = "../orbital-shell-rust" }

@@ -826,8 +826,8 @@ fn foreign_type_translation(name: &str) -> Option<&'static str> {
         "array" | "Array" | "list" | "List" => {
             Some("a list type is written `[ElementType]` — e.g. `[string]`, `[number]`, or `[MyType]`")
         }
-        "int" | "integer" | "Int" | "float" | "double" | "Number" => {
-            Some("numeric fields use the `number` type")
+        "integer" | "Int" | "double" | "Number" | "long" | "short" | "byte" => {
+            Some("a whole number is `int`, a float is `number`, and a fixed width is `i8`…`i64`, `u8`…`u64`, `f32` or `f64`")
         }
         "bool" | "Bool" | "Boolean" => Some("use `boolean`"),
         "str" | "String" => Some("use `string`"),
