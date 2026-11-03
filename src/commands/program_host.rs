@@ -1137,7 +1137,7 @@ impl ProgramHost {
         from_json(serde_json::json!({ "text": printed.stdout, "stderr": printed.stderr }))
     }
 
-    /// `program/eval { generate: { path, output, shell, mode?, frontend?, backend?, backendUrl?, patterns?, devLogs?,
+    /// `program/eval { generate: { path, output, shell, mode?, frontend?, backend?, backendUrl?, renderer?, patterns?, devLogs?,
     /// host?, listenHost?, port?, emitOrb?, webClient?, source? } }`: what `orb compile` does and prints, as `{ lines, files,
     /// warnings, nextSteps, webClient }`; `webClient: true` also copies the shell's prebuilt web client into the output. The program is validated before anything is generated, as the command does.
     fn eval_generate(options: &serde_json::Value) -> Result<Value, SubstrateFailure> {
@@ -1149,7 +1149,7 @@ impl ProgramHost {
         g.only(
             "generate",
             &[
-                "path", "output", "shell", "mode", "frontend", "backend", "backendUrl", "patterns", "devLogs", "host",
+                "path", "output", "shell", "mode", "frontend", "backend", "backendUrl", "renderer", "patterns", "devLogs", "host",
                 "emitOrb", "webClient", "source",
             ],
         )?;
@@ -1174,6 +1174,7 @@ impl ProgramHost {
             frontend: g.choice("frontend")?,
             backend: g.choice("backend")?,
             backend_url: g.text("backendUrl")?,
+            renderer: g.text("renderer")?,
             patterns_path: patterns.as_deref(),
             dev_logs: g.flag("devLogs")?,
             host: g.choice("host")?.unwrap_or_default(),
