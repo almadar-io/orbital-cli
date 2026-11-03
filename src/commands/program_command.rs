@@ -346,6 +346,16 @@ fn answer_command(
 /// (`std-orb-update-notice`) is run with `argv` (`record` after `orb update` stamps the cache) and its answer's
 /// `stderr` line printed. The program owns the cache, the opt-outs and the registry lookup; a missing or failing
 /// notice never fails the command it follows.
+/// The notice's arguments after a command that answered 0: `record` after a command that changed the installed packages
+/// (`update`, `add`, `remove`), so the notice's update record is stamped fresh instead of announcing what was just
+/// installed; nothing otherwise.
+pub(crate) fn notice_argv(argv: &[String]) -> Vec<String> {
+    match argv.first().map(String::as_str) {
+        Some("update" | "add" | "remove") => vec!["record".to_string()],
+        _ => Vec::new(),
+    }
+}
+
 pub(crate) fn update_notice(argv: &[String], cwd: &Path, user_store: &Path) {
     const COMMAND: &str = "notice";
     let program = match cli_programs(cwd, user_store).and_then(|programs| programs.declaring(&hook_name(COMMAND))) {
@@ -507,7 +517,7 @@ orbital EchoOrbital {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             package.join("package.json"),
-            r#"{ "name": "@fake/cli", "version": "1.0.0", "orb": { "prefix": "fake", "source": "behaviors/lolo", "compiler": "*" } }"#,
+            r#"{ "name": "@fake/cli", "version": "1.0.0", "orb": { "prefix": "fake", "source": "behaviors/lolo", "language": "*" } }"#,
         )
         .unwrap();
         std::fs::write(dir.join("fake-echo.lolo"), ECHO).unwrap();
@@ -1334,5 +1344,16 @@ orbital SplitOrbital {{
     fn control_the_same_hook_outside_the_cli_topic_is_not_a_command() {
         let (cwd, store) = project("other-topic", "infra");
         assert_eq!(find_command_program("echo", &cwd, &store).unwrap(), None);
+    }
+
+    #[test]
+    fn a_package_change_asks_the_notice_to_record_and_any_other_command_asks_nothing() {
+        let words = |w: &[&str]| w.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        for changed in [&["update", "--global"][..], &["add", "@x/y@1.0.0"], &["remove", "@x/y"], &["update", "--urgent"]] {
+            assert_eq!(notice_argv(&words(changed)), words(&["record"]), "{changed:?}");
+        }
+        assert!(notice_argv(&words(&["list", "--json"])).is_empty(), "control: listing changes nothing");
+        assert!(notice_argv(&words(&["validate", "a.lolo"])).is_empty());
+        assert!(notice_argv(&[]).is_empty(), "edge: no arguments");
     }
 }

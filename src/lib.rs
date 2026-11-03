@@ -14,10 +14,16 @@ mod utils;
 
 pub use utils::{parse_schema_auto_typed, TypedParseError};
 
+/// `orb --version`: the release and the language versions this orb reads, `X.Y.Z (language <range>)` (P-022).
+fn version_line() -> &'static str {
+    static LINE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    LINE.get_or_init(|| format!("{} (language {})", env!("CARGO_PKG_VERSION"), orbital_core::language_data::LANGUAGE_READS))
+}
+
 #[derive(Parser)]
 #[command(name = "orb")]
 #[command(about = "Orb - The Physics of Software", long_about = None)]
-#[command(version)]
+#[command(version = version_line())]
 pub(crate) struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -111,6 +117,32 @@ fn lower_lolo_file(path: &std::path::Path) -> Result<orbital_core::schema::Orbit
         .map_err(|e| e.describe())
 }
 
+/// A newer orb `orb update` installed into the user store, unless this run was already handed to it.
+fn handoff_target() -> Option<std::path::PathBuf> {
+    if std::env::var_os(utils::bootstrap::HANDED_OFF_ENV).is_some() {
+        return None;
+    }
+    let store = orbital_core::behavior_packages::user_store_dir()?;
+    utils::bootstrap::newer_orb(&store, utils::bootstrap::platform_package()?, env!("CARGO_PKG_VERSION"))
+}
+
+/// Run `newer` with this run's arguments: replace this process where the platform can, else wait and exit with its code.
+fn hand_off(newer: &std::path::Path, args: &[String]) -> anyhow::Result<()> {
+    let mut command = std::process::Command::new(newer);
+    command.args(args).env(utils::bootstrap::HANDED_OFF_ENV, env!("CARGO_PKG_VERSION"));
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let error = command.exec();
+        anyhow::bail!("could not hand the run to {}: {error}", newer.display());
+    }
+    #[cfg(not(unix))]
+    {
+        let status = command.status().map_err(|e| anyhow::anyhow!("could not hand the run to {}: {e}", newer.display()))?;
+        std::process::exit(status.code().unwrap_or(1));
+    }
+}
+
 /// `orb behaviors describe` for a trait value: what the compiler answers a literal describe with.
 fn describe_trait_value(
     value: &serde_json::Value,
@@ -120,8 +152,11 @@ fn describe_trait_value(
 }
 
 pub fn run() -> anyhow::Result<()> {
-    let _ = orbital_core::language_data::register_host_release(env!("CARGO_PKG_VERSION"));
     let raw: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(newer) = handoff_target() {
+        return hand_off(&newer, &raw);
+    }
+    let _ = orbital_core::language_data::register_host_release(env!("CARGO_PKG_VERSION"));
     let (log, args) = utils::terminal::split_log_args(&raw)?;
     let terminal = utils::terminal::init(&log);
     orbital_compiler::loader::register_source_lowerer(|path, _, _| lower_lolo_file(path));
@@ -159,7 +194,7 @@ fn run_command(args: &[String]) -> anyhow::Result<i32> {
     let program = match resolve() {
         Ok(Some(command)) => Some(command),
         found if args.first().map(String::as_str) == Some("update") => {
-            let installed = utils::bootstrap::repair(&[cwd.as_path(), store.as_path()], &store, env!("CARGO_PKG_VERSION"))
+            let installed = utils::bootstrap::repair(&[cwd.as_path(), store.as_path()], &store)
                 .map_err(|e| e.context(match &found {
                     Ok(_) => "no installed program answers `orb update`".to_string(),
                     Err(cause) => format!("the installed programs do not load ({cause})"),
@@ -175,6 +210,7 @@ fn run_command(args: &[String]) -> anyhow::Result<i32> {
         let answer = tracing::info_span!(target: ns::CLI, "program", hook = %command.command)
             .in_scope(|| commands::program_command::run_command_program(&command.program, &command.command, &command.argv, &cwd))?;
         let ran = command.command.clone();
+        let notice = commands::program_command::notice_argv(&command.argv);
         drop(command);
         if answer.headers.contains_key("orb-run") {
             if let Some(text) = answer.stderr.as_deref().filter(|t| !t.is_empty()) {
@@ -187,7 +223,7 @@ fn run_command(args: &[String]) -> anyhow::Result<i32> {
         answer.write_to(&mut std::io::stdout(), &mut std::io::stderr())?;
         if answer.code == 0 && ran != "notice" {
             tracing::info_span!(target: ns::CLI, "update notice")
-                .in_scope(|| commands::program_command::update_notice(&[], &cwd, &store));
+                .in_scope(|| commands::program_command::update_notice(&notice, &cwd, &store));
         }
         return Ok(answer.code);
     }

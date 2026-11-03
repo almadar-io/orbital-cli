@@ -137,19 +137,10 @@ pub(crate) fn resolve_compiled_schema(compile_path: &Path, source_path: &Path) -
 /// `CompilerOptions::from_env()`, bailing when behavior-package discovery failed: that is environment, never a schema
 /// authoring error, so a compile must not proceed as if no packages were installed.
 pub(crate) fn compiler_options_or_bail() -> anyhow::Result<orbital_compiler::CompilerOptions> {
-    use orbital_core::behavior_packages::DiscoverError;
     let mut options = orbital_compiler::CompilerOptions::from_env();
     options.service_runtimes = Some(crate::utils::load_services_registry(None)?.runtimes);
     if let Some(e) = &options.discovery_error {
-        let code = match e {
-            DiscoverError::DuplicateBehaviorName { .. } => "ORB_BEHAVIOR_NAME_DUPLICATE",
-            DiscoverError::PrefixConflict { .. } => "ORB_BEHAVIOR_PREFIX_CONFLICT",
-            DiscoverError::IncompatibleCompiler { .. } => orbital_core::language_data::CODE_INCOMPATIBLE,
-            DiscoverError::MissingDeclaredPath { .. }
-            | DiscoverError::InvalidSidecarLock { .. }
-            | DiscoverError::InvalidPackageJson { .. }
-            | DiscoverError::Io { .. } => "ORB_BEHAVIOR_PACKAGE_INVALID",
-        };
+        let code = e.code();
         anyhow::bail!("[{code}] {e} (validator environment error — the schema was NOT compiled; retry, do not edit the schema)");
     }
     Ok(options)

@@ -56,7 +56,7 @@ fn package(root: &Path, dir: &str, prefix: &str, model: &str, extra: &[(&str, &s
     write(
         &pkg.join("package.json"),
         &format!(
-            r#"{{"name":"{dir}","version":"1.0.0","orb":{{"prefix":"{prefix}","registry":"behaviors/registry","source":"behaviors/lolo","vectors":"dist/vectors.vec","signatures":"behaviors/signatures.lolo","compiler":">=0.0.0"}}}}"#
+            r#"{{"name":"{dir}","version":"1.0.0","orb":{{"prefix":"{prefix}","registry":"behaviors/registry","source":"behaviors/lolo","vectors":"dist/vectors.vec","signatures":"behaviors/signatures.lolo","language":">=0.0.0"}}}}"#
         ),
     );
     let (card, capability) = card_texts(prefix);
@@ -89,7 +89,7 @@ fn live_std_programs(project: &Path) {
     manifest["orb"] = serde_json::json!({
         "prefix": "almadar-std",
         "source": "behaviors/lolo",
-        "compiler": ">=0.0.0"
+        "language": ">=0.0.0"
     });
     std::fs::write(&manifest_path, manifest.to_string()).unwrap();
     orbital_test_support::link_installed_std_programs(&std, Path::new(env!("CARGO_MANIFEST_DIR")));

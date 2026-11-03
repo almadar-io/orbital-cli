@@ -67,7 +67,7 @@ fn live_std(project: &Path) -> PathBuf {
     manifest["orb"] = serde_json::json!({
         "prefix": "almadar-std",
         "source": "behaviors/lolo",
-        "compiler": ">=0.0.0"
+        "language": ">=0.0.0"
     });
     std::fs::write(&manifest_path, manifest.to_string()).unwrap();
     for (rel, body) in [("behaviors/lolo/app/atoms/std-cartx.lolo", CART)] {
@@ -169,7 +169,7 @@ fn live_std_corpus_validates_real_organisms() {
     let mut orb = serde_json::json!({
         "prefix": declared["prefix"],
         "source": declared["source"],
-        "compiler": ">=0.0.0"
+        "language": ">=0.0.0"
     });
     let mut linked = vec![declared["source"].as_str().unwrap().to_string()];
     if let Some(rel) = declared["signatures"].as_str() {

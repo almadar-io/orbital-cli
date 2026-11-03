@@ -3130,6 +3130,14 @@ orbital O {
         assert!(entries.iter().any(|e| e["prefix"] == "almadar-std"));
     }
 
+    /// A core providing language 1.0.0 in `node_modules`: discovery reads only its language version.
+    fn write_core(node_modules: &Path) {
+        let dir = node_modules.join("@almadar/core");
+        std::fs::create_dir_all(&dir).unwrap();
+        let manifest = serde_json::json!({ "name": "@almadar/core", "version": "10.1.0", "orbLanguage": { "version": "1.0.0" } });
+        std::fs::write(dir.join("package.json"), manifest.to_string()).unwrap();
+    }
+
     fn write_package(dir: &Path, name: &str) {
         std::fs::create_dir_all(dir.join("behaviors/registry")).unwrap();
         std::fs::write(dir.join("behaviors/registry/pa-x.orb"), "{}").unwrap();
@@ -3137,7 +3145,7 @@ orbital O {
         std::fs::write(dir.join("dist/vectors.vec"), "x").unwrap();
         let manifest = serde_json::json!({
             "name": name, "version": "1.0.0",
-            "orb": { "prefix": "pa", "registry": "behaviors/registry", "vectors": "dist/vectors.vec", "compiler": ">=4.10.0" },
+            "orb": { "prefix": "pa", "registry": "behaviors/registry", "vectors": "dist/vectors.vec", "language": "^1" },
         });
         std::fs::write(dir.join("package.json"), manifest.to_string()).unwrap();
     }
@@ -3149,6 +3157,7 @@ orbital O {
         let store = tmp.path().join("store");
         let cache = tmp.path().join("cache");
         let installed = tmp.path().join("node_modules/@fake/pkg-a");
+        write_core(&tmp.path().join("node_modules"));
         write_package(&installed, "@fake/pkg-a");
         let found = discover_with_cache(tmp.path(), &store, &cache).unwrap();
         let vectors = found[0].vectors.clone().unwrap();
@@ -3182,6 +3191,7 @@ orbital O {
         let real = tmp.path().join("workspace/pkg-b");
         write_package(&real, "pkg-b");
         std::fs::create_dir_all(tmp.path().join("node_modules")).unwrap();
+        write_core(&tmp.path().join("node_modules"));
         std::os::unix::fs::symlink(&real, tmp.path().join("node_modules/pkg-b")).unwrap();
         let found = discover_with_cache(tmp.path(), &tmp.path().join("store"), &tmp.path().join("cache")).unwrap();
         let place = vectors_place(found[0].vectors.as_deref().unwrap(), tmp.path(), &tmp.path().join("cache"));
