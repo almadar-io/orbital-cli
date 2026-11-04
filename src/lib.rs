@@ -46,6 +46,12 @@ impl std::error::Error for Exit {}
 
 /// Available shell types for code generation
 #[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum ShellRenderer {
+    /// The shared Dioxus/Blitz/WGPU renderer the Android shell packages (renderers/native)
+    NativeGpu,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum ShellType {
     /// TypeScript/React client with a Node server running the app composed with std-http-server
     Typescript,

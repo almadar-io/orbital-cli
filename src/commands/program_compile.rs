@@ -18,6 +18,7 @@ pub(crate) struct CompileRequest<'a> {
     pub frontend: Option<ShellType>,
     pub backend: Option<ShellType>,
     pub backend_url: Option<String>,
+    pub renderer: Option<crate::ShellRenderer>,
     pub patterns_path: Option<&'a Path>,
     pub dev_logs: bool,
     pub host: HostArg,
@@ -138,6 +139,7 @@ pub(crate) fn compile_run(request: CompileRequest) -> anyhow::Result<CompileRepo
         frontend,
         backend,
         backend_url,
+        renderer,
         patterns_path,
         dev_logs,
         host,
@@ -165,6 +167,10 @@ pub(crate) fn compile_run(request: CompileRequest) -> anyhow::Result<CompileRepo
         ShellMode::Server => orbital_compiler::ShellMode::Server,
     })?;
     let mut shell_options = BTreeMap::new();
+    if let Some(renderer) = renderer {
+        let name = clap::ValueEnum::to_possible_value(&renderer).expect("every renderer has a name");
+        shell_options.insert("renderer".to_string(), Value::from(name.get_name()));
+    }
     if let ShellType::Typescript = shell {
         shell_options.insert(
             "schemaLanguage".to_string(),
@@ -183,7 +189,11 @@ pub(crate) fn compile_run(request: CompileRequest) -> anyhow::Result<CompileRepo
         if let Some(patterns) = load_project_patterns(path, patterns_path) {
             shell_options.insert("projectPatterns".to_string(), patterns);
         }
-        if let Some(url) = backend_url {
+    }
+    if let Some(url) = backend_url {
+        if matches!(shell, ShellType::Typescript)
+            || (matches!(shell, ShellType::Android) && matches!(renderer, Some(crate::ShellRenderer::NativeGpu)))
+        {
             shell_options.insert("backendUrl".to_string(), Value::from(url));
         }
     }

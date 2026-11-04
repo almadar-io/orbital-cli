@@ -1137,7 +1137,7 @@ impl ProgramHost {
         from_json(serde_json::json!({ "text": printed.stdout, "stderr": printed.stderr }))
     }
 
-    /// `program/eval { generate: { path, output, shell, mode?, frontend?, backend?, backendUrl?, patterns?, devLogs?,
+    /// `program/eval { generate: { path, output, shell, mode?, frontend?, backend?, backendUrl?, renderer?, patterns?, devLogs?,
     /// host?, listenHost?, port?, emitOrb?, webClient?, source? } }`: what `orb compile` does and prints, as `{ lines, files,
     /// warnings, nextSteps, webClient }`; `webClient: true` also copies the shell's prebuilt web client into the output. The program is validated before anything is generated, as the command does.
     fn eval_generate(options: &serde_json::Value) -> Result<Value, SubstrateFailure> {
@@ -1149,7 +1149,7 @@ impl ProgramHost {
         g.only(
             "generate",
             &[
-                "path", "output", "shell", "mode", "frontend", "backend", "backendUrl", "patterns", "devLogs", "host",
+                "path", "output", "shell", "mode", "frontend", "backend", "backendUrl", "renderer", "patterns", "devLogs", "host",
                 "emitOrb", "webClient", "source",
             ],
         )?;
@@ -1174,6 +1174,7 @@ impl ProgramHost {
             frontend: g.choice("frontend")?,
             backend: g.choice("backend")?,
             backend_url: g.text("backendUrl")?,
+            renderer: g.choice("renderer")?,
             patterns_path: patterns.as_deref(),
             dev_logs: g.flag("devLogs")?,
             host: g.choice("host")?.unwrap_or_default(),
@@ -2739,6 +2740,7 @@ orbital O {
         assert!(refusal(serde_json::json!({ "generate": { "path": "/n.lolo", "output": "/o" } })).contains("needs the `shell`"));
         assert!(refusal(serde_json::json!({ "generate": { "path": "/n.orb", "output": "/o", "shell": "typescript", "source": "app.lolo" } })).contains("absolute `source`"));
         assert!(refusal(serde_json::json!({ "generate": { "path": "/n.lolo", "output": "/o", "shell": "cobol" } })).contains("not one of the accepted values"));
+        assert!(refusal(serde_json::json!({ "generate": { "path": "/n.lolo", "output": "/o", "shell": "android", "renderer": "native-gpu2" } })).contains("`renderer` \"native-gpu2\" is not one of the accepted values"));
         assert!(refusal(serde_json::json!({ "generate": { "path": "/n.lolo", "output": "/o", "shell": "typescript" }, "final": true })).contains("unsupported option \"final\""));
         assert!(refusal(serde_json::json!({ "generate": { "path": "/nowhere/n.lolo", "output": "/o", "shell": "typescript" } })).contains("program/eval:"));
     }
