@@ -1,8 +1,8 @@
 [package]
 name = "orbital-cli"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
+version = "19.0.0"
+edition = "2021"
+license = "MIT"
 description = "Command-line interface for Orbital compiler and tools"
 
 [lib]
@@ -24,26 +24,26 @@ orbital-core-runtime = { git = "https://github.com/almadar-io/orbital-core", bra
 orbital-compiler = { git = "https://github.com/almadar-io/orbital-compiler", branch = "main" }
 orbital-lolo = { git = "https://github.com/almadar-io/orbital-lolo", branch = "main" }
 orbital-shell-rust = { git = "https://github.com/almadar-io/orbital-shell-rust", branch = "main" }
-thiserror = { workspace = true }
+thiserror = "1.0"
 base64 = "0.22"
 
 # CLI essentials only
-clap.workspace = true
-anyhow.workspace = true
-serde.workspace = true
-serde_json.workspace = true
+clap = { version = "4.0", features = ["derive"] }
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive", "rc"] }
+serde_json = { version = "1.0", features = ["float_roundtrip"] }
 # `orb run` stops on SIGINT/SIGTERM.
-tokio.workspace = true
+tokio = { version = "1.0", features = ["full"] }
 # Logging flags, live phase spinners and timing outputs (`utils/terminal.rs`).
-tracing.workspace = true
-tracing-subscriber.workspace = true
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-indicatif = "0.3.13"
 indicatif = "0.18.0"
 
 # Source Map v3 emission for `orb emit --map` and `orb trace`
 sourcemap = "9"
 # Wire-shape fixture pass (`verify_server::run_fixture_pass`).
-ureq = { workspace = true, features = ["tls"] }
+ureq = { version = "2.9", default-features = false, features = ["json", "tls"] }
 # Embedding-text hashes (`behaviors texts`).
 sha2 = "0.10"
 # Run-owned scratch directories (`commands/dev.rs`), removed when the command ends.
@@ -51,5 +51,5 @@ tempfile = "3.10"
 
 [dev-dependencies]
 orbital-test-support = { package = "orbital-integration-tests", git = "https://github.com/almadar-io/orbital-integration-tests", branch = "main" }
-pretty_assertions.workspace = true
+pretty_assertions = "1.4"
 syn = { version = "2", features = ["full"] }
