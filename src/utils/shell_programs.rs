@@ -1,6 +1,6 @@
 //! `orb` runs every shell as a program (`orbital_core::shell_protocol`); it links none.
 
-use orbital_compiler::generate::{generate_from_file_with_source_using, GenerateError};
+use orbital_compiler::generate::{generate_from_file_with_source_resolved, GenerateError};
 use orbital_compiler::GenerateOptions;
 use orbital_core::ir::OirModule;
 use orbital_core::shell_protocol::{
@@ -88,14 +88,11 @@ pub(crate) fn generate(
     } else {
         None
     };
-    // The client opens each lazy page through its own loader (EXEC-LOAD-2), so it gets the program split.
-    let (resolved, lazy) = if shell.description.needs_resolved {
-        let (program, lazy) = resolve_split_schema(compile_path, source_path)?;
-        (Some(program), lazy)
-    } else {
-        (None, Vec::new())
-    };
-    let response = generate_from_file_with_source_using(compile_path, source_path, output, options, |module, out| {
+    // The client opens each lazy page through its own loader (EXEC-LOAD-2), so it gets the program split: the one
+    // resolution the generate makes for resolved.orb and the catalogs.
+    let needs_resolved = shell.description.needs_resolved;
+    let response = generate_from_file_with_source_resolved(compile_path, source_path, output, options, |module, split, out| {
+        let (resolved, lazy) = if needs_resolved { client_split(split) } else { (None, Vec::new()) };
         shell_protocol::invoke(&shell.binary, &request(module, resolved, lazy, served, source_path, options, shell_options), out)
             .map_err(GenerateError::ShellProgram)
     })?;
@@ -132,20 +129,17 @@ pub(crate) fn report_lines(response: &GenerateResponse) -> Vec<String> {
     lines
 }
 
-/// The resolved program with its `uses lazy` behaviors resolved apart, flattened with each `orbRef` relative to the
-/// program's own folder.
-pub(crate) fn resolve_split_schema(
-    compile_path: &Path,
-    source_path: &Path,
-) -> anyhow::Result<(orbital_core::OrbitalSchema, Vec<shell_protocol::LazyProgram>)> {
-    let schema = orbital_compiler::phases::parse_file(compile_path)
-        .map_err(|e| anyhow::anyhow!("Failed to parse schema for the embedded resolved schema: {}", e))?;
-    let (mut program, lazy) = orbital_compiler::phases::lazy::resolve_program_with_path(schema, &compiler_options_or_bail()?, Some(source_path))
-        .map_err(|e| anyhow::anyhow!("Failed to resolve the embedded resolved schema: {}", e))?;
+/// The split program as a shell receives it: lambdas canonical, its lazy behaviors flattened with each `orbRef`
+/// relative to the program's own folder.
+fn client_split(
+    split: &orbital_compiler::generate::SplitProgram,
+) -> (Option<orbital_core::OrbitalSchema>, Vec<shell_protocol::LazyProgram>) {
+    let (program, lazy) = split;
+    let mut program = program.clone();
     orbital_core::schema::normalize_fn_shapes(&mut program);
     let mut flat = Vec::new();
-    flatten_lazy(&lazy, "", &mut flat);
-    Ok((program, flat))
+    flatten_lazy(lazy, "", &mut flat);
+    (Some(program), flat)
 }
 
 fn flatten_lazy(lazy: &[orbital_compiler::phases::lazy::ResolvedLazy], folder: &str, into: &mut Vec<shell_protocol::LazyProgram>) {
