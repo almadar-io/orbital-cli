@@ -3,7 +3,6 @@
 
 use super::{behavior_part, resolve_from, Resolved, TRAITS_SEGMENT};
 use orbital_compiler::phases::validation::config_type::{orbital_event_names, trait_event_names};
-use orbital_compiler::CompilerOptions;
 use orbital_core::collections::IndexMap;
 use orbital_core::schema::{ConfigField, EntityRef, FieldDefinition, FieldType, OrbitalSchema, PageRef, TraitDefinition, TraitReference};
 use serde::Serialize;
@@ -268,12 +267,10 @@ fn declared_config(config: Option<&IndexMap<String, ConfigField>>) -> DeclaredCo
 }
 
 /// A behavior as the runtime runs it: lazy behaviors split, every import and composed trait inlined.
-fn resolved_program(r: &Resolved, spec: &str) -> anyhow::Result<OrbitalSchema> {
-    let options = CompilerOptions::from_env();
-    let mut schema = r.schema.clone();
-    orbital_compiler::phases::lazy::split_lazy_and_resolve(&mut schema, &options, Some(&r.path))
-        .map_err(|e| anyhow::anyhow!("cannot resolve `{spec}`: {e}"))?;
-    orbital_compiler::resolve_schema_with_path(schema, &options, Some(&r.path)).map_err(|e| anyhow::anyhow!("cannot resolve `{spec}`: {e}"))
+/// The behavior resolved through the process's one resolve cache, the entry `behavior/resolve` answers from: a
+/// describe after a resolve of the same file resolves nothing again.
+fn resolved_program(r: &Resolved, spec: &str) -> anyhow::Result<std::sync::Arc<crate::commands::dev::ResolvedEntry>> {
+    crate::commands::dev::resolved_file(&r.path).map_err(|e| anyhow::anyhow!("cannot resolve `{spec}`: {e}"))
 }
 
 fn inline_trait<'a>(program: &'a OrbitalSchema, name: &str) -> Option<&'a TraitDefinition> {
@@ -323,7 +320,8 @@ fn canonical_name(resolved: &Resolved, fallback: &str) -> String {
 
 fn describe_behavior(behavior: &str, only_orbital: Option<&str>) -> anyhow::Result<BehaviorDescription> {
     let resolved = resolve_from(behavior, None)?;
-    let program = resolved_program(&resolved, behavior)?;
+    let entry = resolved_program(&resolved, behavior)?;
+    let program = entry.schema();
     let canonical = canonical_name(&resolved, behavior);
     let program_json = serde_json::to_value(&program)?;
     let program_events: HashSet<String> = program.orbitals.iter().flat_map(orbital_event_names).collect();
@@ -422,8 +420,9 @@ fn describe_behavior(behavior: &str, only_orbital: Option<&str>) -> anyhow::Resu
 
 fn describe_trait(value: Option<Value>, behavior: &str, trait_name: &str, from: Option<&Path>) -> anyhow::Result<Value> {
     let resolved = resolve_from(behavior, from)?;
-    let program = resolved_program(&resolved, behavior)?;
-    let td = inline_trait(&program, trait_name).ok_or_else(|| anyhow::anyhow!("no inline trait `{trait_name}` in `{}`", program.name))?;
+    let entry = resolved_program(&resolved, behavior)?;
+    let program = entry.schema();
+    let td = inline_trait(program, trait_name).ok_or_else(|| anyhow::anyhow!("no inline trait `{trait_name}` in `{}`", program.name))?;
     let mut keys: Vec<(&String, &ConfigField)> = td.config.iter().flatten().collect();
     keys.sort_by(|a, b| a.0.cmp(b.0));
     let knobs = keys
