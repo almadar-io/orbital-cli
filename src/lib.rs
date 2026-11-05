@@ -157,6 +157,12 @@ fn describe_trait_value(
     reflect::describe(reflect::DescribeTarget::Value(value.clone()), from).map_err(|e| e.to_string())
 }
 
+#[cfg(test)]
+pub(crate) fn register_describer_for_tests() {
+    orbital_compiler::loader::register_source_lowerer(|path, _, _| lower_lolo_file(path));
+    orbital_compiler::phases::reflect::register_trait_describer(describe_trait_value);
+}
+
 pub fn run() -> anyhow::Result<()> {
     let raw: Vec<String> = std::env::args().skip(1).collect();
     if let Some(newer) = handoff_target() {

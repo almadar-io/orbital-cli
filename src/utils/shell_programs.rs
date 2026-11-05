@@ -47,6 +47,7 @@ pub(crate) fn locate(name: &str) -> anyhow::Result<ShellProgram> {
 fn request(
     module: &OirModule,
     resolved: Option<orbital_core::OrbitalSchema>,
+    lazy: Vec<shell_protocol::LazyProgram>,
     served: Option<orbital_core::OrbitalSchema>,
     source_path: &Path,
     options: &GenerateOptions,
@@ -56,6 +57,7 @@ fn request(
         ir_version: IR_VERSION,
         module: module.clone(),
         resolved,
+        lazy,
         served,
         source_path: Some(source_path.to_path_buf()),
         write: options.write_options(),
@@ -73,23 +75,28 @@ pub(crate) fn generate(
     shell_options: BTreeMap<String, Value>,
 ) -> anyhow::Result<GenerateResponse> {
     let shell = locate(name)?;
-    let resolved = if shell.description.needs_resolved || shell.description.needs_served {
-        Some(resolve_compiled_schema(compile_path, source_path)?)
+    // A server is the program's own declaration: compile never composes one beside it.
+    let served = if shell.description.needs_served && options.mode != orbital_compiler::ShellMode::Client {
+        let app = resolve_compiled_schema(compile_path, source_path)?;
+        if !crate::commands::program_command::declares_server_endpoint(&app) {
+            anyhow::bail!(
+                "{} declares no http endpoint, so there is no server to compile: compose one in the program (`orbital Api = Server.orbitals.HttpServerOrbital {{ config {{ host: …, port: … }} }}`) or compile `--mode client`",
+                source_path.display()
+            );
+        }
+        Some(app)
     } else {
         None
     };
-    // A server is the program's own declaration: compile never composes one beside it.
-    let served = match (&resolved, shell.description.needs_served && options.mode != orbital_compiler::ShellMode::Client) {
-        (Some(app), true) if crate::commands::program_command::declares_server_endpoint(app) => Some(app.clone()),
-        (Some(_), true) => anyhow::bail!(
-            "{} declares no http endpoint, so there is no server to compile: compose one in the program (`orbital Api = Server.orbitals.HttpServerOrbital {{ config {{ host: …, port: … }} }}`) or compile `--mode client`",
-            source_path.display()
-        ),
-        _ => None,
+    // The client opens each lazy page through its own loader (EXEC-LOAD-2), so it gets the program split.
+    let (resolved, lazy) = if shell.description.needs_resolved {
+        let (program, lazy) = resolve_split_schema(compile_path, source_path)?;
+        (Some(program), lazy)
+    } else {
+        (None, Vec::new())
     };
-    let resolved = resolved.filter(|_| shell.description.needs_resolved);
     let response = generate_from_file_with_source_using(compile_path, source_path, output, options, |module, out| {
-        shell_protocol::invoke(&shell.binary, &request(module, resolved, served, source_path, options, shell_options), out)
+        shell_protocol::invoke(&shell.binary, &request(module, resolved, lazy, served, source_path, options, shell_options), out)
             .map_err(GenerateError::ShellProgram)
     })?;
     Ok(response)
@@ -106,7 +113,7 @@ pub(crate) fn emit(
     shell_options: BTreeMap<String, Value>,
 ) -> anyhow::Result<orbital_core::generate::GeneratedOutput> {
     let shell = locate(name)?;
-    shell_protocol::invoke_emit(&shell.binary, &request(module, resolved, served, source_path, options, shell_options)).map_err(failure)
+    shell_protocol::invoke_emit(&shell.binary, &request(module, resolved, Vec::new(), served, source_path, options, shell_options)).map_err(failure)
 }
 
 /// The lines `orb compile` reports for a shell's reply.
@@ -123,6 +130,33 @@ pub(crate) fn report_lines(response: &GenerateResponse) -> Vec<String> {
         lines.extend(response.next_steps.iter().map(|step| format!("  {step}")));
     }
     lines
+}
+
+/// The resolved program with its `uses lazy` behaviors resolved apart, flattened with each `orbRef` relative to the
+/// program's own folder.
+pub(crate) fn resolve_split_schema(
+    compile_path: &Path,
+    source_path: &Path,
+) -> anyhow::Result<(orbital_core::OrbitalSchema, Vec<shell_protocol::LazyProgram>)> {
+    let schema = orbital_compiler::phases::parse_file(compile_path)
+        .map_err(|e| anyhow::anyhow!("Failed to parse schema for the embedded resolved schema: {}", e))?;
+    let (mut program, lazy) = orbital_compiler::phases::lazy::resolve_program_with_path(schema, &compiler_options_or_bail()?, Some(source_path))
+        .map_err(|e| anyhow::anyhow!("Failed to resolve the embedded resolved schema: {}", e))?;
+    orbital_core::schema::normalize_fn_shapes(&mut program);
+    let mut flat = Vec::new();
+    flatten_lazy(&lazy, "", &mut flat);
+    Ok((program, flat))
+}
+
+fn flatten_lazy(lazy: &[orbital_compiler::phases::lazy::ResolvedLazy], folder: &str, into: &mut Vec<shell_protocol::LazyProgram>) {
+    for item in lazy {
+        let orb_ref = if folder.is_empty() { item.orb_ref.clone() } else { format!("{folder}/{}", item.orb_ref) };
+        let mut program = item.schema.clone();
+        orbital_core::schema::normalize_fn_shapes(&mut program);
+        let child_folder = orb_ref.rsplit_once('/').map(|(dir, _)| dir.to_string()).unwrap_or_default();
+        into.push(shell_protocol::LazyProgram { orb_ref, program });
+        flatten_lazy(&item.lazy, &child_folder, into);
+    }
 }
 
 /// The resolved program a shell embeds as data, as the compiled path compiles it (lazy behaviors included), resolved

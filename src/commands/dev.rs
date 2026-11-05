@@ -96,7 +96,6 @@ fn settings_key(options: &orbital_compiler::CompilerOptions) -> String {
 
 /// `schema` resolved and stored under `key`, its reads recorded from `begin` (which the caller has already run).
 fn store(
-    resolved: &mut std::collections::HashMap<ResolvedKey, std::sync::Arc<ResolvedEntry>>,
     key: ResolvedKey,
     schema: orbital_core::OrbitalSchema,
     options: &orbital_compiler::CompilerOptions,
@@ -106,6 +105,7 @@ fn store(
     let reads = orbital_core::read_set::end();
     let (schema, lazy) = done.map_err(|e| anyhow::anyhow!("resolve {}: {e}", path.display()))?;
     let entry = std::sync::Arc::new(ResolvedEntry { schema, lazy, reads });
+    let mut resolved = RESOLVED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     resolved.insert(key, std::sync::Arc::clone(&entry));
     tracing::debug!(
         target: "almadar:cli:resolve-cache",
@@ -123,12 +123,15 @@ fn store(
 pub(crate) fn resolved_file(path: &Path) -> anyhow::Result<std::sync::Arc<ResolvedEntry>> {
     let options = orbital_compiler::CompilerOptions::from_env();
     let key = (path.to_path_buf(), settings_key(&options));
-    let mut resolved = RESOLVED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some(entry) = resolved.get(&key).filter(|entry| entry.reads.is_current()) {
-        entry.reads.replay();
-        tracing::debug!(target: "almadar:cli:resolve-cache", path = %path.display(), outcome = "hit", entries = resolved.len(), "resolve cache");
-        return Ok(std::sync::Arc::clone(entry));
+    {
+        let resolved = RESOLVED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(entry) = resolved.get(&key).filter(|entry| entry.reads.is_current()) {
+            entry.reads.replay();
+            tracing::debug!(target: "almadar:cli:resolve-cache", path = %path.display(), outcome = "hit", entries = resolved.len(), "resolve cache");
+            return Ok(std::sync::Arc::clone(entry));
+        }
     }
+    // Resolved with the cache unlocked: a build-time describe resolves the program it names through this cache.
     orbital_core::read_set::begin();
     let parsed = orbital_core::read_set::read_to_string(path)
         .map_err(|e| anyhow::anyhow!("Failed to read {}: {}", path.display(), e))
@@ -143,7 +146,7 @@ pub(crate) fn resolved_file(path: &Path) -> anyhow::Result<std::sync::Arc<Resolv
             return Err(e);
         }
     };
-    store(&mut resolved, key, schema, &options, path)
+    store(key, schema, &options, path)
 }
 
 /// [`resolve_to_temp`] for a command program: one std ships is resolved once per state of the files its resolution
@@ -636,6 +639,29 @@ mod tests {
         assert!(serde_json::to_string(edited.schema()).unwrap().contains("HomeStateRenamed"));
         std::fs::write(dir.path().join("post.orb"), POST.replace("PostState", "PostStateRenamed")).unwrap();
         assert!(!std::sync::Arc::ptr_eq(&edited, &resolved_file(&path).unwrap()), "an edit to an import resolves again");
+    }
+
+    #[test]
+    fn a_resolution_whose_build_time_describe_resolves_another_program_finishes() {
+        crate::register_describer_for_tests();
+        // The describer resolves behaviors under the working directory only.
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        std::fs::write(dir.path().join("door.orb"), r#"{"name":"Door","version":"1.0.0","orbitals":[{"name":"Door","entity":{"name":"DoorState","persistence":"runtime","fields":[{"name":"id","type":"string","required":true}]},"traits":[{"name":"DoorLife","linkedEntity":"DoorState","stateMachine":{"states":[{"name":"shut","isInitial":true},{"name":"open"}],"events":[{"key":"OPEN","name":"Open"}],"transitions":[{"from":"shut","to":"open","event":"OPEN","effects":[]}]}}],"pages":[]}]}"#).unwrap();
+        let path = dir.path().join("diagram.orb");
+        let door = dir.path().join("door.orb").display().to_string();
+        std::fs::write(&path, r#"{"name":"diagram","version":"1.0.0","orbitals":[{"name":"Diagram","entity":{"name":"DiagramState","persistence":"runtime","fields":[{"name":"id","type":"string","required":true}]},"traits":[{"name":"Draw","linkedEntity":"DiagramState","stateMachine":{"states":[{"name":"idle","isInitial":true}],"events":[{"key":"INIT","name":"Init"},{"key":"DESCRIBED","name":"Described"}],"transitions":[{"from":"idle","to":"idle","event":"INIT","effects":[["behavior/describe",{"behavior":"DOOR","trait":"DoorLife"},{"emit":{"success":"DESCRIBED"}}]]}]}}],"pages":[]}]}"#.replace("DOOR", &door)).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = path.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(resolved_file(&worker).map(|entry| serde_json::to_value(entry.schema()).unwrap_or_default()));
+        });
+        let resolved = rx
+            .recv_timeout(std::time::Duration::from_secs(120))
+            .expect("the resolution finished instead of waiting on its own cache lock")
+            .expect("resolves");
+        let init = &resolved["orbitals"][0]["traits"][0]["stateMachine"]["transitions"][0]["effects"][0];
+        assert_eq!(init[0], "emit", "the describe was answered at build time: {init}");
+        assert_eq!(init[1], "DESCRIBED");
     }
 
     #[test]
