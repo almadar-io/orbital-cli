@@ -118,15 +118,10 @@ impl PrintRequest {
         let schema = crate::utils::parse_schema_auto_anchored(source, source_path, prior.as_ref())?;
         printed.write(&orbital_lolo::program::canonical_orb_json(&schema)?, self.output.as_deref())?;
         let (Some(out), true) = (self.output.as_deref(), schema.locales.as_ref().is_some_and(|l| !l.is_empty())) else { return Ok(()) };
-        let path = Path::new(source_path);
-        let (resolved, _) = orbital_compiler::phases::lazy::resolve_program_with_path(schema, &orbital_compiler::CompilerOptions::from_env(), Some(path))
-            .map_err(|e| anyhow::anyhow!("Failed to resolve {source_path} for its catalogs: {e}"))?;
-        let program_dir = path.parent().unwrap_or(Path::new("."));
-        orbital_compiler::phases::messages::write_catalogs(out, &resolved, program_dir)
-            .map_err(|e| anyhow::anyhow!("Failed to write catalogs beside {}: {e}", out.display()))?;
+        let program_dir = Path::new(source_path).parent().unwrap_or(Path::new("."));
         let out_dir = out.parent().unwrap_or(Path::new("."));
-        for locale in resolved.locales.iter().flatten() {
-            let file = Path::new("locales").join(locale).join(format!("{}.json", resolved.name));
+        for locale in schema.locales.iter().flatten() {
+            let file = Path::new("locales").join(locale).join(format!("{}.json", schema.name));
             let (from, to) = (program_dir.join(&file), out_dir.join(&file));
             if from.exists() && from.canonicalize().ok() != to.canonicalize().ok() {
                 std::fs::create_dir_all(to.parent().unwrap_or(out_dir))?;
@@ -424,11 +419,9 @@ pub(crate) struct ResolvedRead {
     /// Where the resolved program lives on disk: the source when it was already resolved, `output` when it was
     /// resolved and written; absent when it was resolved in memory only.
     pub(crate) program_path: Option<PathBuf>,
-    /// Each declared locale's merged catalog (locale to qualified key to message), when the program declares locales and no `output` was given.
-    pub(crate) catalogs: std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>,
 }
 
-/// `orb resolve`: the text of the program at `path` resolved, written to `output` with its catalogs and lazy children.
+/// `orb resolve`: the text of the program at `path` resolved (carrying its messages), written to `output` with its lazy children.
 /// A resolved source is answered as it was read and never written out again (EXEC-LOAD-1).
 pub(crate) fn resolved_read(path: &Path, output: Option<&Path>) -> anyhow::Result<ResolvedRead> {
     use crate::utils::{detect_syntax, InputSyntax};
@@ -446,20 +439,16 @@ pub(crate) fn resolved_read(path: &Path, output: Option<&Path>) -> anyhow::Resul
     if let Some(mark) = mark {
         orbital_compiler::phases::check_resolved_mark(&mark, path.display().to_string())
             .map_err(|e| anyhow::anyhow!("Failed to resolve {}: {}", path.display(), e))?;
-        return Ok(ResolvedRead { text: content, loaded_resolved: true, program_path: Some(path.to_path_buf()), catalogs: Default::default() });
+        return Ok(ResolvedRead { text: content, loaded_resolved: true, program_path: Some(path.to_path_buf()) });
     }
     drop(content);
-    let locales = |schema: &orbital_core::OrbitalSchema| schema.locales.as_ref().is_some_and(|l| !l.is_empty());
     let entry = super::dev::resolved_file(path)?;
     let (resolved, lazy) = (entry.schema(), entry.lazy());
     let text = orbital_compiler::phases::lazy::resolved_json(resolved).map_err(anyhow::Error::msg)?;
     match output {
         Some(out) => {
             std::fs::write(out, &text).map_err(|e| anyhow::anyhow!("Failed to write {}: {}", out.display(), e))?;
-            let program_dir = path.parent().unwrap_or(Path::new("."));
-            orbital_compiler::phases::messages::write_catalogs(out, resolved, program_dir)
-                .map_err(|e| anyhow::anyhow!("Failed to write catalogs beside {}: {}", out.display(), e))?;
-            orbital_compiler::phases::lazy::write_resolved_lazy(out.parent().unwrap_or(Path::new(".")), lazy, program_dir)
+            orbital_compiler::phases::lazy::write_resolved_lazy(out.parent().unwrap_or(Path::new(".")), lazy)
                 .map_err(|e| anyhow::anyhow!("Failed to write lazy behaviors beside {}: {}", out.display(), e))?;
         }
         None if !lazy.is_empty() => anyhow::bail!(
@@ -469,11 +458,7 @@ pub(crate) fn resolved_read(path: &Path, output: Option<&Path>) -> anyhow::Resul
         ),
         None => {}
     }
-    let catalogs = match output {
-        None if locales(resolved) => orbital_compiler::phases::messages::program_catalogs(resolved, lazy, path.parent().unwrap_or(Path::new("."))),
-        _ => Default::default(),
-    };
-    Ok(ResolvedRead { text, loaded_resolved: false, program_path: output.map(Path::to_path_buf), catalogs })
+    Ok(ResolvedRead { text, loaded_resolved: false, program_path: output.map(Path::to_path_buf) })
 }
 
 fn to_json(value: &Value) -> serde_json::Value {
@@ -744,7 +729,7 @@ fn stamp_and_validate(
 
 /// The issues of a validation report, as the `{ code, message, path?, line?, column? }` findings both hosts answer.
 /// The shell's prebuilt web client copied to `<output>/web-client` with the program's runtime files (the client-mode
-/// `packages/client/public` and `locales/`) laid over it: the folder `orb serve` serves.
+/// `packages/client/public`) laid over it: the folder `orb serve` serves.
 fn copy_web_client(built: Option<&Path>, output: &Path) -> Result<PathBuf, SubstrateFailure> {
     let built = built.ok_or_else(|| {
         failure("program/eval: the typescript shell ships no prebuilt web client: run `orb update` (in a shell checkout, build it with `node tooling/scripts/build-web-client.mjs`)")
@@ -771,8 +756,7 @@ fn copy_web_client(built: Option<&Path>, output: &Path) -> Result<PathBuf, Subst
     }
     let target = output.join("web-client");
     let copied = copy(built, &target)
-        .and_then(|()| copy(&public, &target))
-        .and_then(|()| if output.join("locales").is_dir() { copy(&output.join("locales"), &target.join("locales")) } else { Ok(()) });
+        .and_then(|()| copy(&public, &target));
     copied.map_err(|e| failure(format!("program/eval: laying out the web client in {}: {e}", target.display())))?;
     Ok(target)
 }
@@ -1025,17 +1009,6 @@ impl ProgramHost {
         fields.insert("loadedResolved".into(), Value::Bool(read.loaded_resolved));
         if let Some(program_path) = &read.program_path {
             fields.insert("programPath".into(), Value::String(program_path.display().to_string().into()));
-        }
-        if !read.catalogs.is_empty() {
-            let mut catalogs = orbital_core::ValueMap::default();
-            for (locale, messages) in &read.catalogs {
-                let mut entries = orbital_core::ValueMap::default();
-                for (key, message) in messages {
-                    entries.insert(key.as_str().into(), Value::String(message.as_str().into()));
-                }
-                catalogs.insert(locale.as_str().into(), Value::object(entries));
-            }
-            fields.insert("catalogs".into(), Value::object(catalogs));
         }
         if with_text {
             fields.insert("text".into(), Value::String(read.text.into()));
@@ -2138,7 +2111,8 @@ orbital O {
         assert_eq!(authored["programPath"], app.display().to_string(), "an authored source lives at its output: {authored}");
         assert_eq!(authored["loadedResolved"], false);
         assert!(app.exists());
-        assert!(written.join("messages").exists() || std::fs::read_dir(&written).unwrap().count() > 1, "catalogs sit beside the output");
+        assert_eq!(std::fs::read_dir(&written).unwrap().count(), 1, "the program carries its messages: nothing is written beside it");
+        assert!(authored["program"]["messages"]["ar"].is_object(), "{authored}");
 
         let elsewhere = dir.path().join("elsewhere");
         std::fs::create_dir(&elsewhere).unwrap();
@@ -2152,12 +2126,12 @@ orbital O {
         assert_eq!(bare["program"], again["program"]);
 
         let in_memory = json(&read(&source, None).expect("an authored source with locales needs no output"));
-        let mut locales: Vec<&String> = in_memory["catalogs"].as_object().expect("catalogs").keys().collect();
+        let mut locales: Vec<&String> = in_memory["program"]["messages"].as_object().expect("messages").keys().collect();
         locales.sort();
-        assert_eq!(locales, ["ar", "en"], "each declared locale's catalog is answered: {in_memory}");
+        assert_eq!(locales, ["ar", "en"], "the program carries each declared locale's messages: {in_memory}");
         assert!(in_memory.get("programPath").is_none(), "{in_memory}");
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 3, "nothing new is written beside the source (note.lolo, dist, elsewhere)");
-        assert!(bare.get("catalogs").is_none(), "control: a resolved source carries no catalogs to answer: {bare}");
+        assert!(in_memory.get("catalogs").is_none() && bare.get("catalogs").is_none(), "control: no catalogs ride beside the program: {bare}");
     }
 
     #[test]
@@ -2179,7 +2153,7 @@ orbital O {
         assert_eq!(authored["programPath"], app.display().to_string());
         assert_eq!(authored["program"]["name"], "note-pad");
         assert!(app.exists(), "an authored source is written to output");
-        assert!(std::fs::read_dir(&dist).unwrap().count() > 1, "catalogs sit beside the output");
+        assert_eq!(std::fs::read_dir(&dist).unwrap().count(), 1, "the program carries its messages: nothing is written beside it");
 
         let elsewhere = dir.path().join("elsewhere");
         std::fs::create_dir(&elsewhere).unwrap();
@@ -2279,7 +2253,7 @@ orbital O {
         assert_eq!(answer["program"]["name"], "note-pad", "{answer}");
         assert!(answer.get("text").is_none(), "no text is printed: {answer}");
         let printed = json(&read(serde_json::json!({})).expect("the printed form needs no output either"));
-        assert!(printed["text"].is_string() && printed["catalogs"]["en"].is_object(), "{printed}");
+        assert!(printed["text"].is_string() && printed["program"]["messages"]["en"].is_object(), "{printed}");
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "nothing is written beside the source");
     }
 
@@ -2702,14 +2676,11 @@ orbital O {
         std::fs::create_dir_all(out.path().join("packages/client/public")).unwrap();
         std::fs::write(out.path().join("packages/client/public/client.json"), "{}").unwrap();
         std::fs::write(out.path().join("packages/client/public/program.client.orb"), "{\"name\":\"app\"}").unwrap();
-        std::fs::create_dir_all(out.path().join("locales")).unwrap();
-        std::fs::write(out.path().join("locales/en.json"), "{\"hi\":\"Hi\"}").unwrap();
         let copied = copy_web_client(Some(&built), out.path()).expect("copies");
         assert_eq!(copied, out.path().join("web-client"));
         assert_eq!(std::fs::read_to_string(copied.join("index.html")).unwrap(), "<html></html>");
         assert_eq!(std::fs::read_to_string(copied.join("assets/fonts/a.woff2")).unwrap(), "font");
         assert_eq!(std::fs::read_to_string(copied.join("program.client.orb")).unwrap(), "{\"name\":\"app\"}");
-        assert_eq!(std::fs::read_to_string(copied.join("locales/en.json")).unwrap(), "{\"hi\":\"Hi\"}");
         let report = orbital_compiler::mixed::CompileReport { files: 3, ..Default::default() };
         let answer = generate_answer(&report, Some(&copied));
         assert_eq!(answer["webClient"], copied.display().to_string());
