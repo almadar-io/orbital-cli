@@ -156,8 +156,10 @@ pub(crate) fn inspect(source: &str, options: &Value) -> Result<Value, SubstrateF
         }
     }
     let types = orbital_compiler::phases::validation::effect::expression_types(&program);
+    let expected = orbital_compiler::phases::validation::effect::expected_types(&program);
+    let models = orbital_compiler::phases::validation::effect::expected_models(&program);
     Ok(
-        json!({"program": program, "authoredProgram": authored_program, "definitions": definitions, "composition": composition, "sourceMap": anchors, "imports": imports, "lazy": lazy_maps, "types": types,
+        json!({"program": program, "authoredProgram": authored_program, "definitions": definitions, "composition": composition, "sourceMap": anchors, "imports": imports, "lazy": lazy_maps, "types": types, "expected": expected, "models": models,
         "path": path, "version": options.get("version"), "columnEncoding": "unicode-scalar", "lengthEncoding": "utf-8-bytes", "lineBase": 1, "columnBase": 1}),
     )
 }

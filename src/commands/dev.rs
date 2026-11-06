@@ -50,9 +50,7 @@ fn resolve_schema_into(parent: &Path, schema: orbital_core::OrbitalSchema, path:
     let program = ResolvedProgram { dir: scratch_dir_in(parent, "orbital-dev-")? };
     let out = program.path();
     std::fs::write(&out, serde_json::to_string(resolved)?)?;
-    let program_dir = path.parent().unwrap_or(Path::new("."));
-    orbital_compiler::phases::messages::write_catalogs(&out, resolved, program_dir)?;
-    orbital_compiler::phases::lazy::write_resolved_lazy(program.dir.path(), lazy, program_dir)?;
+    orbital_compiler::phases::lazy::write_resolved_lazy(program.dir.path(), lazy)?;
     Ok(program)
 }
 

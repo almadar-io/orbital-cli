@@ -419,7 +419,7 @@ pub(crate) fn declares_server_endpoint(schema: &orbital_core::OrbitalSchema) -> 
 }
 
 /// Run the program a cli command handed back (`orb-run` in its answer's headers), as the bootloader runs every program.
-/// `orb-run: server` boots the composed app in the body as `orb serve` does: catalogs beside `orb-app`, `INIT` mounted on the server side, held until a signal.
+/// `orb-run: server` boots the composed app in the body as `orb serve` does: its lazy files beside `orb-app`, `INIT` mounted on the server side, held until a signal.
 /// Takes the answer by value: its body is the whole resolved program as text, freed once parsed rather than held for
 /// the server's lifetime.
 pub(crate) fn run_handoff(answer: CommandAnswer) -> anyhow::Result<()> {
@@ -432,13 +432,11 @@ pub(crate) fn run_handoff(answer: CommandAnswer) -> anyhow::Result<()> {
         }
     }
     let app = header("orb-app").ok_or_else(|| {
-        anyhow::anyhow!("orb-run: server needs orb-app, the resolved app beside its catalogs")
+        anyhow::anyhow!("orb-run: server needs orb-app, the resolved app its lazy files sit beside")
     })?;
     let schema: orbital_core::OrbitalSchema = serde_json::from_str(&body)
         .map_err(|e| anyhow::anyhow!("orb-run: server: the body is not a program: {e}"))?;
     drop(body);
-    let locales = schema.locales.clone().unwrap_or_default();
-    let catalogs = orbital_shell_rust::host::boot::read_catalogs(Path::new(app), &locales)?;
     let host = orbital_shell_rust::host::SubstratePort(std::sync::Arc::new(
         crate::commands::program_host::ProgramHost,
     ));
@@ -447,7 +445,6 @@ pub(crate) fn run_handoff(answer: CommandAnswer) -> anyhow::Result<()> {
         schema,
         Path::new(app),
         host,
-        catalogs,
         &std::env::vars().collect(),
         false,
     )?;
