@@ -19,11 +19,12 @@ path = "src/bin/orb.rs"
 [dependencies]
 # Core crates
 orbital-core = { git = "https://github.com/almadar-io/orbital-core", branch = "main", features = ["client-http"] }
-# The native orb answers `ffi/call`; feature unification turns it on in the runtime orbital-core embeds.
-orbital-core-runtime = { git = "https://github.com/almadar-io/orbital-core", branch = "main", default-features = false, features = ["ffi"] }
+# The native orb answers `ffi/call`; feature unification turns it (and the static WGSL check) on in the runtime orbital-core embeds.
+orbital-core-runtime = { git = "https://github.com/almadar-io/orbital-core", branch = "main", default-features = false, features = ["ffi", "wgsl"] }
 orbital-compiler = { git = "https://github.com/almadar-io/orbital-compiler", branch = "main" }
 orbital-lolo = { git = "https://github.com/almadar-io/orbital-lolo", branch = "main" }
-orbital-shell-rust = { git = "https://github.com/almadar-io/orbital-shell-rust", branch = "main" }
+# The native orb answers `gpu/*` through orbital-canvas.
+orbital-shell-rust = { git = "https://github.com/almadar-io/orbital-shell-rust", branch = "main", features = ["gpu"] }
 thiserror = "1.0"
 base64 = "0.22"
 

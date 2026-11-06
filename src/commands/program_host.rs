@@ -797,7 +797,7 @@ fn resolve_with_step_config(path: &Path, steps: &[serde_json::Value]) -> anyhow:
 /// native program host instead of leaving keyed ones pending (G-ORB-459).
 fn run_cascade(path: &Path, steps: &serde_json::Value, live: bool) -> anyhow::Result<serde_json::Value> {
     use orbital_core::runtime::{EntitySource, InMemoryEntityCache, RuntimeKernel};
-    use orbital_core::step_replay::{play_steps, replay_dispatch, trait_definitions, with_step_config, StepClock, StepCredentials};
+    use orbital_core::step_replay::{play_steps, replay_dispatch, trait_definitions, with_step_config, StepAnswers, StepClock, StepCredentials};
     let steps = steps.as_array().ok_or_else(|| anyhow::anyhow!("--steps must be a JSON array"))?;
     let text = std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("Failed to read {}: {e}", path.display()))?;
     let text = with_step_config(&text, steps).map_err(|e| anyhow::anyhow!(e))?.unwrap_or(text);
@@ -831,7 +831,8 @@ fn run_cascade(path: &Path, steps: &serde_json::Value, live: bool) -> anyhow::Re
         }
     };
     let credentials = StepCredentials::new();
-    play_steps(kernel, &clock, &credentials, &defs, steps, live, &mut |trait_name, event, payload, settle_ms| match &live_host {
+    let answers = StepAnswers::new();
+    play_steps(kernel, &clock, &credentials, &answers, &defs, steps, live, &mut |trait_name, event, payload, settle_ms| match &live_host {
         Some((host, _files)) => {
             host.tap_completions();
             let played = host.dispatch(trait_name, orbital_core::RUNTIME_SINGLETON, event, payload).map_err(|e| e.to_string());
@@ -839,7 +840,7 @@ fn run_cascade(path: &Path, steps: &serde_json::Value, live: bool) -> anyhow::Re
             let completions = host.take_completions();
             played.and_then(|dispatched| orbital_core::step_replay::with_completions(dispatched, completions))
         }
-        None => replay_dispatch(kernel, &credentials, trait_name, event, payload),
+        None => replay_dispatch(kernel, &credentials, &answers, trait_name, event, payload),
     })
     .map_err(|refusal| anyhow::anyhow!(refusal.error))
     .and_then(|report| Ok(serde_json::to_value(report)?))
@@ -1690,6 +1691,10 @@ impl ProgramHost {
                 return Err(failure(format!(
                     "{op}: a request's now must be a number (ms since the epoch)"
                 )));
+            }            if r.get("answers").is_some_and(|a| !a.is_array()) {
+                return Err(failure(format!(
+                    "{op}: a request's answers must be a list of host answers"
+                )));
             }
         }
         let steps: Vec<serde_json::Value> = requests
@@ -1699,7 +1704,7 @@ impl ProgramHost {
                 if let Some(from) = r.get("from") {
                     step["from"] = from.clone();
                 }
-                for key in ["entity", "config", "now", "settleMs", "identity", "credentials"] {
+                for key in ["entity", "config", "now", "settleMs", "identity", "credentials", "answers"] {
                     if let Some(v) = r.get(key) {
                         step[key] = v.clone();
                     }
