@@ -34,15 +34,24 @@ pub(crate) fn source_findings(content: &str) -> Vec<Finding> {
     let Ok(program) = orbital_lolo::parse_str(content) else {
         return Vec::new();
     };
-    if !program.app.legacy_lines {
-        return Vec::new();
+    let mut findings = Vec::new();
+    if program.app.legacy_lines {
+        findings.push(Finding::new(
+            "ORB_L_APP_HEADER_LEGACY".to_string(),
+            format!("app:{}", program.app.span.line),
+            "the app header writes its modifiers outside its bracket (a positional version, or description/theme/locales/public on loose lines); declare them in the bracket: `app NAME [ version: \"1.0.0\", description: …, theme: …, locales: […], public: … ]`".to_string(),
+            Some("`orb format --write <file>` rewrites the header into the bracket form".to_string()),
+        ));
     }
-    vec![Finding::new(
-        "ORB_L_APP_HEADER_LEGACY".to_string(),
-        format!("app:{}", program.app.span.line),
-        "the app header writes its modifiers outside its bracket (a positional version, or description/theme/locales/public on loose lines); declare them in the bracket: `app NAME [ version: \"1.0.0\", description: …, theme: …, locales: […], public: … ]`".to_string(),
-        Some("`orb format --write <file>` rewrites the header into the bracket form".to_string()),
-    )]
+    if program.app.description.as_deref().map_or(true, |d| d.trim().is_empty()) {
+        findings.push(Finding::new(
+            "ORB_L_APP_HEADER_DESCRIPTION_MISSING".to_string(),
+            format!("app:{}", program.app.span.line),
+            "the app header declares no `description:`; the behavior catalog lists a behavior by its header alone, so the header must say what the behavior is".to_string(),
+            Some("add `description: \"…\"` to the app header bracket".to_string()),
+        ));
+    }
+    findings
 }
 
 fn position(p: Position) -> SourcePosition {
@@ -228,7 +237,8 @@ mod tests {
     #[test]
     fn control_the_bracket_header_is_clean() {
         assert!(source_findings(&format!("app Foo [version: \"1.0.0\", description: \"Desc\", theme: \"orb-light\"]\n{BODY}")).is_empty());
-        assert!(source_findings(&format!("app Foo\n{BODY}")).is_empty());
+        let bare: Vec<String> = source_findings(&format!("app Foo\n{BODY}")).into_iter().map(|f| f.code).collect();
+        assert_eq!(bare, vec!["ORB_L_APP_HEADER_DESCRIPTION_MISSING".to_string()], "a header with no description is reported, and only that");
         assert!(source_findings("{\"name\":\"Foo\",\"orbitals\":[]}").is_empty());
     }
 

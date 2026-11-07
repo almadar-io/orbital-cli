@@ -3072,6 +3072,30 @@ orbital O {
     }
 
     #[test]
+    fn a_listing_without_traits_reads_the_same_rows_from_headers_as_from_programs() {
+        orbital_compiler::loader::register_source_lowerer(|path, _, _| crate::lower_lolo_file(path));
+        let scope = from_json(serde_json::json!({ "paths": ["almadar-std/ml/organisms", "almadar-std/dev/atoms"] })).unwrap();
+        let header = json(&ProgramHost::catalog(Some(&scope), Some(&from_json(serde_json::json!({ "traits": false })).unwrap())).unwrap());
+        let program = json(&ProgramHost::catalog(Some(&scope), None).unwrap());
+        let facts = |rows: &serde_json::Value| -> Vec<serde_json::Value> {
+            rows.as_array().unwrap().iter().map(|e| serde_json::json!([e["behavior"], e["package"], e["topic"], e["level"], e["exposure"], e["description"], e["capabilities"], e["pattern"]])).collect()
+        };
+        assert!(!facts(&header).is_empty());
+        assert_eq!(facts(&header), facts(&program), "header rows and program rows agree on every path and header fact");
+    }
+
+    #[test]
+    fn control_a_header_row_never_lowers_its_program() {
+        let dir = tempfile::tempdir().unwrap();
+        let lolo = dir.path().join("broken-body.lolo");
+        std::fs::write(&lolo, "app broken-body [\n  version: \"1.0.0\",\n  description: \"Listed from its header.\"\n]\norbital BrokenBody {\n  this body does not parse\n}\n").unwrap();
+        let text = std::fs::read_to_string(&lolo).unwrap();
+        let header = orbital_lolo::parse_app_header(&text).expect("the header parses although the body does not");
+        assert_eq!(header.description.as_deref(), Some("Listed from its header."));
+        assert!(orbital_lolo::parse_str(&text).is_err(), "control: the whole program does not parse");
+    }
+
+    #[test]
     fn behavior_texts_is_not_an_operator_the_host_answers() {
         let scope = from_json(serde_json::json!({ "paths": ["almadar-std/ml/organisms"] })).unwrap();
         let unknown = ProgramHost.run("behavior/texts", &[scope]).unwrap_err();
