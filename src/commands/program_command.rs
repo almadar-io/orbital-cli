@@ -518,6 +518,13 @@ orbital EchoOrbital {
         )
         .unwrap();
         std::fs::write(dir.join("fake-echo.lolo"), ECHO).unwrap();
+        let core = root.join("project/node_modules/@almadar/core");
+        std::fs::create_dir_all(&core).unwrap();
+        std::fs::write(
+            core.join("package.json"),
+            r#"{ "name": "@almadar/core", "version": "10.1.0", "orbLanguage": { "version": "1.0.0" } }"#,
+        )
+        .unwrap();
         std::fs::create_dir_all(root.join("store")).unwrap();
         (root.join("project"), root.join("store"))
     }
@@ -1160,8 +1167,8 @@ orbital ListenerOrbital {
         let program = run_fixture("listener", LISTENER);
         let runtime = boot_run(&program, true).unwrap();
         assert_eq!(
-            runtime.open_calls(),
-            vec!["listener".to_string()],
+            runtime.open_calls().iter().map(|key| orbital_core::runtime::resumable::program_call_key(key)).collect::<Vec<_>>(),
+            vec!["listener"],
             "{}",
             serde_json::to_string(&runtime.trace()).unwrap()
         );
