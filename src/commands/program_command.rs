@@ -1344,6 +1344,100 @@ orbital SplitOrbital {{
         });
     }
 
+    /// G-STD-249: `entry` is what `TICK_CALLED` does. `waits` moves to `waiting`, where a `[background]` tick
+    /// answers; `waits_then_cancels` moves there and leaves again in the same dispatch; `stays` never waits.
+    fn tick_program(entry: &str) -> String {
+        let (arm, cancel_arm) = match entry {
+            "waits" => ("-> waiting", ""),
+            "waits_then_cancels" => ("-> waiting\n        (emit CANCEL {})", "\n      CANCEL -> ready"),
+            _ => ("-> ready", ""),
+        };
+        format!(
+            r#"app fake-tick [
+  version: "1.0.0",
+  inbound: ["cli-tick"],
+  description: "Answers on the first background tick after its call."
+]
+
+orbital TickOrbital {{
+  entity TickRun [runtime] {{
+    id : string!
+  }}
+
+  trait TickCli -> TickRun {{
+    initial: ready
+
+    state ready {{
+      INIT -> ready
+      TICK_CALLED {arm}
+    }}
+
+    state waiting {{
+      INIT -> ready
+      BEAT -> ready
+        (emit TICK_ANSWERED {{ status: 200, body: "late" }}){cancel_arm}
+    }}
+
+    ticks {{
+      beat every 50ms in waiting [background]
+        (emit BEAT {{}})
+    }}
+
+    listens {{
+      TICK_CALLED -> inbound "cli-tick" answers TICK_ANSWERED {{
+        headers : Map string string
+        rawBody : string
+      }}
+    }}
+
+    emits {{
+      TICK_ANSWERED -> internal {{ status : number! body : string! }}
+      BEAT -> internal {{}}
+      CANCEL -> internal {{}}
+    }}
+  }}
+
+  page boot as TickStart -> TickCli
+}}
+"#
+        )
+    }
+
+    fn run_tick_program(name: &str, entry: &str) -> (CommandAnswer, std::time::Duration) {
+        let program = run_fixture(name, &tick_program(entry));
+        let started = std::time::Instant::now();
+        let answer = run_command_program(&program, "tick", &[], Path::new(".")).unwrap();
+        (answer, started.elapsed())
+    }
+
+    #[test]
+    fn g_std_249_a_command_waiting_on_its_own_background_tick_is_answered_not_unanswered() {
+        bounded(|| {
+            let (CommandAnswer { code, body, .. }, _) = run_tick_program("tick-waits", "waits");
+            assert_eq!((code, body.as_str()), (0, "late"), "{body}");
+        });
+    }
+
+    #[test]
+    fn g_std_249_control_a_command_with_no_pending_tick_ends_at_once() {
+        bounded(|| {
+            let (CommandAnswer { code, body, .. }, took) = run_tick_program("tick-stays", "stays");
+            assert_eq!(code, 1, "{body}");
+            assert!(body.contains("inbound-unanswered"), "{body}");
+            assert!(took < std::time::Duration::from_secs(5), "a program with no pending timer must not hold the request: {took:?}");
+        });
+    }
+
+    #[test]
+    fn g_std_249_edge_a_tick_cancelled_before_it_fires_does_not_hold_the_request_open() {
+        bounded(|| {
+            let (CommandAnswer { code, body, .. }, took) = run_tick_program("tick-cancels", "waits_then_cancels");
+            assert_eq!(code, 1, "{body}");
+            assert!(body.contains("inbound-unanswered"), "{body}");
+            assert!(took < std::time::Duration::from_secs(5), "a cancelled timer must not hold the request: {took:?}");
+        });
+    }
+
     #[test]
     fn control_the_same_hook_outside_the_cli_topic_is_not_a_command() {
         let (cwd, store) = project("other-topic", "infra");

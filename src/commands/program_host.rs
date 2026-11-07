@@ -927,7 +927,7 @@ impl ProgramHost {
                 (&given, pass)
             }
         };
-        let findings = orbital_core::runtime::os_grants::os_grant_findings(schema, pass);
+        let findings = orbital_core::runtime::os_grants::os_grant_findings(schema, pass).map_err(|e| failure(format!("{op}: {}: {e}", e.code())))?;
         serialized(&orbital_core::runtime::os_grants::OsGrantsReport { findings })
     }
 
