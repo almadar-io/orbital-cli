@@ -66,11 +66,12 @@ fn emit_orb_to_a_file_writes_each_locales_catalog_beside_it() {
         .output()
         .unwrap();
     assert!(status.status.success(), "{}", String::from_utf8_lossy(&status.stderr));
-    let en = std::fs::read_to_string(registry.join("site.en.json")).unwrap();
-    assert!(en.contains("site:hero.title") && en.contains("Hello"), "{en}");
     // The behavior's own catalogs travel with it, so a program importing it from the registry finds them.
-    let own = std::fs::read_to_string(registry.join("locales").join("ar").join("site.json")).unwrap();
-    assert!(own.contains("hero.title") && own.contains("مرحبا"), "{own}");
+    for (locale, message) in [("en", "Hello"), ("ar", "مرحبا")] {
+        let own = std::fs::read_to_string(registry.join("locales").join(locale).join("site.json")).unwrap();
+        assert!(own.contains("hero.title") && own.contains(message), "{locale}: {own}");
+    }
+    assert!(!registry.join("site.en.json").exists(), "no flattened sidecar: hosts read locales/<locale>/<name>.json");
 }
 
 #[test]

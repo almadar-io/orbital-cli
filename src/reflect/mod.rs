@@ -8,6 +8,7 @@ mod index;
 
 pub(crate) use describe::{describe, DescribeTarget};
 use index::{package_rows, BehaviorRow};
+pub(crate) use index::RowDepth;
 
 use orbital_compiler::loader::{ExternalOrbitalLoader, ImportChain, LoaderConfig, LoaderError};
 use orbital_core::behavior_index::{header_tags, indexed_file_at, lolo_path_of};
@@ -187,6 +188,7 @@ pub(crate) struct CatalogRow {
 pub(crate) fn catalog_rows(
     paths: &[String],
     exposure: &[String],
+    depth: index::RowDepth,
     skipped: &mut dyn FnMut(&str, &str, &str),
 ) -> anyhow::Result<Vec<CatalogRow>> {
     use orbital_core::behavior_index::EXPOSURES;
@@ -217,7 +219,7 @@ pub(crate) fn catalog_rows(
     let mut derived: std::collections::BTreeMap<usize, index::PackageRows> = Default::default();
     for (package, _) in &scopes {
         if !derived.contains_key(package) {
-            let rows = package_rows(&packages, *package)?;
+            let rows = package_rows(&packages, *package, depth)?;
             for (name, error) in &rows.skipped {
                 skipped(&packages[*package].prefix, name, error);
             }

@@ -88,18 +88,19 @@ fn emit_ts_contains_expected_exports() {
     }
 }
 
-// The Python shell runs the served program on the native kernel: no entity model, state enum or trait class is generated, so `emit py` has no file to print.
+// The Python shell runs the served program on the native kernel: it generates the typed models (entities and event
+// payloads) and no state enum or trait class, so `emit py` prints the model files only.
 #[test]
-fn emit_py_matches_no_file_under_the_kernel_host() {
+fn emit_py_prints_the_models_and_no_trait_logic_under_the_kernel_host() {
     let orb = std_modal_orb();
     let (stdout, stderr, ok) = run_orb(&["emit", "py", orb.to_str().unwrap()]);
     assert!(ok, "emit py failed. stderr:\n{}", stderr);
-    assert!(
-        stderr.contains("matched zero generated files"),
-        "expected the zero-match warning. stderr:\n{stderr}"
-    );
-    for absent in ["class ModalRecord(BaseModel)", "class ModalRecordModalState(Enum)", "class ModalRecordModal"] {
-        assert!(!stdout.contains(absent), "unexpected {absent:?} in:\n{stdout}");
+    for file in ["// ───── __init__.py ─────", "// ───── entities.py ─────", "// ───── events.py ─────"] {
+        assert!(stdout.contains(file), "expected {file:?} in:\n{stdout}");
+    }
+    assert!(stdout.contains("class ModalRecord:"), "the entity model is generated:\n{stdout}");
+    for absent in ["class ModalRecordModalState(", "class ModalRecordModal:", "class ModalRecordModal("] {
+        assert!(!stdout.contains(absent), "control: no trait logic is generated, found {absent:?} in:\n{stdout}");
     }
 }
 

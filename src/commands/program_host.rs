@@ -1298,7 +1298,9 @@ impl ProgramHost {
         let with_traits = option_flag(options, "traits") != Some(false);
         let with_texts = option_flag(options, "texts") == Some(true);
         let started = std::time::Instant::now();
-        let rows = reflect::catalog_rows(&paths, &exposure, &mut |prefix, name, error| {
+        // A plain listing needs only path and header facts; traits and the embedding texts need the lowered program.
+        let depth = if with_traits || with_texts { reflect::RowDepth::Program } else { reflect::RowDepth::Header };
+        let rows = reflect::catalog_rows(&paths, &exposure, depth, &mut |prefix, name, error| {
             tracing::warn!(target: orbital_core::logging::ns::CLI, "skipped {prefix}/{name}: {error}");
         })
         .map_err(|e| failure(format!("behavior/catalog: {e}")))?;

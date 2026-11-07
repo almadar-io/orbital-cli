@@ -1,5 +1,6 @@
 //! The rows a catalog lists: one per behavior an installed package ships, derived on read from its tree, its `.lolo`
-//! header tags and its lowered program. No cache lives here: whether a listing is cached, and under what key, is std's.
+//! header and, when a caller asks for program facts, its lowered program. No cache lives here: whether a listing is
+//! cached, and under what key, is std's.
 
 use orbital_compiler::loader::{ExternalOrbitalLoader, ImportChain, LoaderConfig};
 use orbital_core::behavior_index::{
@@ -14,6 +15,15 @@ const WORKERS: usize = 8;
 const WORKER_STACK: usize = 8 * 1024 * 1024;
 const MAX_IMPORT_DEPTH: usize = 16;
 const RELOAD_EVERY: usize = 48;
+
+/// What a row is read from: the `.lolo` header alone (path facts, the header's `description:` and tags), or also the
+/// lowered program (its traits, default entity and connectable events). A behavior with no `.lolo` source is read
+/// from its program either way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RowDepth {
+    Header,
+    Program,
+}
 
 /// One shipped behavior.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -271,6 +281,47 @@ fn owners_of(packages: &[BehaviorPackage]) -> anyhow::Result<HashMap<String, usi
     Ok(owners)
 }
 
+/// A row read from the `.lolo` header alone: the program is never parsed past its `app` header nor lowered.
+fn header_row_of(pkg: &BehaviorPackage, file: &IndexedFile, hand_authored: &HashSet<String>, text: &str) -> anyhow::Result<Option<BehaviorRow>> {
+    let header = orbital_lolo::parse_app_header(text).map_err(|e| anyhow::anyhow!("{}/{}: the app header does not parse: {e}", pkg.prefix, file.name))?;
+    let tags = header_tags(text).map_err(|e| anyhow::anyhow!("{}/{}: {e}", pkg.prefix, file.name))?;
+    let exposure = resolve_exposure(file, PackageSource::of(&pkg.name), hand_authored.contains(&file.name), tags.exposure.as_deref());
+    let level = file.level();
+    Ok(Some(BehaviorRow {
+        name: file.name.clone(),
+        dirs: file.dirs.clone(),
+        level: level.as_str().to_string(),
+        topic: file.topic(),
+        exposure,
+        description: header.description.unwrap_or_default(),
+        capabilities: tags.capabilities,
+        pattern: tags.pattern,
+        traits: Vec::new(),
+        default_entity_name: String::new(),
+        connectable_events: Vec::new(),
+    }))
+}
+
+/// A row at `depth`: from the header when that is enough and the `.lolo` is on disk, else from the lowered program.
+fn row_at(
+    pkg: &BehaviorPackage,
+    file: &IndexedFile,
+    hand_authored: &HashSet<String>,
+    programs: &std::cell::RefCell<Programs>,
+    depth: RowDepth,
+) -> anyhow::Result<Option<BehaviorRow>> {
+    if depth == RowDepth::Header {
+        if let Some(path) = lolo_path_of(pkg, file) {
+            match std::fs::read_to_string(&path) {
+                Ok(text) => return header_row_of(pkg, file, hand_authored, &text),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => anyhow::bail!("failed to read {}: {e}", path.display()),
+            }
+        }
+    }
+    row_of(pkg, file, hand_authored, programs)
+}
+
 fn row_of(
     pkg: &BehaviorPackage,
     file: &IndexedFile,
@@ -335,7 +386,7 @@ pub(crate) struct PackageRows {
 }
 
 /// Every behavior `packages[pi]` ships, in path order; a behavior that does not load is skipped and listed.
-pub(crate) fn package_rows(packages: &[BehaviorPackage], pi: usize) -> anyhow::Result<PackageRows> {
+pub(crate) fn package_rows(packages: &[BehaviorPackage], pi: usize, depth: RowDepth) -> anyhow::Result<PackageRows> {
     let pkg = &packages[pi];
     let files: Vec<IndexedFile> = indexed_files(pkg)?;
     let hand_authored = match &pkg.lolo_source {
@@ -362,7 +413,7 @@ pub(crate) fn package_rows(packages: &[BehaviorPackage], pi: usize) -> anyhow::R
                     }
                     done += 1;
                     let cell = std::cell::RefCell::new(fresh);
-                    let row = row_of(pkg, file, &hand_authored, &cell);
+                    let row = row_at(pkg, file, &hand_authored, &cell, depth);
                     fresh = cell.into_inner();
                     if let Ok(mut slot) = slots[i].lock() {
                         *slot = Some(row);
