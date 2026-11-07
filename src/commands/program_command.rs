@@ -111,6 +111,11 @@ pub(crate) fn resolve_program_command(
             }));
         }
     }
+    if let Some((group, _)) = candidates.last().filter(|_| !args.is_empty()) {
+        if let Some(refusal) = programs.group_refusal(group) {
+            anyhow::bail!(refusal);
+        }
+    }
     programs.unanswered(
         &candidates
             .iter()
@@ -185,6 +190,26 @@ impl CliPrograms {
                     .join(", ")
             ),
         }
+    }
+
+    /// The refusal for a command word that is no command itself but the prefix of declared ones (`cli-behaviors-catalog`
+    /// makes `behaviors` a group): it lists the subcommands those hooks declare.
+    fn group_refusal(&self, word: &str) -> Option<String> {
+        let prefix = format!("{}-", hook_name(word));
+        let mut subcommands: Vec<&str> = self
+            .declared
+            .iter()
+            .flat_map(|(_, hooks)| hooks.iter())
+            .filter_map(|hook| hook.strip_prefix(prefix.as_str()))
+            .collect();
+        subcommands.sort_unstable();
+        subcommands.dedup();
+        (!subcommands.is_empty()).then(|| {
+            format!(
+                "`orb {word}` is a command group, not a command: name one of its subcommands: {}",
+                subcommands.join(", ")
+            )
+        })
     }
 
     /// Fails naming every unusable program, any of which may be the one meant to declare one of `hooks`.
@@ -962,6 +987,22 @@ orbital EchoOrbital {
             None,
             "control: no words prints the help"
         );
+    }
+
+    #[test]
+    fn g_cross_415_a_word_that_prefixes_declared_hooks_is_a_group_that_lists_its_subcommands() {
+        let programs = CliPrograms {
+            declared: vec![(
+                PathBuf::from("std-orb-behaviors.lolo"),
+                vec!["cli-behaviors-describe".to_string(), "cli-behaviors-catalog".to_string(), "cli-validate".to_string()],
+            )],
+            unusable: Vec::new(),
+        };
+        let refusal = programs.group_refusal("behaviors").expect("a group");
+        assert!(refusal.contains("catalog, describe"), "{refusal}");
+        assert!(!refusal.contains("ORB_COMMAND_NOT_INSTALLED"), "{refusal}");
+        assert_eq!(programs.group_refusal("validate"), None, "control: a plain command is no group");
+        assert_eq!(programs.group_refusal("nothing"), None, "control: an undeclared word is no group");
     }
 
     #[test]

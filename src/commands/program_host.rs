@@ -755,7 +755,8 @@ fn copy_web_client(built: Option<&Path>, output: &Path) -> Result<PathBuf, Subst
         return Err(failure("program/eval: the client-mode generate wrote no client.json for the web client to read: generate with `mode: client`"));
     }
     let target = output.join("web-client");
-    let copied = copy(built, &target)
+    let copied = (if target.exists() { std::fs::remove_dir_all(&target) } else { Ok(()) })
+        .and_then(|()| copy(built, &target))
         .and_then(|()| copy(&public, &target));
     copied.map_err(|e| failure(format!("program/eval: laying out the web client in {}: {e}", target.display())))?;
     Ok(target)
@@ -2692,6 +2693,25 @@ orbital O {
         let answer = generate_answer(&report, Some(&copied));
         assert_eq!(answer["webClient"], copied.display().to_string());
         assert!(generate_answer(&report, None).get("webClient").is_some_and(serde_json::Value::is_null));
+    }
+
+    #[test]
+    fn g_orbital_shell_typescript_142_a_rebuild_clears_the_previous_clients_assets() {
+        let shell = tempfile::tempdir().expect("tempdir");
+        let built = shell.path().join("almadar-web-client");
+        std::fs::create_dir_all(built.join("assets")).unwrap();
+        std::fs::write(built.join("index.html"), "<html></html>").unwrap();
+        std::fs::write(built.join("assets/app-new.js"), "new").unwrap();
+        let out = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(out.path().join("packages/client/public")).unwrap();
+        std::fs::write(out.path().join("packages/client/public/client.json"), "{}").unwrap();
+        std::fs::create_dir_all(out.path().join("web-client/assets")).unwrap();
+        std::fs::write(out.path().join("web-client/assets/app-old.js"), "old").unwrap();
+        let copied = copy_web_client(Some(&built), out.path()).expect("copies");
+        assert!(!copied.join("assets/app-old.js").exists(), "a hashed asset of an earlier build stays");
+        assert_eq!(std::fs::read_to_string(copied.join("assets/app-new.js")).unwrap(), "new");
+        let again = copy_web_client(Some(&built), out.path()).expect("copies again");
+        assert_eq!(std::fs::read_to_string(again.join("assets/app-new.js")).unwrap(), "new");
     }
 
     #[test]
