@@ -679,6 +679,10 @@ pub(crate) fn typed_parse_error_to_json(
                             .to_string(),
                     ),
                 ),
+                TypeError::UnionArmCollision { .. } => (
+                    ErrorCode::TypeUnionArmCollision.as_str(),
+                    Some("declare the second list, map or object arm as a named alias, so each arm has its own name".to_string()),
+                ),
             };
             vec![ValidationJsonError {
                 code: code.to_string(),
