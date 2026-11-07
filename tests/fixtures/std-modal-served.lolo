@@ -55,7 +55,7 @@ orbital ModalRecordOrbital {
       ;; (no silent first-row fallback). The @config.mode literal is
       ;; substituted at molecule inline time — atoms validate this with
       ;; @config allowed-but-unresolved.
-      OPEN -> open when (or (= @config.mode create) (validate/required ?row) (!= (default (object/get @entity.seedRow id) "") ""))
+      OPEN -> open when (or (= @config.mode create) (validate/required ?row) (if (= @entity.seedRow null) false (!= (default (object/get @entity.seedRow id) "") "")))
         (set @entity.id ?id)
         (render-ui @config.detailSlot {
           children: [{
@@ -69,7 +69,7 @@ orbital ModalRecordOrbital {
             type: stack
           }, { type: divider }, {
             cancelEvent: CLOSE
-            entity: (object/merge @entity.seedRow (object/merge (default ?row {}) {}))
+            entity: (object/merge (default @entity.seedRow {}) (object/merge (default ?row {}) {}))
             fieldOverrides: @config.fieldOverrides
             fields: @config.fields
             mode: @config.mode
