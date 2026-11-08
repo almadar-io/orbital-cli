@@ -1,6 +1,6 @@
 [package]
 name = "orbital-cli"
-version = "19.0.0"
+version.workspace = true
 edition = "2021"
 license = "MIT"
 description = "Command-line interface for Orbital compiler and tools"

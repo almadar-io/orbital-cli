@@ -280,3 +280,19 @@ pub(crate) fn source_position(span: orbital_lolo::Span, exact: bool) -> SourcePo
         approximate: !exact,
     }
 }
+
+#[cfg(test)]
+mod release_version_tests {
+    /// The binary's version decides the hand-off to a newer store orb (`bootstrap::newer_orb`), so it must be the release.
+    #[test]
+    fn the_binary_reports_the_workspace_release_version() {
+        let workspace = include_str!("../../../Cargo.toml");
+        let release = workspace
+            .split("[workspace.package]\nversion = \"")
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+            .expect("the workspace declares [workspace.package] version");
+        assert_eq!(env!("CARGO_PKG_VERSION"), release);
+        assert_ne!(release, "", "control: the workspace version is read");
+    }
+}
