@@ -63,7 +63,9 @@ pub(crate) fn resolve_from(spec: &str, from: Option<&Path>) -> anyhow::Result<Re
 
 /// The source file a behavior specifier resolves to.
 pub(crate) fn behavior_source_path(spec: &str) -> anyhow::Result<PathBuf> {
-    Ok(resolve_from(behavior_part(spec), None)?.path)
+    let spec = behavior_part(spec);
+    let (mut loader, _) = loader_for(std::env::current_dir()?)?;
+    loader.locate(spec, None).map_err(|e| anyhow::anyhow!("cannot resolve `{spec}`: {e}"))
 }
 
 /// The behavior a specifier names as a program value; a `.orb` file is read as written.

@@ -21,6 +21,11 @@ pub(crate) fn exit_code(status: u16) -> i32 {
     }
 }
 
+/// The process exit code of an answer: its own `exit` when the program declared one, else [`exit_code`] of its status.
+pub(crate) fn answer_exit_code(answer: &orbital_core::runtime::inbound::InboundAnswer) -> i32 {
+    answer.exit.unwrap_or_else(|| exit_code(answer.status))
+}
+
 /// A command line resolved to an installed program: `orb <command…> <argv…>` runs `program` on the hook `cli-<command>`.
 #[derive(Debug)]
 pub(crate) struct ProgramCommand {
@@ -360,7 +365,7 @@ fn answer_command(
         None,
     );
     CommandAnswer {
-        code: exit_code(answer.status),
+        code: answer_exit_code(&answer),
         body: answer.body,
         stderr: answer.stderr,
         headers: answer.headers.unwrap_or_default(),
@@ -654,6 +659,39 @@ orbital EchoOrbital {
                 "{ status : number! body : string! stderr : string }",
             );
         std::fs::write(dir.join("fake-warn.lolo"), source).unwrap();
+    }
+
+    fn with_exit_program(cwd: &Path, exit: &str) {
+        let dir = cwd.join("node_modules/@fake/cli/behaviors/lolo/cli/atoms");
+        let source = ECHO
+            .replace("cli-echo", "cli-code")
+            .replace(
+                r#"{ status: 400, body: "usage: orb echo <words>" }"#,
+                &format!(r#"{{ status: 200, body: "partial"{exit} }}"#),
+            )
+            .replace(
+                "{ status : number! body : string! }",
+                "{ status : number! body : string! exit : number }",
+            );
+        std::fs::write(dir.join("fake-code.lolo"), source).unwrap();
+    }
+
+    #[test]
+    fn a_program_answering_exit_3_exits_3() {
+        let (cwd, store) = project("exit3", "cli");
+        with_exit_program(&cwd, ", exit: 3");
+        let program = find_command_program("code", &cwd, &store).unwrap().expect("found");
+        let answer = run_command_program(&program, "code", &[], &cwd).unwrap();
+        assert_eq!((answer.code, answer.body.as_str()), (3, "partial"));
+    }
+
+    #[test]
+    fn control_a_program_answering_without_exit_keeps_the_status_mapping() {
+        let (cwd, store) = project("exit-none", "cli");
+        with_exit_program(&cwd, "");
+        let program = find_command_program("code", &cwd, &store).unwrap().expect("found");
+        let answer = run_command_program(&program, "code", &[], &cwd).unwrap();
+        assert_eq!(answer.code, 0, "status 200 with no exit is 0");
     }
 
     fn written(answer: &CommandAnswer) -> (String, String) {
