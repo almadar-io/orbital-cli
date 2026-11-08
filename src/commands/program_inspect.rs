@@ -159,8 +159,11 @@ pub(crate) fn inspect(source: &str, options: &Value) -> Result<Value, SubstrateF
     let expected = orbital_compiler::phases::validation::effect::expected_types(&program);
     let narrowed = orbital_compiler::phases::validation::effect::expression_narrowings(&program);
     let models = orbital_compiler::phases::validation::effect::expected_models(&program);
+    let boxed = orbital_compiler::phases::resolve::resolve_to_oir(&program)
+        .map(|module| orbital_core::ir::cycle::boxed_fields(&module))
+        .map_err(|e| failure(format!("program/read inspect: the program does not lower to the IR its models are built from: {e}")))?;
     Ok(
-        json!({"program": program, "authoredProgram": authored_program, "definitions": definitions, "composition": composition, "sourceMap": anchors, "imports": imports, "lazy": lazy_maps, "types": types, "narrowed": narrowed, "expected": expected, "models": models,
+        json!({"program": program, "authoredProgram": authored_program, "definitions": definitions, "composition": composition, "sourceMap": anchors, "imports": imports, "lazy": lazy_maps, "types": types, "narrowed": narrowed, "expected": expected, "models": models, "boxed": boxed,
         "path": path, "version": options.get("version"), "columnEncoding": "unicode-scalar", "lengthEncoding": "utf-8-bytes", "lineBase": 1, "columnBase": 1}),
     )
 }
