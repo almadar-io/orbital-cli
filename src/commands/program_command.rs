@@ -34,27 +34,7 @@ pub(crate) struct ProgramCommand {
     pub(crate) argv: Vec<String>,
 }
 
-/// The bootloader's own words: clap takes them before any program discovery (so a broken package can be repaired
-/// with `orb update|add|remove`), and a `cli` program declaring `cli-<word>` or `cli-<word>-…` is refused.
-const RESERVED_COMMANDS: &[&str] = &[
-    "run",
-    "help",
-    "--help",
-    "-h",
-    "--version",
-    "-V",
-];
-
-/// The reserved word a hook would take, if any.
-fn reserved_word_of(hook: &str) -> Option<&'static str> {
-    let command = hook.strip_prefix("cli-")?;
-    RESERVED_COMMANDS.iter().copied().find(|word| {
-        command == *word
-            || command
-                .strip_prefix(*word)
-                .is_some_and(|rest| rest.starts_with('-'))
-    })
-}
+use orbital_core::runtime::inbound::{reserved_cli_word as reserved_word_of, RESERVED_CLI_WORDS as RESERVED_COMMANDS};
 
 /// The package words: std's packages program answers all four on the one hook `cli-packages`, and reads the word
 /// itself from the first argument.
