@@ -145,6 +145,21 @@ struct BehaviorDescription {
     knobs: Vec<KnobField>,
     orbitals: Vec<OrbitalOut>,
     uses: Vec<String>,
+    /// The look and languages the behavior's app header declares; absent when it declares none.
+    #[serde(skip_serializing_if = "serde_json::Map::is_empty")]
+    header: serde_json::Map<String, Value>,
+}
+
+/// The app-header keys a description carries: the ones a program built from the behavior must keep to look and read
+/// as it does. Reach (hooks, egress, grants) is not here: composition unions it from the imports. `themeDefinitions`
+/// is not here either: resolve carries it for every program, declared theme or not, so it is derived, not declared.
+const DESCRIBED_HEADER_KEYS: [&str; 3] = ["theme", "themes", "locales"];
+
+fn described_header(program: &Value) -> serde_json::Map<String, Value> {
+    DESCRIBED_HEADER_KEYS
+        .into_iter()
+        .filter_map(|key| program.get(key).filter(|v| !v.is_null()).map(|v| (key.to_string(), v.clone())))
+        .collect()
 }
 
 fn unique(items: impl Iterator<Item = String>) -> Vec<String> {
@@ -415,6 +430,7 @@ fn describe_behavior(behavior: &str, only_orbital: Option<&str>) -> anyhow::Resu
         )?,
         orbitals,
         uses: uses_of(&resolved.schema),
+        header: described_header(&program_json),
     })
 }
 
@@ -493,4 +509,40 @@ pub(crate) fn describe(target: DescribeTarget, from: Option<&Path>) -> anyhow::R
         }
     };
     describe_trait(value, &behavior, &trait_name, from)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn described(header: &str) -> serde_json::Value {
+        // The describer resolves behaviors under the working directory only.
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let path = dir.path().join("shop.orb");
+        let program = format!(
+            r#"{{"name":"Shop","version":"1.0.0"{header},"orbitals":[{{"name":"Shop","entity":{{"name":"ShopState","persistence":"runtime","fields":[{{"name":"id","type":"string","required":true}}]}},"traits":[{{"name":"Counter","linkedEntity":"ShopState","stateMachine":{{"states":[{{"name":"idle","isInitial":true}}],"events":[{{"key":"INIT","name":"Init"}}],"transitions":[{{"from":"idle","to":"idle","event":"INIT","effects":[]}}]}}}}],"pages":[]}}]}}"#
+        );
+        std::fs::write(&path, program).unwrap();
+        serde_json::to_value(describe_behavior(&path.display().to_string(), None).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn a_behavior_description_carries_the_theme_and_locales_its_header_declares() {
+        let description = described(r#","theme":"linear-clean-light","locales":["en","ar"]"#);
+        assert_eq!(description["header"]["theme"], "linear-clean-light", "{description}");
+        assert_eq!(description["header"]["locales"], serde_json::json!(["en", "ar"]));
+    }
+
+    #[test]
+    fn control_a_behavior_with_no_theme_or_locales_describes_no_header() {
+        let description = described("");
+        assert!(description.get("header").is_none(), "{description}");
+        assert!(description["orbitals"].as_array().is_some_and(|o| o.len() == 1), "control: the rest is described");
+    }
+
+    #[test]
+    fn edge_a_header_with_only_locales_carries_only_locales() {
+        let description = described(r#","locales":["sl"]"#);
+        assert_eq!(description["header"], serde_json::json!({ "locales": ["sl"] }));
+    }
 }
