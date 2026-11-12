@@ -1641,10 +1641,10 @@ impl ProgramHost {
         options: Option<&Value>,
     ) -> Result<Value, SubstrateFailure> {
         let op = "program/step";
-        let requests = requests
-            .map(to_json)
-            .and_then(|r| r.as_array().cloned())
-            .ok_or_else(|| failure(format!("{op}: expected a list of requests")))?;
+        let requests = match requests.map(to_json) {
+            Some(serde_json::Value::Array(requests)) => requests,
+            _ => return Err(failure(format!("{op}: expected a list of requests"))),
+        };
         let raw = match options.map(to_json).as_ref().and_then(|o| o.get("report")) {
             None | Some(serde_json::Value::Null) => false,
             Some(serde_json::Value::String(r)) if r == "raw" => true,
@@ -1700,21 +1700,31 @@ impl ProgramHost {
                 )));
             }
         }
-        let steps: Vec<serde_json::Value> = requests
-            .iter()
-            .map(|r| {
-                let mut step = serde_json::json!({ "trait": r["trait"], "event": r["event"], "payload": r.get("payload").cloned().unwrap_or(serde_json::json!({})) });
-                if let Some(from) = r.get("from") {
-                    step["from"] = from.clone();
+        let step_of = |r: &mut serde_json::Map<String, serde_json::Value>, take: bool| {
+            let mut field = |key: &str| if take { r.remove(key) } else { r.get(key).cloned() };
+            let mut step = serde_json::json!({
+                "trait": field("trait").unwrap_or(serde_json::Value::Null),
+                "event": field("event").unwrap_or(serde_json::Value::Null),
+                "payload": field("payload").unwrap_or(serde_json::json!({})),
+            });
+            for key in ["from", "entity", "config", "now", "settleMs", "identity", "credentials", "answers"] {
+                if let Some(v) = field(key) {
+                    step[key] = v;
                 }
-                for key in ["entity", "config", "now", "settleMs", "identity", "credentials", "answers"] {
-                    if let Some(v) = r.get(key) {
-                        step[key] = v.clone();
-                    }
-                }
-                step
-            })
-            .collect();
+            }
+            step
+        };
+        // A raw run never reads its requests again, so their fields move into the steps instead of being copied.
+        let mut requests = requests;
+        let steps = serde_json::Value::Array(
+            requests
+                .iter_mut()
+                .map(|r| match r.as_object_mut() {
+                    Some(fields) => step_of(fields, raw),
+                    None => serde_json::Value::Null,
+                })
+                .collect(),
+        );
         let scratch = Scratch::new("almadar-step")?;
         let path = scratch.write("program.orb", &program.to_string())?;
         let live = match options.map(to_json).as_ref().and_then(|o| o.get("live")) {
@@ -1726,11 +1736,7 @@ impl ProgramHost {
                 )))
             }
         };
-        let report = run_cascade(
-            &path,
-            &serde_json::Value::Array(steps.clone()),
-            live,
-        )
+        let report = run_cascade(&path, &steps, live)
         .map_err(|e| failure(format!("{op}: {e}")))?;
         if raw {
             return from_json(report);
@@ -1768,7 +1774,7 @@ impl ProgramHost {
             )));
         }
         let renderer = if render {
-            let schema = resolve_with_step_config(&path, &steps)
+            let schema = resolve_with_step_config(&path, steps.as_array().map(Vec::as_slice).unwrap_or_default())
                 .map_err(|e| failure(format!("{op}: {e}")))?;
             let target = crate::utils::desktop::target()
                 .map_err(|e| failure(format!("{op}: options.render: {e}")))?;

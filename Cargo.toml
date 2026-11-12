@@ -16,7 +16,12 @@ path = "src/bin/orbital.rs"
 name = "orb"
 path = "src/bin/orb.rs"
 
+[features]
+# Heap profiling for memory investigations (G-ORBITAL-CORE-161): `cargo build -p orbital-cli --features dhat-heap` writes dhat-heap.json on exit.
+dhat-heap = ["dep:dhat"]
+
 [dependencies]
+dhat = { version = "0.3", optional = true }
 # Core crates
 orbital-core = { git = "https://github.com/almadar-io/orbital-core", branch = "main", features = ["client-http"] }
 # The native orb answers `ffi/call`; feature unification turns it (and the static WGSL check) on in the runtime orbital-core embeds.
