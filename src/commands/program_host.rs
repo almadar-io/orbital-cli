@@ -1707,7 +1707,7 @@ impl ProgramHost {
                 "event": field("event").unwrap_or(serde_json::Value::Null),
                 "payload": field("payload").unwrap_or(serde_json::json!({})),
             });
-            for key in ["from", "entity", "config", "now", "settleMs", "identity", "credentials", "answers"] {
+            for key in ["from", "entity", "config", "now", "settleMs", "identity", "session", "credentials", "answers"] {
                 if let Some(v) = field(key) {
                     step[key] = v;
                 }
