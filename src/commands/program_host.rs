@@ -796,7 +796,8 @@ fn resolve_with_step_config(path: &Path, steps: &[serde_json::Value]) -> anyhow:
 
 /// Replays `steps` on the program at `path` (`orb execute --steps`); `live` answers their os/* and http asks on the
 /// native program host instead of leaving keyed ones pending (G-ORB-459).
-fn run_cascade(path: &Path, steps: &serde_json::Value, live: bool) -> anyhow::Result<serde_json::Value> {
+/// `keep_states` keeps every trait's state and every executed trait's entity on each step, which only the raw report prints.
+fn run_cascade(path: &Path, steps: &serde_json::Value, live: bool, cost: bool, keep_states: bool) -> anyhow::Result<orbital_core::step_replay::StepReport> {
     use orbital_core::runtime::{EntitySource, InMemoryEntityCache, RuntimeKernel};
     use orbital_core::step_replay::{play_steps, replay_dispatch, trait_definitions, with_step_config, StepAnswers, StepClock, StepCredentials};
     let steps = steps.as_array().ok_or_else(|| anyhow::anyhow!("--steps must be a JSON array"))?;
@@ -833,7 +834,14 @@ fn run_cascade(path: &Path, steps: &serde_json::Value, live: bool) -> anyhow::Re
     };
     let credentials = StepCredentials::new();
     let answers = StepAnswers::new();
-    play_steps(kernel, &clock, &credentials, &answers, &defs, steps, live, &mut |trait_name, event, payload, settle_ms| match &live_host {
+    if cost && live_host.is_none() {
+        kernel.set_cost_meter(orbital_core::alloc_meter::native_meter());
+    }
+    if cost && kernel.cost_meter().is_none() {
+        tracing::warn!(target: orbital_core::logging::ns::CLI, "program/step: cost was asked but this orb counts no allocations (no counting allocator), so no step carries a cost");
+    }
+    let _cost = cost.then(|| orbital_core::runtime::RuntimeKernel::cost_scope());
+    play_steps(kernel, &clock, &credentials, &answers, &defs, steps, live, keep_states, &mut |trait_name, event, payload, settle_ms| match &live_host {
         Some((host, _files)) => {
             host.tap_completions();
             let played = host.dispatch(trait_name, orbital_core::RUNTIME_SINGLETON, event, payload).map_err(|e| e.to_string());
@@ -844,7 +852,6 @@ fn run_cascade(path: &Path, steps: &serde_json::Value, live: bool) -> anyhow::Re
         None => replay_dispatch(kernel, &credentials, &answers, trait_name, event, payload),
     })
     .map_err(|refusal| anyhow::anyhow!(refusal.error))
-    .and_then(|report| Ok(serde_json::to_value(report)?))
 }
 
 /// A live step waits for its open keyed calls to end; with `settleMs`, one still open after it is cancelled.
@@ -1736,19 +1743,19 @@ impl ProgramHost {
                 )))
             }
         };
-        let report = run_cascade(&path, &steps, live)
+        let cost = match options.map(to_json).as_ref().and_then(|o| o.get("cost")) {
+            None | Some(serde_json::Value::Null) => false,
+            Some(serde_json::Value::Bool(b)) => *b,
+            Some(other) => {
+                return Err(failure(format!(
+                    "{op}: options.cost must be a boolean, not {other}"
+                )))
+            }
+        };
+        let report = run_cascade(&path, &steps, live, cost, raw)
         .map_err(|e| failure(format!("{op}: {e}")))?;
         if raw {
-            return from_json(report);
-        }
-        if report.get("success") != Some(&serde_json::Value::Bool(true)) {
-            return Err(failure(format!(
-                "{op}: {}",
-                report
-                    .get("error")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("the run failed")
-            )));
+            return from_json(serde_json::to_value(report).map_err(|e| failure(format!("{op}: {e}")))?);
         }
         let render = match options.map(to_json).as_ref().and_then(|o| o.get("render")) {
             None | Some(serde_json::Value::Null) => false,
@@ -1785,8 +1792,6 @@ impl ProgramHost {
         let typed: Vec<orbital_core::program_machine::PlayRequest> =
             serde_json::from_value(serde_json::Value::Array(requests))
                 .map_err(|e| failure(format!("{op}: {e}")))?;
-        let report: orbital_core::step_replay::StepReport =
-            serde_json::from_value(report).map_err(|e| failure(format!("{op}: {e}")))?;
         let mut played = orbital_core::step_replay::played_steps(&typed, &report)
             .map_err(|r| failure(format!("{op}: {}", r.error)))?;
         if let Some((schema, target)) = &renderer {
@@ -2760,9 +2765,28 @@ orbital O {
         let dir = tempfile::tempdir().expect("tempdir");
         let orb = dir.path().join("program.orb");
         std::fs::write(&orb, json(&program).to_string()).unwrap();
-        let expected = run_cascade(&orb, &steps, false).expect("execute --steps");
+        let expected = serde_json::to_value(run_cascade(&orb, &steps, false, false, true).expect("execute --steps")).unwrap();
         assert_eq!(answer, expected);
         assert_eq!(answer["success"], true, "{answer}");
+    }
+
+    #[test]
+    fn step_cost_must_be_a_boolean_and_without_a_counting_allocator_no_step_carries_a_cost() {
+        orbital_compiler::loader::register_source_lowerer(|path, _, _| crate::lower_lolo_file(path));
+        let program = ProgramHost.run("program/read", &[Value::String(NOTE.to_string().into())]).expect("reads");
+        let steps = from_json(serde_json::json!([{ "trait": "NoteView", "event": "INIT" }])).unwrap();
+        let refused = ProgramHost
+            .run("program/step", &[program.clone(), steps.clone(), from_json(serde_json::json!({ "report": "raw", "cost": "yes" })).unwrap()])
+            .unwrap_err();
+        assert!(refused.message.contains("options.cost must be a boolean"), "{}", refused.message);
+        let answer = json(
+            &ProgramHost
+                .run("program/step", &[program, steps, from_json(serde_json::json!({ "report": "raw", "cost": true })).unwrap()])
+                .expect("steps"),
+        );
+        assert_eq!(answer["success"], true, "{answer}");
+        let outcome = &answer["steps"][0]["outcomes"][0];
+        assert!(outcome.get("cost").is_none(), "this test binary counts no allocations, so cost is absent, never zero: {outcome}");
     }
 
     #[test]

@@ -7,7 +7,9 @@ Every open gap this repo owns lives here. This file is the source of truth; the 
 - **Codes:** new gaps use this repo's prefix `G-ORBITAL-CLI-`. Take the "Next code" below, then bump it in the same edit. Codes are never reused or renamed.
 - **Close by deleting.** Remove the entry in the same commit as the fix.
 
-Next code: `G-ORBITAL-CLI-005`
+Next code: `G-ORBITAL-CLI-006`
+
+- **G-ORBITAL-CLI-005** [mechanical] — While the catalog is browsed, the launchpad spends its CPU re-reading `.lolo` source. samply on the launchpad process over 80 catalog page opens (`orb profile launchpad --samply`, 2026-11-13, 100 Hz, each thread's pre-recording CPU left out) ranks by self CPU: `orbital_lolo::lexer::Lexer::run` 7.5 s, `Vec::from_iter` 2.8 s, SipHash and `HashMap::insert` about 4 s, file opens, `getdirentries` and `stat` about 4.5 s, brotli compression of responses 1.2 s, `drop_in_place<Parser>` 0.6 s; the counting allocator (`alloc_meter::count`) 0.9 s. So each guest open lexes and parses source files again, about 90 ms of lexer time per open; which ask does it (behavior/resolve, behavior/describe, the catalog listing) is not yet read from the stacks. Owner: orbital-cli (program_host's behavior/* answers) with orbital-lolo. Reproduce: `ORB_CHROME=<chrome> orb profile launchpad --limit 80 --pid <launchpad pid> --samply`. Prevention rung: none (a cost, not a wrong result). Severity: medium. Root cause: one-off.
 
 - **G-ORBITAL-CLI-004** [mechanical] — `orb-dev lower` exits 0 when it cannot lower: a missing file or a `.lolo` parse error prints the error but the exit status is 0, so a script that checks the status reads a broken file as fine. Seen 2026-11-13 (`orb-dev lower /dev/null/x.lolo; echo $?` prints 0). Fix: a failed lower exits non-zero, as validate does. Prevention rung: none (tooling). Severity: medium. Root cause: one-off.
 
