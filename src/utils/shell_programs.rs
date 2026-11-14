@@ -142,7 +142,7 @@ fn client_split(
     (Some(program), flat)
 }
 
-fn flatten_lazy(lazy: &[orbital_compiler::phases::lazy::ResolvedLazy], folder: &str, into: &mut Vec<shell_protocol::LazyProgram>) {
+pub(crate) fn flatten_lazy(lazy: &[orbital_compiler::phases::lazy::ResolvedLazy], folder: &str, into: &mut Vec<shell_protocol::LazyProgram>) {
     for item in lazy {
         let orb_ref = if folder.is_empty() { item.orb_ref.clone() } else { format!("{folder}/{}", item.orb_ref) };
         let mut program = item.schema.clone();
