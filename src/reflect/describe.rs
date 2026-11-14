@@ -49,6 +49,24 @@ struct MachineOut {
     linked_entity: Option<String>,
     #[serde(rename = "stateMachine")]
     state_machine: orbital_core::schema::StateMachine,
+    /// The glyph of each effect operator the machine's transitions run, from the std operator table.
+    glyphs: BTreeMap<String, String>,
+}
+
+/// The std glyph of each top-level effect operator in `machine`'s transitions that declares one.
+fn effect_glyphs(machine: &orbital_core::schema::StateMachine) -> anyhow::Result<BTreeMap<String, String>> {
+    let value = serde_json::to_value(machine)?;
+    let heads = value
+        .get("transitions")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|t| t.get("effects").and_then(Value::as_array))
+        .flatten()
+        .filter_map(|effect| effect.as_array()?.first()?.as_str());
+    Ok(heads
+        .filter_map(|head| Some((head.to_string(), orbital_core::language::registry::operator_glyph(head)?.to_string())))
+        .collect())
 }
 
 #[derive(Serialize)]
@@ -462,6 +480,7 @@ fn describe_trait(value: Option<Value>, behavior: &str, trait_name: &str, from: 
         events: events_of(td),
         machine: Some(MachineOut {
             linked_entity: td.linked_entity.clone(),
+            glyphs: effect_glyphs(&td.state_machine)?,
             state_machine: (*td.state_machine).clone(),
         }),
         source,
@@ -524,6 +543,22 @@ mod tests {
         );
         std::fs::write(&path, program).unwrap();
         serde_json::to_value(describe_behavior(&path.display().to_string(), None).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn a_machine_carries_the_registry_glyph_of_each_top_level_effect_operator() {
+        let machine: orbital_core::schema::StateMachine = serde_json::from_value(serde_json::json!({
+            "states": [{ "name": "idle", "isInitial": true }],
+            "events": [{ "key": "GO", "name": "Go" }],
+            "transitions": [{ "from": "idle", "to": "idle", "event": "GO",
+                "effects": [["set", "@entity.x", 1], ["emit", "DONE"], ["do", ["persist", "update", "X", {}]]] }]
+        }))
+        .unwrap();
+        let glyphs = effect_glyphs(&machine).unwrap();
+        for op in ["set", "emit", "do"] {
+            assert_eq!(glyphs.get(op).map(String::as_str), orbital_core::language::registry::operator_glyph(op), "{op}: {glyphs:?}");
+        }
+        assert!(!glyphs.contains_key("persist"), "control: a nested effect is not a top-level mark: {glyphs:?}");
     }
 
     #[test]
