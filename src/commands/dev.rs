@@ -92,6 +92,72 @@ fn settings_key(options: &orbital_compiler::CompilerOptions) -> String {
     hasher.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// Resolved lazy behaviors kept on disk between processes, under the derived-data directory in one folder per toolchain
+/// (this binary and the installed language data): `<key>.json` holds an entry, `<slot>.slot` names a behavior's current key.
+/// Whether an entry is still current is the resolver's to decide from its reads; this is storage only.
+struct DerivedLazyCache {
+    dir: PathBuf,
+}
+
+/// Toolchain folders unused this long are removed: another binary (the release `orb` beside `orb-dev`) keeps its own.
+const LAZY_TOOLCHAIN_TTL: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 60 * 60);
+
+impl DerivedLazyCache {
+    fn in_dir(root: &Path, toolchain: &str) -> Self {
+        Self { dir: root.join(toolchain) }
+    }
+
+    /// The cache of this binary and language data; `None` when they cannot be identified.
+    fn for_toolchain() -> Option<Self> {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        feed(&mut hasher, "lazy-resolve", b"1");
+        feed_toolchain(&mut hasher).ok()?;
+        let toolchain: String = hasher.finalize().iter().take(8).map(|b| format!("{b:02x}")).collect();
+        let root = derived_dir().join("lazy");
+        for folder in std::fs::read_dir(&root).into_iter().flatten().flatten() {
+            let unused = folder.metadata().and_then(|m| m.modified()).ok().and_then(|at| at.elapsed().ok()).is_some_and(|age| age > LAZY_TOOLCHAIN_TTL);
+            if unused && folder.file_name().to_string_lossy() != toolchain {
+                let _ = std::fs::remove_dir_all(folder.path());
+            }
+        }
+        Some(Self::in_dir(&root, &toolchain))
+    }
+
+    /// `bytes` written to `name` whole or not at all.
+    fn write(&self, name: &str, bytes: &[u8]) -> std::io::Result<()> {
+        std::fs::create_dir_all(&self.dir)?;
+        let staged = tempfile::NamedTempFile::new_in(&self.dir)?;
+        std::fs::write(staged.path(), bytes)?;
+        staged.persist(self.dir.join(name)).map(|_| ()).map_err(|e| e.error)
+    }
+}
+
+impl orbital_compiler::phases::lazy::LazyResolveCache for DerivedLazyCache {
+    fn get(&self, key: &str) -> Option<orbital_compiler::phases::lazy::CachedLazy> {
+        let raw = std::fs::read(self.dir.join(format!("{key}.json"))).ok()?;
+        serde_json::from_slice(&raw).ok()
+    }
+
+    fn put(&self, slot: &str, key: &str, entry: orbital_compiler::phases::lazy::CachedLazy) {
+        let slot_file = self.dir.join(format!("{slot}.slot"));
+        let stored = serde_json::to_vec(&entry).map_err(std::io::Error::other).and_then(|bytes| self.write(&format!("{key}.json"), &bytes));
+        if let Err(e) = stored.and_then(|_| {
+            if let Ok(old) = std::fs::read_to_string(&slot_file) {
+                if old != key {
+                    let _ = std::fs::remove_file(self.dir.join(format!("{old}.json")));
+                }
+            }
+            self.write(&format!("{slot}.slot"), key.as_bytes())
+        }) {
+            tracing::debug!(target: "almadar:cli:resolve-cache", dir = %self.dir.display(), error = %e, "lazy cache: entry not stored");
+        }
+    }
+}
+
+static LAZY_CACHE: std::sync::LazyLock<Option<std::sync::Arc<DerivedLazyCache>>> =
+    std::sync::LazyLock::new(|| DerivedLazyCache::for_toolchain().map(std::sync::Arc::new));
+
 /// `schema` resolved and stored under `key`, its reads recorded from `begin` (which the caller has already run).
 fn store(
     key: ResolvedKey,
@@ -119,7 +185,10 @@ fn store(
 /// The program at `path` resolved once per path and compiler settings in this process, reused while every file the
 /// resolution read, the program's own file included, is as it was read.
 pub(crate) fn resolved_file(path: &Path) -> anyhow::Result<std::sync::Arc<ResolvedEntry>> {
-    let options = orbital_compiler::CompilerOptions::from_env();
+    let mut options = orbital_compiler::CompilerOptions::from_env();
+    if let Some(cache) = LAZY_CACHE.as_ref() {
+        options.lazy_cache = orbital_compiler::phases::lazy::LazyCache(Some(std::sync::Arc::clone(cache) as std::sync::Arc<dyn orbital_compiler::phases::lazy::LazyResolveCache>));
+    }
     let key = (path.to_path_buf(), settings_key(&options));
     {
         let resolved = RESOLVED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -380,7 +449,51 @@ fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use orbital_compiler::phases::lazy::{CachedLazy, LazyResolveCache, ResolvedLazy};
     use std::cell::Cell;
+
+    fn cached(orbital: &str) -> CachedLazy {
+        CachedLazy {
+            resolved: ResolvedLazy {
+                orbital: orbital.to_string(),
+                orb_ref: format!("lazy/{orbital}.orb"),
+                schema: serde_json::from_value(serde_json::json!({ "name": orbital, "orbitals": [] })).unwrap(),
+                lazy: Vec::new(),
+            },
+            reads: orbital_core::read_set::ReadSet::default(),
+        }
+    }
+
+    #[test]
+    fn a_resolved_lazy_behavior_stored_on_disk_is_read_back_by_a_later_process() {
+        let root = tempfile::tempdir().unwrap();
+        DerivedLazyCache::in_dir(root.path(), "tool-a").put("slot-1", "key-1", cached("Late"));
+        let later = DerivedLazyCache::in_dir(root.path(), "tool-a");
+        assert_eq!(later.get("key-1").map(|e| e.resolved.orbital), Some("Late".to_string()));
+        assert!(later.get("key-2").is_none(), "control: a key never stored is a miss");
+    }
+
+    #[test]
+    fn storing_a_lazy_behavior_again_replaces_its_older_entry_and_keeps_other_behaviors() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = DerivedLazyCache::in_dir(root.path(), "tool-a");
+        cache.put("slot-1", "old", cached("Late"));
+        cache.put("slot-2", "other", cached("Other"));
+        cache.put("slot-1", "new", cached("Late"));
+        assert!(cache.get("old").is_none(), "the slot's older entry is gone");
+        assert!(cache.get("new").is_some() && cache.get("other").is_some());
+    }
+
+    #[test]
+    fn edge_an_unreadable_entry_and_another_toolchains_entry_are_misses() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = DerivedLazyCache::in_dir(root.path(), "tool-a");
+        cache.put("slot-1", "key-1", cached("Late"));
+        assert!(DerivedLazyCache::in_dir(root.path(), "tool-b").get("key-1").is_none(), "a newer binary never reads an older one's entries");
+        let file = std::fs::read_dir(root.path().join("tool-a")).unwrap().flatten().find(|e| e.file_name().to_string_lossy().ends_with("key-1.json")).unwrap().path();
+        std::fs::write(&file, "not json").unwrap();
+        assert!(cache.get("key-1").is_none(), "a corrupt entry is resolved again, never trusted");
+    }
 
     fn built(parent: &Path, calls: &Cell<u32>, text: &str) -> anyhow::Result<ResolvedProgram> {
         calls.set(calls.get() + 1);

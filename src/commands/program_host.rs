@@ -1410,27 +1410,73 @@ impl ProgramHost {
     fn resolve_behavior(&self, behavior: &str) -> Result<Value, SubstrateFailure> {
         let path = reflect::behavior_source_path(behavior)
             .map_err(|e| failure(format!("behavior/resolve: {e}")))?;
-        let program = resolved_behavior_program(&path).map_err(|e| failure(format!("behavior/resolve: {e}")))?;
+        let program = resolved_behavior_program(&path, behavior).map_err(|e| failure(format!("behavior/resolve: {e}")))?;
         from_json(program)
+    }
+
+    /// `behavior/resolve <behavior> { lazy: <file> }`: one `uses lazy` program of the behavior, resolved, by the file its
+    /// lazy page names; a file the behavior has no lazy page for is refused `not-found`.
+    fn resolve_lazy_behavior(&self, behavior: &str, file: &str) -> Result<Value, SubstrateFailure> {
+        let path = reflect::behavior_source_path(behavior)
+            .map_err(|e| failure(format!("behavior/resolve: {e}")))?;
+        match resolved_lazy_program(&path, file) {
+            Ok(program) => from_json(program),
+            Err(LazyRead::NotFound(message)) => Err(orbital_core::runtime::agent_ports::guest_failure(
+                orbital_core::runtime::os::OsErrorKind::NotFound,
+                format!("behavior/resolve: {message}"),
+            )),
+            Err(LazyRead::Failed(e)) => Err(failure(format!("behavior/resolve: {e}"))),
+        }
     }
 }
 
-/// The resolved program at `path` as `behavior/resolve` answers it: client metadata, and each `uses lazy` program in
-/// `lazyPrograms` by the file its lazy page names, so a guest opened from it loads its lazy pages (`program/open`).
-fn resolved_behavior_program(path: &Path) -> anyhow::Result<serde_json::Value> {
+/// The resolved program at `path` as `behavior/resolve` answers it: client metadata, and, when it `uses lazy`, the
+/// `lazySource` its lazy programs are read from one file at a time (`behavior/resolve { lazy }`, `program/open`).
+fn resolved_behavior_program(path: &Path, behavior: &str) -> anyhow::Result<serde_json::Value> {
     let entry = crate::commands::dev::resolved_file(path)?;
     let mut program = serde_json::to_value(entry.schema())?;
     with_client_metadata(&mut program);
-    let mut flat = Vec::new();
-    crate::utils::shell_programs::flatten_lazy(entry.lazy(), "", &mut flat);
-    if let (false, Some(fields)) = (flat.is_empty(), program.as_object_mut()) {
-        let carried = flat
-            .into_iter()
-            .map(|lazy| Ok((lazy.orb_ref, serde_json::to_value(&lazy.program)?)))
-            .collect::<anyhow::Result<serde_json::Map<String, serde_json::Value>>>()?;
-        fields.insert("lazyPrograms".into(), serde_json::Value::Object(carried));
+    if let (false, Some(fields)) = (entry.lazy().is_empty(), program.as_object_mut()) {
+        fields.insert("lazySource".into(), serde_json::json!({ "behavior": behavior }));
     }
     Ok(program)
+}
+
+/// Why one lazy program could not be read.
+#[derive(Debug)]
+enum LazyRead {
+    NotFound(String),
+    Failed(anyhow::Error),
+}
+
+impl std::fmt::Display for LazyRead {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LazyRead::NotFound(message) => f.write_str(message),
+            LazyRead::Failed(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+/// The `uses lazy` program of the resolved program at `path` whose file is `file`, as the kernel names a nested child
+/// (its path joined to its importer's folder). Only that child is copied out of the resolved tree.
+fn resolved_lazy_program(path: &Path, file: &str) -> Result<serde_json::Value, LazyRead> {
+    fn find<'a>(lazy: &'a [orbital_compiler::phases::lazy::ResolvedLazy], folder: &str, file: &str) -> Option<&'a orbital_core::OrbitalSchema> {
+        lazy.iter().find_map(|item| {
+            let orb_ref = if folder.is_empty() { item.orb_ref.clone() } else { format!("{folder}/{}", item.orb_ref) };
+            if orb_ref == file {
+                return Some(&item.schema);
+            }
+            let child_folder = orb_ref.rsplit_once('/').map(|(dir, _)| dir.to_string()).unwrap_or_default();
+            find(&item.lazy, &child_folder, file)
+        })
+    }
+    let entry = crate::commands::dev::resolved_file(path).map_err(LazyRead::Failed)?;
+    let mut program = find(entry.lazy(), "", file)
+        .ok_or_else(|| LazyRead::NotFound(format!("{} has no lazy page whose file is `{file}`", path.display())))?
+        .clone();
+    orbital_core::schema::normalize_fn_shapes(&mut program);
+    serde_json::to_value(&program).map_err(|e| LazyRead::Failed(e.into()))
 }
 
 /// A resolved program is mounted by a browser kernel, which has no installed core: it carries the client metadata
@@ -1879,8 +1925,17 @@ impl ProgramHost {
         let app_name = app_name
             .ok_or_else(|| failure("program/compose: options must name the app (appName)"))?;
         let mut carried = orbital_core::ValueMap::new();
+        let mut lazy_source: Option<Value> = None;
         for program in list {
             let Value::Object(fields) = program else { continue };
+            if let Some(source) = fields.get("lazySource").filter(|s| !matches!(s, Value::Null)) {
+                match &lazy_source {
+                    Some(held) if held != source => {
+                        return Err(failure("program/compose: two programs name different lazySource behaviors".to_string()))
+                    }
+                    _ => lazy_source = Some(source.clone()),
+                }
+            }
             let Some(Value::Object(lazy)) = fields.get("lazyPrograms") else { continue };
             for (file, child) in lazy.iter() {
                 match carried.get(file) {
@@ -1912,8 +1967,13 @@ impl ProgramHost {
         .map_err(|e| failure(format!("{op}: {e}")))?;
         release_transients();
         match schema {
-            Value::Object(mut fields) if !carried.is_empty() => {
-                fields.insert("lazyPrograms".into(), Value::object(carried));
+            Value::Object(mut fields) if !carried.is_empty() || lazy_source.is_some() => {
+                if !carried.is_empty() {
+                    fields.insert("lazyPrograms".into(), Value::object(carried));
+                }
+                if let Some(source) = lazy_source {
+                    fields.insert("lazySource".into(), source);
+                }
                 Ok(Value::Object(fields))
             }
             schema => Ok(schema),
@@ -2006,6 +2066,12 @@ impl ProgramHost {
                     Ok((path, owner)) => from_json(serde_json::json!({ "path": path.display().to_string(), "owner": owner })),
                     Err(refusal) => Err(failure(format!("{op}: {refusal}"))),
                 }
+            }
+            "behavior/resolve" if args.get(1).map(to_json).is_some_and(|o| o.get("lazy").is_some()) => {
+                let behavior = Self::behavior_of(op, args.first())?;
+                let options = args.get(1).map(to_json).unwrap_or_default();
+                let file = options["lazy"].as_str().ok_or_else(|| failure(format!("{op}: `lazy` is the lazy page's file")))?;
+                self.resolve_lazy_behavior(&behavior, file)
             }
             "behavior/resolve" => self.resolve_behavior(&Self::behavior_of(op, args.first())?),
             "program/compose" => self.compose(args),
@@ -2338,24 +2404,38 @@ orbital O {
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "nothing is written beside the source");
     }
 
-    #[test]
-    fn a_resolved_behavior_carries_each_lazy_program_by_the_file_its_lazy_page_names() {
+    /// A program with (`lazy`) or without one `uses lazy` child page, written in `dir`: its path.
+    fn program_with_lazy_child(dir: &Path, lazy: bool) -> std::path::PathBuf {
         orbital_compiler::loader::register_source_lowerer(|path, _, _| crate::lower_lolo_file(path));
+        std::fs::write(dir.join("child.lolo"), "app child [ version: \"1.0.0\" ]\norbital ChildOrbital {\n  entity Note [runtime] {\n    id : string!\n  }\n  trait ChildView -> Note {\n    initial: a\n    state a {\n      INIT -> a\n        (render-ui main { type: \"typography\", content: \"child\" })\n    }\n  }\n  page \"/child\" as ChildPage -> ChildView\n}\n").unwrap();
+        let head = if lazy { "uses lazy Child from \"./child\"\n" } else { "" };
+        let tail = if lazy { "orbital Kid = Child.orbitals.ChildOrbital {\n}\n" } else { "" };
+        let file = dir.join(if lazy { "with.lolo" } else { "without.lolo" });
+        std::fs::write(&file, format!("app main [ version: \"1.0.0\" ]\n{head}orbital MainOrbital {{\n  entity Item [runtime] {{\n    id : string!\n  }}\n  trait MainView -> Item {{\n    initial: a\n    state a {{\n      INIT -> a\n        (render-ui main {{ type: \"typography\", content: \"main\" }})\n    }}\n  }}\n  page \"/\" as Home -> MainView\n}}\n{tail}")).unwrap();
+        file
+    }
+
+    #[test]
+    fn a_resolved_behavior_names_its_lazy_source_and_carries_no_lazy_program() {
         let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::write(dir.path().join("child.lolo"), "app child [ version: \"1.0.0\" ]\norbital ChildOrbital {\n  entity Note [runtime] {\n    id : string!\n  }\n  trait ChildView -> Note {\n    initial: a\n    state a {\n      INIT -> a\n        (render-ui main { type: \"typography\", content: \"child\" })\n    }\n  }\n  page \"/child\" as ChildPage -> ChildView\n}\n").unwrap();
-        let resolve = |lazy: bool| {
-            let head = if lazy { "uses lazy Child from \"./child\"\n" } else { "" };
-            let tail = if lazy { "orbital Kid = Child.orbitals.ChildOrbital {\n}\n" } else { "" };
-            let file = dir.path().join(if lazy { "with.lolo" } else { "without.lolo" });
-            std::fs::write(&file, format!("app main [ version: \"1.0.0\" ]\n{head}orbital MainOrbital {{\n  entity Item [runtime] {{\n    id : string!\n  }}\n  trait MainView -> Item {{\n    initial: a\n    state a {{\n      INIT -> a\n        (render-ui main {{ type: \"typography\", content: \"main\" }})\n    }}\n  }}\n  page \"/\" as Home -> MainView\n}}\n{tail}")).unwrap();
-            resolved_behavior_program(&file).expect("resolves")
-        };
-        let with = resolve(true);
+        let with = resolved_behavior_program(&program_with_lazy_child(dir.path(), true), "pkg/with").expect("resolves");
+        assert_eq!(with["lazySource"], serde_json::json!({ "behavior": "pkg/with" }), "{with}");
+        assert!(with.get("lazyPrograms").is_none(), "its lazy programs are read one at a time, never carried: {with}");
+        assert!(with["lazyPages"][0]["orbRef"].is_string(), "the lazy page still names its file: {with}");
+        let without = resolved_behavior_program(&program_with_lazy_child(dir.path(), false), "pkg/without").expect("resolves");
+        assert!(without.get("lazySource").is_none(), "control: no lazy import, no lazy source: {without}");
+    }
+
+    #[test]
+    fn a_resolved_behaviors_lazy_program_is_answered_by_the_file_its_lazy_page_names() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = program_with_lazy_child(dir.path(), true);
+        let with = resolved_behavior_program(&file, "pkg/with").expect("resolves");
         let orb_ref = with["lazyPages"][0]["orbRef"].as_str().expect("the lazy page names its file").to_string();
-        let carried = with["lazyPrograms"].as_object().expect("lazyPrograms");
-        assert_eq!(carried.keys().cloned().collect::<Vec<_>>(), vec![orb_ref.clone()], "{with}");
-        assert!(carried[&orb_ref]["orbitals"].as_array().is_some_and(|o| o.iter().any(|o| o["name"] == "Kid")), "{with}");
-        assert!(resolve(false).get("lazyPrograms").is_none(), "control: no lazy import, no carried programs");
+        let child = resolved_lazy_program(&file, &orb_ref).expect("the child resolves");
+        assert!(child["orbitals"].as_array().is_some_and(|o| o.iter().any(|o| o["name"] == "Kid")), "{child}");
+        let missing = resolved_lazy_program(&file, "lazy/Nowhere.orb").expect_err("an unknown file is refused");
+        assert!(missing.to_string().contains("lazy/Nowhere.orb"), "{missing}");
     }
 
     #[test]
@@ -3360,6 +3440,31 @@ orbital O {
             drop(Some(serde_json::json!({ "lazy/Late.orb": { "name": "Other", "orbitals": [] } }))),
         ]);
         assert!(clash.is_err_and(|e| e.message.contains("lazy/Late.orb")), "edge: two programs carrying different programs for one file are refused");
+    }
+
+    #[test]
+    fn program_compose_keeps_the_lazy_source_its_program_names() {
+        orbital_compiler::loader::register_source_lowerer(|path, _, _| crate::lower_lolo_file(path));
+        let host = ProgramHost;
+        let compose = |sources: Vec<Option<&str>>| {
+            let list = sources
+                .into_iter()
+                .map(|behavior| {
+                    let mut program = serde_json::json!({ "name": "Drop", "orbitals": [{ "behavior": "almadar-std/std-file-drop", "orbital": "FileDropOrbital" }] });
+                    if let Some(behavior) = behavior {
+                        program["lazySource"] = serde_json::json!({ "behavior": behavior });
+                    }
+                    from_json(program).unwrap()
+                })
+                .collect::<Vec<_>>();
+            let options = from_json(serde_json::json!({ "appName": "App" })).unwrap();
+            host.run("program/compose", &[Value::Array(list.into()), options]).map(|v| json(&v))
+        };
+        let kept = compose(vec![Some("pkg/site")]).expect("compose");
+        assert_eq!(kept["lazySource"], serde_json::json!({ "behavior": "pkg/site" }), "{kept}");
+        assert!(compose(vec![None]).expect("compose").get("lazySource").is_none(), "control: none named, none added");
+        let clash = compose(vec![Some("pkg/site"), Some("pkg/other")]);
+        assert!(clash.is_err_and(|e| e.message.contains("lazySource")), "edge: two programs naming different lazy sources are refused");
     }
 
     #[test]
