@@ -3,6 +3,7 @@
 //! `.lolo` (G-ORB-056). `validate --json` used to re-inline the inlined schema
 //! without its source path, resolving `./x` against the cwd instead.
 
+use orbital_core::json_value::from_json_slice;
 use crate::common;
 
 use std::path::{Path, PathBuf};
@@ -82,7 +83,7 @@ fn validate_json(file: &Path) -> serde_json::Value {
         .args(["validate", "--json", file.to_str().unwrap()])
         .output()
         .unwrap();
-    serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+    from_json_slice(&out.stdout).unwrap_or_else(|e| {
         panic!(
             "validate --json is not JSON ({e}): {}",
             String::from_utf8_lossy(&out.stdout)

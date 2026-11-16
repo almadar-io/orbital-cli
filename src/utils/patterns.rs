@@ -40,7 +40,7 @@ pub(crate) fn load_extra_patterns(
         }
     };
 
-    let json: serde_json::Value = match serde_json::from_str(&content) {
+    let json: serde_json::Value = match orbital_core::json_value::from_json_str(&content) {
         Ok(v) => v,
         Err(e) => {
             eprintln!(
@@ -161,7 +161,7 @@ pub(crate) fn load_project_patterns(
         }
     };
     let content = std::fs::read_to_string(&patterns_path).ok()?;
-    let json: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let json: serde_json::Value = orbital_core::json_value::from_json_str(&content).ok()?;
     let count = json
         .get("patterns")
         .and_then(|v| v.as_object())

@@ -270,7 +270,7 @@ pub(crate) fn formatted_text(content: &str, label: &str) -> anyhow::Result<Strin
             orbital_lolo::format_program(&program)
         }
         InputSyntax::OrbJson => {
-            let value: serde_json::Value = serde_json::from_str(content).map_err(|e| anyhow::anyhow!("Invalid JSON in {}: {}", label, e))?;
+            let value: serde_json::Value = orbital_core::json_value::from_json_str(content).map_err(|e| anyhow::anyhow!("Invalid JSON in {}: {}", label, e))?;
             serde_json::to_string_pretty(&orbital_core::util::canonical_json(&value))?
         }
     })
@@ -431,7 +431,7 @@ pub(crate) fn resolved_read(path: &Path, output: Option<&Path>) -> anyhow::Resul
     }
     let content = std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("Failed to read {}: {}", path.display(), e))?;
     let mark = match detect_syntax(&content) {
-        InputSyntax::OrbJson => serde_json::from_str::<Stamp>(&content)
+        InputSyntax::OrbJson => orbital_core::json_value::from_json_str::<Stamp>(&content)
             .map_err(|e| anyhow::anyhow!("Failed to read the resolved stamp of {}: {}", path.display(), e))?
             .resolved,
         InputSyntax::Lolo => None,
@@ -476,7 +476,7 @@ fn serialized<T: serde::Serialize + ?Sized>(value: &T) -> Result<Value, Substrat
 }
 
 fn from_json(value: serde_json::Value) -> Result<Value, SubstrateFailure> {
-    serde_json::from_value(value).map_err(|e| failure(e.to_string()))
+    orbital_core::json_value::from_json_value(&value).map_err(|e| failure(e.to_string()))
 }
 
 /// The `program/read` modes `options` turns on, in the order they are documented.
@@ -896,7 +896,7 @@ impl ProgramHost {
             if let Some(o) = options.as_object() {
                 Options { op, map: o }.only("program", &[])?;
             }
-            given = serde_json::from_value(program).map_err(|e| failure(format!("{op}: not a program: {e}")))?;
+            given = orbital_core::json_value::from_json_value(&program).map_err(|e| failure(format!("{op}: not a program: {e}")))?;
             &given
         } else {
             let options = Options::of(op, &options)?;
@@ -919,7 +919,7 @@ impl ProgramHost {
         let entry;
         let (schema, pass): (&orbital_core::OrbitalSchema, _) = if options.is_null() {
             let program = program_arg(op, args.first())?;
-            given = serde_json::from_value(program).map_err(|e| failure(format!("{op}: not a program: {e}")))?;
+            given = orbital_core::json_value::from_json_value(&program).map_err(|e| failure(format!("{op}: not a program: {e}")))?;
             (&given, orbital_core::runtime::os_grants::OsGrantPass::Written)
         } else {
             let options = Options::of(op, &options)?;
@@ -931,7 +931,7 @@ impl ProgramHost {
                 (entry.schema(), pass)
             } else {
                 let program = program_arg(op, args.first())?;
-                given = serde_json::from_value(program).map_err(|e| failure(format!("{op}: not a program: {e}")))?;
+                given = orbital_core::json_value::from_json_value(&program).map_err(|e| failure(format!("{op}: not a program: {e}")))?;
                 (&given, pass)
             }
         };
@@ -968,7 +968,7 @@ impl ProgramHost {
         let (patterns, services) = (file("patterns")?, file("services")?);
         let findings: Vec<orbital_compiler::phases::validation::report::ProgramFinding> = match options.get("findings") {
             None | Some(serde_json::Value::Null) => Vec::new(),
-            Some(list) => serde_json::from_value(list.clone())
+            Some(list) => orbital_core::json_value::from_json_value(&list)
                 .map_err(|e| failure(format!("{op}: `findings` must be a list of {{ code, path, message, suggestion, severity: \"error\" | \"warning\" }}: {e}")))?,
         };
         if flag("final")? {
@@ -1012,7 +1012,7 @@ impl ProgramHost {
         };
         let read = resolved_read(path, output.as_deref())
             .map_err(|e| failure(format!("program/read: {e}")))?;
-        let program: Value = serde_json::from_str(&read.text).map_err(|e| failure(e.to_string()))?;
+        let program: Value = orbital_core::json_value::from_json_str(&read.text).map_err(|e| failure(e.to_string()))?;
         let mut fields = orbital_core::ValueMap::default();
         fields.insert("program".into(), program);
         fields.insert("loadedResolved".into(), Value::Bool(read.loaded_resolved));
@@ -1042,7 +1042,7 @@ impl ProgramHost {
             std::fs::write(out, &text)
                 .map_err(|e| failure(format!("program/read: Failed to write {}: {e}", out.display())))?;
         }
-        let program: serde_json::Value = serde_json::from_str(&text).map_err(|e| failure(e.to_string()))?;
+        let program: serde_json::Value = orbital_core::json_value::from_json_str(&text).map_err(|e| failure(e.to_string()))?;
         from_json(serde_json::json!({ "program": program, "text": text }))
     }
 
@@ -1650,7 +1650,7 @@ impl ProgramHost {
                 });
             }
         };
-        let written: serde_json::Value = serde_json::from_str(&stamped)
+        let written: serde_json::Value = orbital_core::json_value::from_json_str(&stamped)
             .map_err(|e| failure(format!("program/eval: stamped program does not parse: {e}")))?;
         let name = written
             .get("name")
@@ -1839,7 +1839,7 @@ impl ProgramHost {
             None
         };
         let typed: Vec<orbital_core::program_machine::PlayRequest> =
-            serde_json::from_value(serde_json::Value::Array(requests))
+            orbital_core::json_value::from_json_value(&serde_json::Value::Array(requests))
                 .map_err(|e| failure(format!("{op}: {e}")))?;
         let mut played = orbital_core::step_replay::played_steps(&typed, &report)
             .map_err(|r| failure(format!("{op}: {}", r.error)))?;
@@ -2159,7 +2159,7 @@ orbital O {
         let as_json = json(&program);
         assert_eq!(as_json["name"], "note-pad");
         let expected: serde_json::Value =
-            serde_json::from_str(&orb_text(NOTE, "note.lolo")).unwrap();
+            orbital_core::json_value::from_json_str(&orb_text(NOTE, "note.lolo")).unwrap();
         assert_eq!(
             as_json,
             json(&from_json(expected).unwrap()),
@@ -2196,7 +2196,7 @@ orbital O {
         let answer = json(&ProgramHost.run("program/read", &[Value::String(String::new().into()), options]).expect("resolves"));
         let expected = resolved_read(&file, None).map(|r| r.text).expect("orb resolve");
         assert_eq!(answer["text"], serde_json::Value::String(expected.clone()));
-        assert_eq!(answer["program"], serde_json::from_str::<serde_json::Value>(&expected).unwrap());
+        assert_eq!(answer["program"], orbital_core::json_value::from_json_str::<serde_json::Value>(&expected).unwrap());
     }
 
     #[test]
@@ -2217,7 +2217,7 @@ orbital O {
         let resolved = read(&resolved_file, &out.join("again.orb"));
         assert_eq!(resolved["loadedResolved"], true, "a resolved .orb is loaded as it is: {resolved}");
         assert!(!out.join("again.orb").exists(), "a resolved source is not written out again");
-        let mut unresolved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&resolved_file).unwrap()).unwrap();
+        let mut unresolved: serde_json::Value = orbital_core::json_value::from_json_str(&std::fs::read_to_string(&resolved_file).unwrap()).unwrap();
         unresolved.as_object_mut().unwrap().remove("resolved");
         let bare = dir.path().join("bare.orb");
         std::fs::write(&bare, unresolved.to_string()).unwrap();
@@ -2318,7 +2318,7 @@ orbital O {
         let dir = tempfile::tempdir().expect("tempdir");
         let source = dir.path().join("note.lolo");
         std::fs::write(&source, NOTE).unwrap();
-        let mut resolved: serde_json::Value = serde_json::from_str(&resolved_read(&source, None).map(|r| r.text).unwrap()).unwrap();
+        let mut resolved: serde_json::Value = orbital_core::json_value::from_json_str(&resolved_read(&source, None).map(|r| r.text).unwrap()).unwrap();
         resolved["resolved"]["typeContractVersion"] = 999.into();
         let stale = dir.path().join("stale.orb");
         std::fs::write(&stale, resolved.to_string()).unwrap();
@@ -2362,7 +2362,7 @@ orbital O {
         let dir = tempfile::tempdir().expect("tempdir");
         let source = dir.path().join("note.lolo");
         std::fs::write(&source, NOTE).unwrap();
-        let printed: Value = serde_json::from_str::<Value>(&resolved_read(&source, None).map(|r| r.text).expect("orb resolve"))
+        let printed: Value = orbital_core::json_value::from_json_str::<Value>(&resolved_read(&source, None).map(|r| r.text).expect("orb resolve"))
             .expect("reads back");
         let direct = resolved_value(&source).expect("resolved value");
         assert_eq!(direct.get_path("program"), Some(&printed));
@@ -2599,7 +2599,7 @@ orbital O {
     #[test]
     fn serialized_builds_the_same_value_in_the_same_key_order_as_the_json_round_trip() {
         let program = prover_program(None, serde_json::json!([">=", "@entity.total", 0]));
-        let schema: orbital_core::OrbitalSchema = serde_json::from_value(program).expect("a program");
+        let schema: orbital_core::OrbitalSchema = orbital_core::json_value::from_json_value(&program).expect("a program");
         let report = orbital_core::proof::prove_report(&schema);
         let direct = serialized(&report).expect("serializes");
         let round_trip = from_json(serde_json::to_value(&report).unwrap()).unwrap();
@@ -2739,7 +2739,7 @@ orbital O {
         assert_eq!(legacy[0]["path"], "app:1");
         assert_eq!(read(format!("app Foo [version: \"1.0.0\"]\n{body}")), serde_json::json!([]), "control: the bracket header is clean");
         let report_input = serde_json::json!({ "findings": legacy });
-        assert!(serde_json::from_value::<Vec<orbital_compiler::phases::validation::report::ProgramFinding>>(report_input["findings"].clone()).is_ok(), "the list feeds program/validate's `findings` as is");
+        assert!(orbital_core::json_value::from_json_value::<Vec<orbital_compiler::phases::validation::report::ProgramFinding>>(&report_input["findings"]).is_ok(), "the list feeds program/validate's `findings` as is");
     }
 
     #[test]
@@ -2806,7 +2806,7 @@ orbital O {
         let answer = json(&ProgramHost.run("program/read", &[Value::String(String::new().into()), options]).expect("stamps"));
         let expected = stamped_json(&orb, None, None).expect("orb stamp");
         assert_eq!(answer["text"], serde_json::Value::String(expected.clone()));
-        assert_eq!(answer["program"], serde_json::from_str::<serde_json::Value>(&expected).unwrap());
+        assert_eq!(answer["program"], orbital_core::json_value::from_json_str::<serde_json::Value>(&expected).unwrap());
         let out = dir.path().join("stamped.orb");
         let options = from_json(serde_json::json!({
             "stamp": true, "path": orb.display().to_string(), "prior": orb.display().to_string(), "output": out.display().to_string()
@@ -3637,7 +3637,7 @@ orbital O {
         assert_eq!(gated["ensures"][0]["verdict"], "inconclusive", "{gated}");
         assert_eq!(gated["ensures"][0]["reason"], "the transition did not fire");
         assert!(
-            serde_json::from_value::<orbital_core::program_machine::PlayedStep>(played[0].clone())
+            orbital_core::json_value::from_json_value::<orbital_core::program_machine::PlayedStep>(&played[0])
                 .is_ok(),
             "the host answers the typed PlayedStep wire"
         );

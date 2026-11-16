@@ -8,6 +8,7 @@
 //! both tests are `#[ignore]`d for a standalone orbital-rust checkout and
 //! run explicitly here.
 
+use orbital_core::json_value::from_json_str;
 use crate::common;
 
 use orbital_core::schema::TraitReference;
@@ -113,7 +114,7 @@ fn ios_compile_embeds_resolved_schema_resource() {
     );
     let content = std::fs::read_to_string(&resource).unwrap();
     let schema: orbital_core::OrbitalSchema =
-        serde_json::from_str(&content).expect("resolved_schema.json is not a valid OrbitalSchema");
+        from_json_str(&content).expect("resolved_schema.json is not a valid OrbitalSchema");
     assert_fully_resolved(&schema);
 
     let _ = std::fs::remove_dir_all(&out_dir);
@@ -139,7 +140,7 @@ fn android_compile_embeds_resolved_schema_resource() {
     );
     let content = std::fs::read_to_string(&resource).unwrap();
     let schema: orbital_core::OrbitalSchema =
-        serde_json::from_str(&content).expect("resolved_schema.json is not a valid OrbitalSchema");
+        from_json_str(&content).expect("resolved_schema.json is not a valid OrbitalSchema");
     assert_fully_resolved(&schema);
 
     let _ = std::fs::remove_dir_all(&out_dir);

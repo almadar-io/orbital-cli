@@ -19,6 +19,7 @@
 //! Ignored by default; run explicitly:
 //!   cargo test -p orbital-cli --test compat_differential -- --ignored --release
 
+use orbital_core::json_value::from_json_str;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -114,7 +115,7 @@ fn validate_one(repo: &Path, file: &Path) -> FileResult {
         .output()
         .expect("failed to spawn orb binary");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let parsed: Result<ValidationJson, _> = serde_json::from_str(&stdout);
+    let parsed: Result<ValidationJson, _> = from_json_str(&stdout);
     match parsed {
         Err(e) => FileResult {
             rel_path: rel,

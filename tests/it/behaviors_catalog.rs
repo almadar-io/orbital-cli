@@ -4,6 +4,7 @@
 // scope/exposure filtering, the mixed-model refusal, the embed-on-miss
 // contract and the shapes are asserted exactly.
 
+use orbital_core::json_value::{from_json_str, from_json_slice};
 use orbital_core::vector_store::{quantize, text_key, VectorStore};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -85,7 +86,7 @@ fn live_std_programs(project: &Path) {
     let std = project.join("node_modules/@almadar/std");
     let manifest_path = std.join("package.json");
     let mut manifest: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
+        from_json_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
     manifest["orb"] = serde_json::json!({
         "prefix": "almadar-std",
         "source": "behaviors/lolo",
@@ -152,7 +153,7 @@ fn json(out: &Output) -> serde_json::Value {
         "orb failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    serde_json::from_slice(&out.stdout).expect("stdout is JSON")
+    from_json_slice(&out.stdout).expect("stdout is JSON")
 }
 
 fn assert_close(actual: &serde_json::Value, expected: &[f64]) {
@@ -322,7 +323,7 @@ fn a_lolo_header_tag_outside_the_vocabulary_is_named_and_that_behavior_skipped()
         err.contains("skipped alpha/alpha-card") && err.contains("sideways"),
         "{err}"
     );
-    let listed: serde_json::Value = serde_json::from_slice(&out.stdout).expect("catalog json");
+    let listed: serde_json::Value = from_json_slice(&out.stdout).expect("catalog json");
     let names: Vec<&str> = listed
         .as_array()
         .unwrap()

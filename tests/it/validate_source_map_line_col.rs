@@ -6,6 +6,7 @@
 //! `SEXPR_ARITY_MISMATCH`: `not` takes at most 1 argument (see
 //! orbital-compiler's `sexpr::validate::test_arity_mismatch`).
 
+use orbital_core::json_value::from_json_slice;
 use crate::common;
 
 use std::path::PathBuf;
@@ -54,7 +55,7 @@ fn validate_json(path: &PathBuf) -> serde_json::Value {
         "orb validate exited non-zero. stderr:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    serde_json::from_slice(&output.stdout).expect("validate --json output is not valid JSON")
+    from_json_slice(&output.stdout).expect("validate --json output is not valid JSON")
 }
 
 fn arity_error(result: &serde_json::Value) -> &serde_json::Value {

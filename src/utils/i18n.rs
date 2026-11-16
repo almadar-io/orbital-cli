@@ -13,7 +13,7 @@ pub(crate) fn detect_language(content: &str) -> Option<String> {
     match crate::utils::detect_syntax(content) {
         crate::utils::InputSyntax::Lolo => Some(orbital_lolo::detect_language(content).to_string()),
         crate::utils::InputSyntax::OrbJson => {
-            let value: serde_json::Value = serde_json::from_str(content).ok()?;
+            let value: serde_json::Value = orbital_core::json_value::from_json_str(content).ok()?;
             let map = value.as_object()?;
             let lang =
                 orbital_core::i18n::lang::for_orb_top_level_keys(map.keys().map(String::as_str))?;
@@ -29,7 +29,7 @@ pub(crate) fn detect_language(content: &str) -> Option<String> {
 /// translation needed) and already-English/undetected JSON pass through
 /// byte-identical.
 pub(crate) fn translate_schema_content(content: &str) -> String {
-    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(content) else {
+    let Ok(mut value) = orbital_core::json_value::from_json_str::<serde_json::Value>(content) else {
         return content.to_string();
     };
     let lang = match &value {

@@ -444,7 +444,7 @@ pub(crate) fn run_handoff(answer: CommandAnswer) -> anyhow::Result<()> {
     let app = header("orb-app").ok_or_else(|| {
         anyhow::anyhow!("orb-run: server needs orb-app, the resolved app its lazy files sit beside")
     })?;
-    let schema: orbital_core::OrbitalSchema = serde_json::from_str(&body)
+    let schema: orbital_core::OrbitalSchema = orbital_core::json_value::from_json_str(&body)
         .map_err(|e| anyhow::anyhow!("orb-run: server: the body is not a program: {e}"))?;
     drop(body);
     let host = orbital_shell_rust::host::SubstratePort(std::sync::Arc::new(
@@ -542,7 +542,7 @@ orbital EchoOrbital {
     #[test]
     fn a_program_with_an_http_page_declares_its_server_and_a_routes_only_program_does_not() {
         let program = |pages: serde_json::Value| -> orbital_core::OrbitalSchema {
-            serde_json::from_value(serde_json::json!({ "name": "p", "orbitals": [{ "name": "O", "entity": { "name": "E", "fields": [] }, "traits": [], "pages": pages }] })).unwrap()
+            orbital_core::json_value::from_json_value(&serde_json::json!({ "name": "p", "orbitals": [{ "name": "O", "entity": { "name": "E", "fields": [] }, "traits": [], "pages": pages }] })).unwrap()
         };
         let http = program(serde_json::json!([{ "name": "Api", "path": "", "protocol": "http", "address": { "host": "127.0.0.1", "port": 8080, "path": "/" }, "traits": [{ "ref": "T" }] }]));
         assert!(declares_server_endpoint(&http));
@@ -1352,7 +1352,7 @@ orbital SplitOrbital {{
             } = run_command_program(&program, "split", &[], Path::new(".")).unwrap();
             assert_eq!(code, 1, "{out}");
             let body: serde_json::Value =
-                serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}: {out}"));
+                orbital_core::json_value::from_json_str(&out).unwrap_or_else(|e| panic!("{e}: {out}"));
             assert_eq!(
                 (
                     body["code"].as_str(),
@@ -1381,7 +1381,7 @@ orbital SplitOrbital {{
             let CommandAnswer { code, body: out, .. } =
                 run_command_program(&program, "split", &[], Path::new(".")).unwrap();
             assert_eq!(code, 1, "{out}");
-            let body: serde_json::Value = serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}: {out}"));
+            let body: serde_json::Value = orbital_core::json_value::from_json_str(&out).unwrap_or_else(|e| panic!("{e}: {out}"));
             assert_eq!(body["code"].as_str(), Some("inbound-unanswered"), "{out}");
             let failures = body["failures"].as_array().unwrap_or_else(|| panic!("no failures: {out}"));
             assert!(failures.iter().any(|f| f.as_str().is_some_and(|f| f.starts_with("SplitEngine:"))), "{out}");

@@ -3,6 +3,7 @@
 //! `std/behaviors/<name>` import compiles with no emitted `.orb`, and an edit to
 //! the dependency's `.lolo` is visible to the very next run.
 
+use orbital_core::json_value::{from_json_str, from_json_slice};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -63,7 +64,7 @@ fn live_std(project: &Path) -> PathBuf {
     let std = project.join("node_modules/@almadar/std");
     let manifest_path = std.join("package.json");
     let mut manifest: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
+        from_json_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
     manifest["orb"] = serde_json::json!({
         "prefix": "almadar-std",
         "source": "behaviors/lolo",
@@ -88,7 +89,7 @@ fn validate(project: &Path) -> Output {
 }
 
 fn verdict(out: &Output) -> serde_json::Value {
-    serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+    from_json_slice(&out.stdout).unwrap_or_else(|e| {
         panic!(
             "not JSON ({e}): {}{}",
             String::from_utf8_lossy(&out.stdout),
@@ -131,7 +132,7 @@ fn control_a_package_declaring_neither_registry_nor_source_is_refused() {
     live_std(p.path());
     let manifest_path = p.path().join("node_modules/@almadar/std/package.json");
     let mut manifest: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
+        from_json_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
     manifest["orb"].as_object_mut().unwrap().remove("source");
     std::fs::write(&manifest_path, manifest.to_string()).unwrap();
     std::fs::write(p.path().join("app.lolo"), ORDERS).unwrap();
@@ -159,11 +160,11 @@ fn live_std_corpus_validates_real_organisms() {
     let std = p.path().join("node_modules/@almadar/std");
     let manifest_path = std.join("package.json");
     let mut manifest: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
+        from_json_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
     // Link exactly what the installed std declares (the workspace and a published
     // tarball lay their surface files out differently), minus `registry`: read live.
     let installed: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(std_root.join("package.json")).unwrap())
+        from_json_str(&std::fs::read_to_string(std_root.join("package.json")).unwrap())
             .unwrap();
     let declared = &installed["orb"];
     let mut orb = serde_json::json!({
@@ -217,7 +218,7 @@ fn lower_prints_one_ndjson_line_per_file_in_order_with_per_file_errors() {
     );
     let lines: Vec<serde_json::Value> = String::from_utf8_lossy(&out.stdout)
         .lines()
-        .map(|l| serde_json::from_str(l).unwrap())
+        .map(|l| from_json_str(l).unwrap())
         .collect();
     assert_eq!(lines.len(), 2);
     assert_eq!(lines[0]["orb"]["name"], "std-cartx");
@@ -256,7 +257,7 @@ fn lower_keeps_input_order_across_many_files() {
     );
     let lines: Vec<serde_json::Value> = String::from_utf8_lossy(&out.stdout)
         .lines()
-        .map(|l| serde_json::from_str(l).unwrap())
+        .map(|l| from_json_str(l).unwrap())
         .collect();
     let got: Vec<String> = lines
         .iter()

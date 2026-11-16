@@ -547,7 +547,7 @@ mod tests {
 
     #[test]
     fn a_machine_carries_the_registry_glyph_of_each_top_level_effect_operator() {
-        let machine: orbital_core::schema::StateMachine = serde_json::from_value(serde_json::json!({
+        let machine: orbital_core::schema::StateMachine = orbital_core::json_value::from_json_value(&serde_json::json!({
             "states": [{ "name": "idle", "isInitial": true }],
             "events": [{ "key": "GO", "name": "Go" }],
             "transitions": [{ "from": "idle", "to": "idle", "event": "GO",

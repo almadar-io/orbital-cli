@@ -7,6 +7,7 @@
 //! It also proves `orb emit orb` translates the same document (the emit path
 //! has its own parse dispatch for prior-ledger anchoring).
 
+use orbital_core::json_value::{from_json_str, from_json_slice};
 use crate::common;
 
 use std::path::{Path, PathBuf};
@@ -55,7 +56,7 @@ fn english_orb() -> serde_json::Value {
     let orb = temp_path("en-lowered", "orb");
     std::fs::write(&lolo, ENGLISH_LOLO).expect("write english lolo");
     emit_orb(&lolo, &orb);
-    let value = serde_json::from_str(&std::fs::read_to_string(&orb).unwrap()).unwrap();
+    let value = from_json_str(&std::fs::read_to_string(&orb).unwrap()).unwrap();
     let _ = std::fs::remove_file(&lolo);
     let _ = std::fs::remove_file(&orb);
     value
@@ -66,7 +67,7 @@ fn validate_json(path: &Path) -> serde_json::Value {
         .args(["validate", "--json", path.to_str().unwrap()])
         .output()
         .expect("failed to spawn orb binary");
-    serde_json::from_slice(&output.stdout).unwrap_or_else(|e| {
+    from_json_slice(&output.stdout).unwrap_or_else(|e| {
         panic!(
             "validate --json output is not valid JSON: {e}\nstdout: {}\nstderr: {}",
             String::from_utf8_lossy(&output.stdout),
@@ -138,9 +139,9 @@ fn arabic_keyed_orb_validates_like_english() {
     emit_orb(&en_path, &en_out);
     emit_orb(&ar_path, &ar_out);
     let mut en_emitted: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&en_out).unwrap()).unwrap();
+        from_json_str(&std::fs::read_to_string(&en_out).unwrap()).unwrap();
     let mut ar_emitted: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&ar_out).unwrap()).unwrap();
+        from_json_str(&std::fs::read_to_string(&ar_out).unwrap()).unwrap();
     strip_identity(&mut en_emitted);
     strip_identity(&mut ar_emitted);
     assert_eq!(

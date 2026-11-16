@@ -4,6 +4,7 @@
 //! from `docs/Almadar_Compiler_Emit_Code.md`. Runs the compiled `orb` binary
 //! via `CARGO_BIN_EXE_orb` — no external crate dependency required.
 
+use orbital_core::json_value::from_json_str;
 use crate::common;
 
 use std::path::PathBuf;
@@ -50,7 +51,7 @@ fn emit_orb_from_lolo_produces_valid_json() {
     assert!(ok, "emit orb exited non-zero. stderr:\n{}", stderr);
     // Valid JSON parse — catches regressions where the output is not well-formed.
     let parsed: serde_json::Value =
-        serde_json::from_str(&stdout).expect("output is not valid JSON");
+        from_json_str(&stdout).expect("output is not valid JSON");
     // Shape sanity: must have orbitals[] with the ModalRecordOrbital.
     let orbitals = parsed
         .get("orbitals")
@@ -206,7 +207,7 @@ fn json_format_parses() {
     ]);
     assert!(ok);
     let parsed: serde_json::Value =
-        serde_json::from_str(&stdout).expect("--format json should produce valid JSON");
+        from_json_str(&stdout).expect("--format json should produce valid JSON");
     assert!(parsed.is_object());
     let obj = parsed.as_object().unwrap();
     assert!(
@@ -319,8 +320,8 @@ fn emit_lolo_from_orb_reemits_to_the_same_orb() {
     assert!(ok);
     let (after, stderr, ok) = run_orb(&["emit", "orb", lolo.to_str().unwrap()]);
     assert!(ok, "printed source must compile. stderr:\n{stderr}");
-    let a: serde_json::Value = serde_json::from_str(&before).unwrap();
-    let b: serde_json::Value = serde_json::from_str(&after).unwrap();
+    let a: serde_json::Value = from_json_str(&before).unwrap();
+    let b: serde_json::Value = from_json_str(&after).unwrap();
     assert_eq!(strip(a), strip(b));
 }
 
@@ -385,7 +386,7 @@ fn emit_manifest_writes_a_manifest_per_unit_signs_on_request_and_refuses_unknown
     assert!(stderr.contains("UNSIGNED"), "{stderr}");
     let read = |unit: &str| -> serde_json::Value {
         let text = std::fs::read_to_string(out.join(format!("{unit}.manifest.json"))).expect(unit);
-        serde_json::from_str(&text).expect("manifest json")
+        from_json_str(&text).expect("manifest json")
     };
     let (api, web) = (read("api"), read("web"));
     assert_eq!(api["unit"], "api");
@@ -414,7 +415,7 @@ fn emit_manifest_writes_a_manifest_per_unit_signs_on_request_and_refuses_unknown
     assert!(!stderr.contains("UNSIGNED"), "{stderr}");
     use base64::Engine;
     use orbital_core::codec::{ed25519_public_key, ed25519_verify};
-    let mut signed: serde_json::Value = serde_json::from_str(&stdout).expect("signed manifest is JSON");
+    let mut signed: serde_json::Value = from_json_str(&stdout).expect("signed manifest is JSON");
     let signature = signed.as_object_mut().unwrap().remove("signature").expect("a signed manifest carries its signature");
     assert_eq!((signature["alg"].as_str(), signature["key_id"].as_str()), (Some("ed25519"), Some("deploy-1")));
     assert_eq!(signed["program"], format!("sha256:{digest}"));
@@ -482,7 +483,7 @@ fn compile_keeps_an_authored_null_payload_literal_and_leaves_unset_schema_fields
 
     for file in ["schema.orb", "resolved.orb", "packages/server/generated/program.orb", "packages/client/public/program.client.orb"] {
         let text = std::fs::read_to_string(out.path().join(file)).unwrap_or_else(|e| panic!("{file}: {e}"));
-        let json: serde_json::Value = serde_json::from_str(&text).unwrap_or_else(|e| panic!("{file} is not JSON: {e}"));
+        let json: serde_json::Value = from_json_str(&text).unwrap_or_else(|e| panic!("{file} is not JSON: {e}"));
         let payload = find_emit(&json, "NULL_FAILED").unwrap_or_else(|| panic!("{file}: the emit effect is missing"));
         assert_eq!(payload.get("code"), Some(&serde_json::Value::Null), "{file}: the authored `code: null` was dropped: {payload}");
         assert_eq!(payload["message"], "nothing to do", "{file}");
@@ -537,7 +538,7 @@ fn emit_orb_the_manifest_hash_and_stamp_keep_an_authored_null_and_the_hash_is_st
 
     let (canonical, stderr, ok) = run_orb(&["emit", "orb", program]);
     assert!(ok, "emit orb failed. stderr:\n{stderr}");
-    assert_only_the_authored_null(&serde_json::from_str(&canonical).expect("emit orb is JSON"), "emit orb");
+    assert_only_the_authored_null(&from_json_str(&canonical).expect("emit orb is JSON"), "emit orb");
 
     let digest: String = Sha256::digest(canonical.trim_end_matches('\n').as_bytes())
         .iter()
@@ -549,7 +550,7 @@ fn emit_orb_the_manifest_hash_and_stamp_keep_an_authored_null_and_the_hash_is_st
         let (_, stderr, ok) = run_orb(&["emit", "manifest", program, "--out", out.to_str().unwrap()]);
         assert!(ok, "emit manifest ({run}) failed. stderr:\n{stderr}");
         let manifest: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(out.join("api.manifest.json")).expect("api manifest")).expect("manifest json");
+            from_json_str(&std::fs::read_to_string(out.join("api.manifest.json")).expect("api manifest")).expect("manifest json");
         hashes.push(manifest["program"].as_str().expect("program hash").to_string());
     }
     assert_eq!(hashes[0], hashes[1], "the manifest program hash differs between two runs");
@@ -557,7 +558,7 @@ fn emit_orb_the_manifest_hash_and_stamp_keep_an_authored_null_and_the_hash_is_st
 
     let (stamped, stderr, ok) = run_orb(&["stamp", program]);
     assert!(ok, "stamp failed. stderr:\n{stderr}");
-    let stamped: serde_json::Value = serde_json::from_str(&stamped).expect("stamp is JSON");
+    let stamped: serde_json::Value = from_json_str(&stamped).expect("stamp is JSON");
     let payload = find_emit(&stamped, "NULL_FAILED").expect("stamp: the emit effect is missing");
     assert_eq!(payload.get("code"), Some(&serde_json::Value::Null), "stamp: the authored `code: null` was dropped: {payload}");
     let mut nulls = Vec::new();

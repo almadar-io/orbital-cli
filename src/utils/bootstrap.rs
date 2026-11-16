@@ -117,7 +117,7 @@ fn installed_contract(dir: &Path, name: &str) -> anyhow::Result<Option<Contract>
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => bail!("Failed to read {}: {e}", path.display()),
     };
-    Ok(Some(serde_json::from_str(&text).with_context(|| format!("{} is not valid JSON", path.display()))?))
+    Ok(Some(orbital_core::json_value::from_json_str(&text).with_context(|| format!("{} is not valid JSON", path.display()))?))
 }
 
 /// The packages the lockfile in `dir` pins, other than the boot packages, whose installed manifest predates the language
@@ -142,7 +142,7 @@ fn read_lock(dir: &Path) -> anyhow::Result<Vec<Pin>> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => bail!("Failed to read {}: {e}", path.display()),
     };
-    let lock: Lock = serde_json::from_str(&text).with_context(|| format!("{} is not a valid lockfile", path.display()))?;
+    let lock: Lock = orbital_core::json_value::from_json_str(&text).with_context(|| format!("{} is not a valid lockfile", path.display()))?;
     Ok(lock.packages)
 }
 
@@ -172,7 +172,7 @@ fn stable(version: &str) -> Option<(u64, u64, u64)> {
 /// The newest stable, non-deprecated version of the packument that meets `need`; a version declaring no language, an
 /// unreadable one or no integrity is never picked.
 fn pick(name: &str, packument: &str, need: &Need<'_>) -> anyhow::Result<Pin> {
-    let packument: Packument = serde_json::from_str(packument).with_context(|| format!("{name}: the registry answer is not a packument"))?;
+    let packument: Packument = orbital_core::json_value::from_json_str(packument).with_context(|| format!("{name}: the registry answer is not a packument"))?;
     packument
         .versions
         .values()
@@ -287,7 +287,7 @@ pub(crate) fn platform_package() -> Option<&'static str> {
 /// to it (P-022: orb updates itself as a package, installed by `orb update` into the user store).
 pub(crate) fn newer_orb(store: &Path, package: &str, own: &str) -> Option<PathBuf> {
     let dir = store.join("node_modules").join(package);
-    let manifest: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("package.json")).ok()?).ok()?;
+    let manifest: serde_json::Value = orbital_core::json_value::from_json_str(&std::fs::read_to_string(dir.join("package.json")).ok()?).ok()?;
     let installed = manifest.get("version")?.as_str()?;
     let binary = dir.join(if cfg!(windows) { "orb.exe" } else { "orb" });
     (stable(installed)? > stable(own)? && binary.is_file()).then_some(binary)

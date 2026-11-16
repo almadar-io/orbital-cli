@@ -397,7 +397,10 @@ fn store(
     let entry = std::sync::Arc::new(ResolvedEntry::new(schema, lazy, options.lazy_cache.0.clone(), reads));
     if let Some(cache) = LAZY_CACHE.as_ref() {
         let (cache, stored, key) = (std::sync::Arc::clone(cache), std::sync::Arc::clone(&entry), key.clone());
-        std::thread::spawn(move || cache.put_program(&key, &stored));
+        std::thread::spawn(move || {
+            cache.put_program(&key, &stored);
+            orbital_core::runtime::memory_release::release_freed_memory();
+        });
     }
     let mut resolved = RESOLVED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     resolved.insert(key, &entry);
@@ -451,6 +454,7 @@ pub(crate) fn resolved_file(path: &Path) -> anyhow::Result<std::sync::Arc<Resolv
 /// The program `key` names read back from disk (see [`stored_program`]) and kept as a memory entry; its reads replay.
 fn disk_hit(key: &ResolvedKey, path: &Path) -> Option<std::sync::Arc<ResolvedEntry>> {
     let entry = std::sync::Arc::new(stored_program(LAZY_CACHE.as_ref()?, key)?);
+    orbital_core::runtime::memory_release::release_freed_memory();
     entry.reads.replay();
     let mut resolved = RESOLVED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     resolved.insert(key.clone(), &entry);

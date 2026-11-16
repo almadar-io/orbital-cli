@@ -4,6 +4,7 @@
 //! uncoded "Failed to resolve S-expression: Expected string"
 //! (T-RESOLVE-OPAQUE, run 19 TopicManager).
 
+use orbital_core::json_value::from_json_slice;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -46,7 +47,7 @@ fn emit_without_event_name_is_a_coded_validate_error_not_a_resolve_crash() {
     let _ = std::fs::remove_file(&tmp);
 
     let result: serde_json::Value =
-        serde_json::from_slice(&output.stdout).expect("validate --json output is not valid JSON");
+        from_json_slice(&output.stdout).expect("validate --json output is not valid JSON");
     assert_eq!(result["valid"], false);
 
     let errors = result["errors"].as_array().expect("errors array");

@@ -3,6 +3,7 @@
 //! See `docs/Almadar_Compiler_Emit_Code.md` §17. These cover file-level
 //! granularity only — per-expression spans land with Phase 5.
 
+use orbital_core::json_value::from_json_str;
 use crate::common;
 
 use std::path::PathBuf;
@@ -61,7 +62,7 @@ fn map_sidecar_is_valid_source_map_v3() {
     assert!(out.exists());
     assert!(map.exists(), "sidecar map not written");
 
-    let map_json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&map).unwrap())
+    let map_json: serde_json::Value = from_json_str(&std::fs::read_to_string(&map).unwrap())
         .expect("map is not valid JSON");
     assert_eq!(
         map_json.get("version").and_then(|v| v.as_u64()),

@@ -3,6 +3,7 @@
 //! Verifies that `orb validate --json` surfaces `suggestion`, `fixGuidance`,
 //! `line`, and `column` for the common `.lolo` syntax mistakes the LLM makes.
 
+use orbital_core::json_value::from_json_slice;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -34,7 +35,7 @@ fn validate_lolo(lolo: &str, name: &str) -> serde_json::Value {
     );
 
     let result: serde_json::Value =
-        serde_json::from_slice(&output.stdout).expect("validate --json output is not valid JSON");
+        from_json_slice(&output.stdout).expect("validate --json output is not valid JSON");
 
     // Best-effort cleanup; ignore failures.
     let _ = std::fs::remove_file(&tmp);

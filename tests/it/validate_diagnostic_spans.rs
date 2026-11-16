@@ -6,6 +6,7 @@
 //! (one IR pointer covers both). A position borrowed from an enclosing construct (the source
 //! map's ancestor fallback) says so with `approximate: true`.
 
+use orbital_core::json_value::from_json_slice;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -52,7 +53,7 @@ fn validate(name: &str, source: &str) -> serde_json::Value {
         .output()
         .expect("spawn orb");
     let _ = std::fs::remove_file(&path);
-    serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+    from_json_slice(&out.stdout).unwrap_or_else(|e| {
         panic!(
             "validate --json is not JSON ({e}); stdout:\n{}\nstderr:\n{}",
             String::from_utf8_lossy(&out.stdout),

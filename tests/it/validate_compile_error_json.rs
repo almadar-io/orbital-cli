@@ -5,6 +5,7 @@
 //! The `--json` path used to drop that `Err` (`if let Ok`) and report
 //! `valid:true`, disagreeing with plain `orb validate`.
 
+use orbital_core::json_value::{from_json_str, from_json_slice};
 use crate::common;
 
 use std::path::PathBuf;
@@ -38,7 +39,7 @@ fn validate_json(orb: &str, name: &str) -> serde_json::Value {
     );
 
     let result: serde_json::Value =
-        serde_json::from_slice(&output.stdout).expect("validate --json output is not valid JSON");
+        from_json_slice(&output.stdout).expect("validate --json output is not valid JSON");
 
     let _ = std::fs::remove_file(&tmp);
     result
@@ -135,7 +136,7 @@ const WELL_FORMED_PERSIST: &str = r#"{
 /// comprehensive-validation error.
 fn malformed_persist_schema() -> String {
     let mut schema: serde_json::Value =
-        serde_json::from_str(WELL_FORMED_PERSIST).expect("fixture parses");
+        from_json_str(WELL_FORMED_PERSIST).expect("fixture parses");
     let effect =
         &mut schema["orbitals"][0]["traits"][0]["stateMachine"]["transitions"][3]["effects"][0];
     let arr = effect.as_array_mut().expect("persist effect is an array");

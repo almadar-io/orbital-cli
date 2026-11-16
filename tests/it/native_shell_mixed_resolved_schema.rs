@@ -3,6 +3,7 @@
 //! kernel has nothing to mount. Uses `01-basic-entity.orb`, which has no
 //! `uses` peers, so it runs in a standalone checkout.
 
+use orbital_core::json_value::from_json_str;
 use crate::common;
 
 use orbital_core::schema::TraitReference;
@@ -55,7 +56,7 @@ fn assert_resolved_schema(resource: &std::path::Path) {
         resource.display()
     );
     let schema: orbital_core::OrbitalSchema =
-        serde_json::from_str(&std::fs::read_to_string(resource).unwrap())
+        from_json_str(&std::fs::read_to_string(resource).unwrap())
             .expect("valid OrbitalSchema");
     let traits: Vec<_> = schema
         .orbitals

@@ -142,7 +142,7 @@ pub fn parse_schema_auto_typed_with_map(
 /// A failed `.orb` parse that retired trait keys explain is reported as those
 /// keys (code, path and replacement); any other failure keeps serde's message.
 fn json_parse_error(content: &str, message: String) -> TypedParseError {
-    let retired = serde_json::from_str::<serde_json::Value>(content)
+    let retired = orbital_core::json_value::from_json_str::<serde_json::Value>(content)
         .map(|doc| orbital_core::schema::retired_trait_keys(&doc))
         .unwrap_or_default();
     if retired.is_empty() {
