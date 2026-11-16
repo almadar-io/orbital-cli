@@ -80,6 +80,18 @@ impl LazyPage {
     }
 }
 
+/// The lazy page whose file is `file` (its path joined to its importer's folder), nested pages included.
+fn lazy_page_of<'a>(pages: &'a [LazyPage], folder: &str, file: &str) -> Option<&'a LazyPage> {
+    pages.iter().find_map(|page| {
+        let orb_ref = if folder.is_empty() { page.orb_ref.clone() } else { format!("{folder}/{}", page.orb_ref) };
+        if orb_ref == file {
+            return Some(page);
+        }
+        let child_folder = orb_ref.rsplit_once('/').map(|(dir, _)| dir.to_string()).unwrap_or_default();
+        lazy_page_of(&page.lazy, &child_folder, file)
+    })
+}
+
 /// A lazy page whose stored program is gone from the lazy cache (removed or unreadable): the entry resolves again.
 #[derive(Debug)]
 pub(crate) struct LazyPageGone(pub String);
@@ -135,20 +147,26 @@ impl ResolvedEntry {
             .ok_or_else(|| LazyPageGone(page.orb_ref.clone()))
     }
 
+    /// The `uses lazy` program whose file is `file`, read from the lazy cache, when the program's own file `importer`
+    /// (where its `uses lazy` lines are) and every file that page's resolution read are unchanged: one page is answered
+    /// without re-checking every file the whole program read. `None` sends the caller to the full check.
+    fn current_lazy_program(&self, importer: &Path, file: &str) -> Option<orbital_core::OrbitalSchema> {
+        if !self.reads.path_is_current(importer) {
+            return None;
+        }
+        let page = lazy_page_of(&self.lazy, "", file)?;
+        let stored = self.cache.as_ref()?.get(page.key.as_deref()?)?;
+        if !stored.reads.is_current() {
+            return None;
+        }
+        stored.reads.replay();
+        Some(stored.resolved.schema)
+    }
+
     /// The `uses lazy` program whose file is `file` (its path joined to its importer's folder), read from the lazy
     /// cache; `Ok(None)` when no lazy behavior of this program has that file.
     pub(crate) fn lazy_program(&self, file: &str) -> Result<Option<orbital_core::OrbitalSchema>, LazyPageGone> {
-        fn find<'a>(pages: &'a [LazyPage], folder: &str, file: &str) -> Option<&'a LazyPage> {
-            pages.iter().find_map(|page| {
-                let orb_ref = if folder.is_empty() { page.orb_ref.clone() } else { format!("{folder}/{}", page.orb_ref) };
-                if orb_ref == file {
-                    return Some(page);
-                }
-                let child_folder = orb_ref.rsplit_once('/').map(|(dir, _)| dir.to_string()).unwrap_or_default();
-                find(&page.lazy, &child_folder, file)
-            })
-        }
-        find(&self.lazy, "", file).map(|page| self.program_of(page)).transpose()
+        lazy_page_of(&self.lazy, "", file).map(|page| self.program_of(page)).transpose()
     }
 
     /// Every lazy behavior with its resolved program, read from the lazy cache for this call only.
@@ -418,11 +436,7 @@ fn store(
 /// The program at `path` resolved once per path and compiler settings in this process, reused while every file the
 /// resolution read, the program's own file included, is as it was read.
 pub(crate) fn resolved_file(path: &Path) -> anyhow::Result<std::sync::Arc<ResolvedEntry>> {
-    let mut options = orbital_compiler::CompilerOptions::from_env();
-    if let Some(cache) = LAZY_CACHE.as_ref() {
-        options.lazy_cache = orbital_compiler::phases::lazy::LazyCache(Some(std::sync::Arc::clone(cache) as std::sync::Arc<dyn orbital_compiler::phases::lazy::LazyResolveCache>));
-    }
-    let key = (path.to_path_buf(), settings_key(&options));
+    let (options, key) = resolve_options(path);
     if let Some(entry) = resolved_hit(&key, path) {
         return Ok(entry);
     }
@@ -490,6 +504,23 @@ fn resolve_uncached(key: ResolvedKey, options: &orbital_compiler::CompilerOption
     store(key, schema, options, path)
 }
 
+/// The program at `path` this process already resolved, whether or not every file it read is still unchanged: a caller
+/// that needs only part of it checks that part ([`ResolvedEntry::current_lazy_program`]).
+fn held_entry(path: &Path) -> Option<std::sync::Arc<ResolvedEntry>> {
+    let (_, key) = resolve_options(path);
+    RESOLVED.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&key)
+}
+
+/// The options `path` resolves with (the lazy cache attached) and the key its resolution is held under.
+fn resolve_options(path: &Path) -> (orbital_compiler::CompilerOptions, ResolvedKey) {
+    let mut options = orbital_compiler::CompilerOptions::from_env();
+    if let Some(cache) = LAZY_CACHE.as_ref() {
+        options.lazy_cache = orbital_compiler::phases::lazy::LazyCache(Some(std::sync::Arc::clone(cache) as std::sync::Arc<dyn orbital_compiler::phases::lazy::LazyResolveCache>));
+    }
+    let key = (path.to_path_buf(), settings_key(&options));
+    (options, key)
+}
+
 /// [`resolved_file`] once more after a lazy page it named left the lazy cache: the program is resolved again.
 fn resolved_file_again(path: &Path) -> anyhow::Result<std::sync::Arc<ResolvedEntry>> {
     let options = orbital_compiler::CompilerOptions::from_env();
@@ -512,6 +543,9 @@ pub(crate) fn resolved_with_lazy(path: &Path) -> anyhow::Result<(std::sync::Arc<
 
 /// The `uses lazy` program of the program at `path` whose file is `file`; `Ok(None)` when it has none with that file.
 pub(crate) fn resolved_lazy_page(path: &Path, file: &str) -> anyhow::Result<Option<orbital_core::OrbitalSchema>> {
+    if let Some(page) = held_entry(path).and_then(|entry| entry.current_lazy_program(path, file)) {
+        return Ok(Some(page));
+    }
     match resolved_file(path)?.lazy_program(file) {
         Ok(page) => Ok(page),
         Err(_) => Ok(resolved_file_again(path)?.lazy_program(file)?),
@@ -898,6 +932,56 @@ mod tests {
         let file = std::fs::read_dir(root.path().join("tool-a")).unwrap().flatten().find(|e| e.file_name().to_string_lossy().starts_with("program-")).unwrap().path();
         std::fs::write(&file, "not json").unwrap();
         assert!(stored_program(&cache, &key).is_none(), "a corrupt program is resolved again, never trusted");
+    }
+
+    fn recorded(files: &[&Path]) -> orbital_core::read_set::ReadSet {
+        orbital_core::read_set::begin();
+        for file in files {
+            orbital_core::read_set::read_to_string(file).unwrap();
+        }
+        orbital_core::read_set::end()
+    }
+
+    /// A site importing one lazy page: the site read `site.lolo` and `other.lolo`, the page read `page.lolo`.
+    fn site_over_one_page(dir: &Path, cache_root: &Path) -> (PathBuf, ResolvedEntry) {
+        let (site, other, page_file) = (dir.join("site.lolo"), dir.join("other.lolo"), dir.join("page.lolo"));
+        for file in [&site, &other, &page_file] {
+            std::fs::write(file, "one").unwrap();
+        }
+        let cache = std::sync::Arc::new(DerivedLazyCache::in_dir(cache_root, "tool-a"));
+        let mut stored = cached("Late");
+        stored.reads = recorded(&[&page_file]);
+        cache.put("slot-1", "key-1", stored);
+        let schema = orbital_core::json_value::from_json_value(&serde_json::json!({ "name": "site", "orbitals": [] })).unwrap();
+        let entry = ResolvedEntry::new(schema, vec![page("Late", Some("key-1"))], Some(cache as std::sync::Arc<dyn LazyResolveCache>), recorded(&[&site, &other, &page_file]));
+        (site, entry)
+    }
+
+    #[test]
+    fn a_lazy_page_whose_own_files_are_unchanged_is_answered_without_rechecking_the_whole_site() {
+        let (dir, root) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let (site, entry) = site_over_one_page(dir.path(), root.path());
+        std::fs::write(dir.path().join("other.lolo"), "changed").unwrap();
+        assert!(!entry.reads.is_current(), "the site as a whole is stale");
+        let page = entry.current_lazy_program(&site, "lazy/Late.orb").expect("the page's own files and the site's file are unchanged");
+        assert_eq!(page.name, "Late");
+    }
+
+    #[test]
+    fn control_a_lazy_page_whose_own_file_changed_is_resolved_again() {
+        let (dir, root) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let (site, entry) = site_over_one_page(dir.path(), root.path());
+        std::fs::write(dir.path().join("page.lolo"), "changed").unwrap();
+        assert!(entry.current_lazy_program(&site, "lazy/Late.orb").is_none());
+    }
+
+    #[test]
+    fn edge_a_lazy_page_whose_site_file_changed_is_resolved_again() {
+        let (dir, root) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let (site, entry) = site_over_one_page(dir.path(), root.path());
+        std::fs::write(&site, "changed: it may no longer import the page, or import it otherwise").unwrap();
+        assert!(entry.current_lazy_program(&site, "lazy/Late.orb").is_none());
+        assert!(entry.current_lazy_program(&dir.path().join("elsewhere.lolo"), "lazy/Late.orb").is_none(), "a site file the entry never read");
     }
 
     #[test]
