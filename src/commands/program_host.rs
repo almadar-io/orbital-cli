@@ -375,8 +375,8 @@ pub(crate) fn resolve_vectors(
 pub(crate) fn resolved_value(path: &Path) -> anyhow::Result<Value> {
     use orbital_compiler::phases::lazy::resolved_value as canonical;
     use orbital_core::value_serialize::to_value;
-    let entry = super::dev::resolved_file(path)?;
-    let (resolved, lazy) = (entry.schema(), entry.lazy());
+    let (entry, lazy) = super::dev::resolved_with_lazy(path)?;
+    let resolved = entry.schema();
     let lazy = lazy
         .iter()
         .map(|child| {
@@ -443,18 +443,18 @@ pub(crate) fn resolved_read(path: &Path, output: Option<&Path>) -> anyhow::Resul
     }
     drop(content);
     let entry = super::dev::resolved_file(path)?;
-    let (resolved, lazy) = (entry.schema(), entry.lazy());
-    let text = orbital_compiler::phases::lazy::resolved_json(resolved).map_err(anyhow::Error::msg)?;
+    let text = orbital_compiler::phases::lazy::resolved_json(entry.schema()).map_err(anyhow::Error::msg)?;
     match output {
         Some(out) => {
             std::fs::write(out, &text).map_err(|e| anyhow::anyhow!("Failed to write {}: {}", out.display(), e))?;
-            orbital_compiler::phases::lazy::write_resolved_lazy(out.parent().unwrap_or(Path::new(".")), lazy)
+            let (_, lazy) = super::dev::resolved_with_lazy(path)?;
+            orbital_compiler::phases::lazy::write_resolved_lazy(out.parent().unwrap_or(Path::new(".")), &lazy)
                 .map_err(|e| anyhow::anyhow!("Failed to write lazy behaviors beside {}: {}", out.display(), e))?;
         }
-        None if !lazy.is_empty() => anyhow::bail!(
+        None if entry.has_lazy() => anyhow::bail!(
             "{} imports {} behavior(s) with `uses lazy`; each resolves to its own .orb — pass --output so they can be written beside it",
             path.display(),
-            lazy.len()
+            entry.lazy_len()
         ),
         None => {}
     }
@@ -1436,7 +1436,7 @@ fn resolved_behavior_program(path: &Path, behavior: &str) -> anyhow::Result<serd
     let entry = crate::commands::dev::resolved_file(path)?;
     let mut program = serde_json::to_value(entry.schema())?;
     with_client_metadata(&mut program);
-    if let (false, Some(fields)) = (entry.lazy().is_empty(), program.as_object_mut()) {
+    if let (false, Some(fields)) = (!entry.has_lazy(), program.as_object_mut()) {
         fields.insert("lazySource".into(), serde_json::json!({ "behavior": behavior }));
     }
     Ok(program)
@@ -1459,22 +1459,11 @@ impl std::fmt::Display for LazyRead {
 }
 
 /// The `uses lazy` program of the resolved program at `path` whose file is `file`, as the kernel names a nested child
-/// (its path joined to its importer's folder). Only that child is copied out of the resolved tree.
+/// (its path joined to its importer's folder), read from the lazy cache one page at a time.
 fn resolved_lazy_program(path: &Path, file: &str) -> Result<serde_json::Value, LazyRead> {
-    fn find<'a>(lazy: &'a [orbital_compiler::phases::lazy::ResolvedLazy], folder: &str, file: &str) -> Option<&'a orbital_core::OrbitalSchema> {
-        lazy.iter().find_map(|item| {
-            let orb_ref = if folder.is_empty() { item.orb_ref.clone() } else { format!("{folder}/{}", item.orb_ref) };
-            if orb_ref == file {
-                return Some(&item.schema);
-            }
-            let child_folder = orb_ref.rsplit_once('/').map(|(dir, _)| dir.to_string()).unwrap_or_default();
-            find(&item.lazy, &child_folder, file)
-        })
-    }
-    let entry = crate::commands::dev::resolved_file(path).map_err(LazyRead::Failed)?;
-    let mut program = find(entry.lazy(), "", file)
-        .ok_or_else(|| LazyRead::NotFound(format!("{} has no lazy page whose file is `{file}`", path.display())))?
-        .clone();
+    let mut program = crate::commands::dev::resolved_lazy_page(path, file)
+        .map_err(LazyRead::Failed)?
+        .ok_or_else(|| LazyRead::NotFound(format!("{} has no lazy page whose file is `{file}`", path.display())))?;
     orbital_core::schema::normalize_fn_shapes(&mut program);
     serde_json::to_value(&program).map_err(|e| LazyRead::Failed(e.into()))
 }

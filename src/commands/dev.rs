@@ -54,27 +54,170 @@ fn resolve_schema_into(parent: &Path, schema: orbital_core::OrbitalSchema, path:
     Ok(program)
 }
 
+use orbital_compiler::phases::lazy::{LazyResolveCache, ResolvedLazy};
+
+/// One `uses lazy` behavior of a resolved program: where it is stored, never its resolved program when the lazy
+/// cache holds it (read back one page at a time); a behavior the cache does not hold keeps its program here.
+struct LazyPage {
+    orbital: String,
+    orb_ref: String,
+    key: Option<String>,
+    held: Option<orbital_core::OrbitalSchema>,
+    lazy: Vec<LazyPage>,
+}
+
+impl LazyPage {
+    fn of(resolved: ResolvedLazy, stored: bool) -> Self {
+        let stored_here = stored && resolved.cache_key.is_some();
+        LazyPage {
+            orbital: resolved.orbital,
+            orb_ref: resolved.orb_ref,
+            held: (!stored_here).then_some(resolved.schema),
+            key: resolved.cache_key.filter(|_| stored_here),
+            lazy: resolved.lazy.into_iter().map(|child| LazyPage::of(child, stored)).collect(),
+        }
+    }
+}
+
+/// A lazy page whose stored program is gone from the lazy cache (removed or unreadable): the entry resolves again.
+#[derive(Debug)]
+pub(crate) struct LazyPageGone(pub String);
+
+impl std::fmt::Display for LazyPageGone {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the lazy behavior `{}` is no longer in the lazy cache", self.0)
+    }
+}
+
+impl std::error::Error for LazyPageGone {}
+
 /// A program resolved once, with every file its resolution read. Readers share it; none copies it.
 pub(crate) struct ResolvedEntry {
     schema: orbital_core::OrbitalSchema,
-    lazy: Vec<orbital_compiler::phases::lazy::ResolvedLazy>,
+    lazy: Vec<LazyPage>,
+    cache: Option<std::sync::Arc<dyn LazyResolveCache>>,
     reads: orbital_core::read_set::ReadSet,
 }
 
 impl ResolvedEntry {
+    fn new(
+        schema: orbital_core::OrbitalSchema,
+        lazy: Vec<ResolvedLazy>,
+        cache: Option<std::sync::Arc<dyn LazyResolveCache>>,
+        reads: orbital_core::read_set::ReadSet,
+    ) -> Self {
+        let stored = cache.is_some();
+        ResolvedEntry { schema, lazy: lazy.into_iter().map(|page| LazyPage::of(page, stored)).collect(), cache, reads }
+    }
+
     pub(crate) fn schema(&self) -> &orbital_core::OrbitalSchema {
         &self.schema
     }
 
-    pub(crate) fn lazy(&self) -> &[orbital_compiler::phases::lazy::ResolvedLazy] {
-        &self.lazy
+    pub(crate) fn has_lazy(&self) -> bool {
+        !self.lazy.is_empty()
+    }
+
+    pub(crate) fn lazy_len(&self) -> usize {
+        self.lazy.len()
+    }
+
+    fn program_of(&self, page: &LazyPage) -> Result<orbital_core::OrbitalSchema, LazyPageGone> {
+        if let Some(held) = &page.held {
+            return Ok(held.clone());
+        }
+        page.key
+            .as_deref()
+            .zip(self.cache.as_ref())
+            .and_then(|(key, cache)| cache.get(key))
+            .map(|stored| stored.resolved.schema)
+            .ok_or_else(|| LazyPageGone(page.orb_ref.clone()))
+    }
+
+    /// The `uses lazy` program whose file is `file` (its path joined to its importer's folder), read from the lazy
+    /// cache; `Ok(None)` when no lazy behavior of this program has that file.
+    pub(crate) fn lazy_program(&self, file: &str) -> Result<Option<orbital_core::OrbitalSchema>, LazyPageGone> {
+        fn find<'a>(pages: &'a [LazyPage], folder: &str, file: &str) -> Option<&'a LazyPage> {
+            pages.iter().find_map(|page| {
+                let orb_ref = if folder.is_empty() { page.orb_ref.clone() } else { format!("{folder}/{}", page.orb_ref) };
+                if orb_ref == file {
+                    return Some(page);
+                }
+                let child_folder = orb_ref.rsplit_once('/').map(|(dir, _)| dir.to_string()).unwrap_or_default();
+                find(&page.lazy, &child_folder, file)
+            })
+        }
+        find(&self.lazy, "", file).map(|page| self.program_of(page)).transpose()
+    }
+
+    /// Every lazy behavior with its resolved program, read from the lazy cache for this call only.
+    pub(crate) fn lazy_resolved(&self) -> Result<Vec<ResolvedLazy>, LazyPageGone> {
+        fn read(entry: &ResolvedEntry, pages: &[LazyPage]) -> Result<Vec<ResolvedLazy>, LazyPageGone> {
+            pages
+                .iter()
+                .map(|page| {
+                    Ok(ResolvedLazy {
+                        orbital: page.orbital.clone(),
+                        orb_ref: page.orb_ref.clone(),
+                        schema: entry.program_of(page)?,
+                        lazy: read(entry, &page.lazy)?,
+                        cache_key: page.key.clone(),
+                    })
+                })
+                .collect()
+        }
+        read(self, &self.lazy)
     }
 }
 
 type ResolvedKey = (PathBuf, String);
 
-static RESOLVED: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<ResolvedKey, std::sync::Arc<ResolvedEntry>>>> =
-    std::sync::LazyLock::new(Default::default);
+/// Programs resolved in this process: every entry a caller still holds, and the most recent few kept for a reopen.
+#[derive(Default)]
+struct ResolvedCache {
+    entries: std::collections::HashMap<ResolvedKey, std::sync::Weak<ResolvedEntry>>,
+    recent: std::collections::VecDeque<std::sync::Arc<ResolvedEntry>>,
+}
+
+/// How many recently resolved programs are kept with no caller holding them.
+const RESOLVED_RECENT: usize = 8;
+
+impl ResolvedCache {
+    fn get(&mut self, key: &ResolvedKey) -> Option<std::sync::Arc<ResolvedEntry>> {
+        let entry = self.entries.get(key)?.upgrade();
+        match &entry {
+            Some(entry) => self.touch(entry),
+            None => {
+                self.entries.remove(key);
+            }
+        }
+        entry
+    }
+
+    fn insert(&mut self, key: ResolvedKey, entry: &std::sync::Arc<ResolvedEntry>) {
+        self.entries.insert(key, std::sync::Arc::downgrade(entry));
+        self.touch(entry);
+        self.entries.retain(|_, held| held.strong_count() > 0);
+    }
+
+    fn touch(&mut self, entry: &std::sync::Arc<ResolvedEntry>) {
+        self.recent.retain(|kept| !std::sync::Arc::ptr_eq(kept, entry));
+        self.recent.push_front(std::sync::Arc::clone(entry));
+        self.recent.truncate(RESOLVED_RECENT);
+    }
+
+    fn remove(&mut self, key: &ResolvedKey) {
+        if let Some(entry) = self.entries.remove(key).and_then(|held| held.upgrade()) {
+            self.recent.retain(|kept| !std::sync::Arc::ptr_eq(kept, &entry));
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+}
+
+static RESOLVED: std::sync::LazyLock<std::sync::Mutex<ResolvedCache>> = std::sync::LazyLock::new(Default::default);
 
 /// The compiler settings a resolution depends on besides what it reads.
 fn settings_key(options: &orbital_compiler::CompilerOptions) -> String {
@@ -102,6 +245,9 @@ struct DerivedLazyCache {
 /// Toolchain folders unused this long are removed: another binary (the release `orb` beside `orb-dev`) keeps its own.
 const LAZY_TOOLCHAIN_TTL: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 60 * 60);
 
+/// The file in a toolchain folder naming the binary that wrote it.
+const LAZY_BINARY_MARK: &str = "binary";
+
 impl DerivedLazyCache {
     fn in_dir(root: &Path, toolchain: &str) -> Self {
         Self { dir: root.join(toolchain) }
@@ -114,14 +260,29 @@ impl DerivedLazyCache {
         feed(&mut hasher, "lazy-resolve", b"1");
         feed_toolchain(&mut hasher).ok()?;
         let toolchain: String = hasher.finalize().iter().take(8).map(|b| format!("{b:02x}")).collect();
-        let root = derived_dir().join("lazy");
-        for folder in std::fs::read_dir(&root).into_iter().flatten().flatten() {
+        let binary = std::env::current_exe().ok()?;
+        Some(Self::open(&derived_dir().join("lazy"), &toolchain, &binary))
+    }
+
+    /// The folder for `toolchain` under `root`, marked as written by `binary`: a folder another toolchain of the same
+    /// binary wrote is removed (a rebuilt binary never reads it again), and any other folder unused for the TTL.
+    fn open(root: &Path, toolchain: &str, binary: &Path) -> Self {
+        let marker = binary.to_string_lossy();
+        for folder in std::fs::read_dir(root).into_iter().flatten().flatten() {
+            if folder.file_name().to_string_lossy() == toolchain {
+                continue;
+            }
+            let same_binary = std::fs::read_to_string(folder.path().join(LAZY_BINARY_MARK)).is_ok_and(|wrote| wrote == marker);
             let unused = folder.metadata().and_then(|m| m.modified()).ok().and_then(|at| at.elapsed().ok()).is_some_and(|age| age > LAZY_TOOLCHAIN_TTL);
-            if unused && folder.file_name().to_string_lossy() != toolchain {
+            if same_binary || unused {
                 let _ = std::fs::remove_dir_all(folder.path());
             }
         }
-        Some(Self::in_dir(&root, &toolchain))
+        let cache = Self::in_dir(root, toolchain);
+        if let Err(e) = cache.write(LAZY_BINARY_MARK, marker.as_bytes()) {
+            tracing::debug!(target: "almadar:cli:resolve-cache", dir = %cache.dir.display(), error = %e, "lazy cache: binary mark not written");
+        }
+        cache
     }
 
     /// `bytes` written to `name` whole or not at all.
@@ -136,12 +297,12 @@ impl DerivedLazyCache {
 impl orbital_compiler::phases::lazy::LazyResolveCache for DerivedLazyCache {
     fn get(&self, key: &str) -> Option<orbital_compiler::phases::lazy::CachedLazy> {
         let raw = std::fs::read(self.dir.join(format!("{key}.json"))).ok()?;
-        serde_json::from_slice(&raw).ok()
+        orbital_core::intern::scope(|| serde_json::from_slice(&raw)).ok()
     }
 
     fn put(&self, slot: &str, key: &str, entry: orbital_compiler::phases::lazy::CachedLazy) {
         let slot_file = self.dir.join(format!("{slot}.slot"));
-        let stored = serde_json::to_vec(&entry).map_err(std::io::Error::other).and_then(|bytes| self.write(&format!("{key}.json"), &bytes));
+        let stored = orbital_core::def_refs::to_vec_with_defs(&entry).map_err(std::io::Error::other).and_then(|bytes| self.write(&format!("{key}.json"), &bytes));
         if let Err(e) = stored.and_then(|_| {
             if let Ok(old) = std::fs::read_to_string(&slot_file) {
                 if old != key {
@@ -168,9 +329,9 @@ fn store(
     let done = orbital_compiler::phases::lazy::resolve_program_with_path(schema, options, Some(path));
     let reads = orbital_core::read_set::end();
     let (schema, lazy) = done.map_err(|e| anyhow::anyhow!("resolve {}: {e}", path.display()))?;
-    let entry = std::sync::Arc::new(ResolvedEntry { schema, lazy, reads });
+    let entry = std::sync::Arc::new(ResolvedEntry::new(schema, lazy, options.lazy_cache.0.clone(), reads));
     let mut resolved = RESOLVED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    resolved.insert(key, std::sync::Arc::clone(&entry));
+    resolved.insert(key, &entry);
     tracing::debug!(
         target: "almadar:cli:resolve-cache",
         path = %path.display(),
@@ -191,11 +352,11 @@ pub(crate) fn resolved_file(path: &Path) -> anyhow::Result<std::sync::Arc<Resolv
     }
     let key = (path.to_path_buf(), settings_key(&options));
     {
-        let resolved = RESOLVED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut resolved = RESOLVED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(entry) = resolved.get(&key).filter(|entry| entry.reads.is_current()) {
             entry.reads.replay();
             tracing::debug!(target: "almadar:cli:resolve-cache", path = %path.display(), outcome = "hit", entries = resolved.len(), "resolve cache");
-            return Ok(std::sync::Arc::clone(entry));
+            return Ok(entry);
         }
     }
     // Resolved with the cache unlocked: a build-time describe resolves the program it names through this cache.
@@ -214,6 +375,34 @@ pub(crate) fn resolved_file(path: &Path) -> anyhow::Result<std::sync::Arc<Resolv
         }
     };
     store(key, schema, &options, path)
+}
+
+/// [`resolved_file`] once more after a lazy page it named left the lazy cache: the program is resolved again.
+fn resolved_file_again(path: &Path) -> anyhow::Result<std::sync::Arc<ResolvedEntry>> {
+    let options = orbital_compiler::CompilerOptions::from_env();
+    RESOLVED.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&(path.to_path_buf(), settings_key(&options)));
+    resolved_file(path)
+}
+
+/// The program at `path` and every lazy behavior with its resolved program, read for this call.
+pub(crate) fn resolved_with_lazy(path: &Path) -> anyhow::Result<(std::sync::Arc<ResolvedEntry>, Vec<ResolvedLazy>)> {
+    let entry = resolved_file(path)?;
+    match entry.lazy_resolved() {
+        Ok(lazy) => Ok((entry, lazy)),
+        Err(_) => {
+            let entry = resolved_file_again(path)?;
+            let lazy = entry.lazy_resolved()?;
+            Ok((entry, lazy))
+        }
+    }
+}
+
+/// The `uses lazy` program of the program at `path` whose file is `file`; `Ok(None)` when it has none with that file.
+pub(crate) fn resolved_lazy_page(path: &Path, file: &str) -> anyhow::Result<Option<orbital_core::OrbitalSchema>> {
+    match resolved_file(path)?.lazy_program(file) {
+        Ok(page) => Ok(page),
+        Err(_) => Ok(resolved_file_again(path)?.lazy_program(file)?),
+    }
 }
 
 /// [`resolve_to_temp`] for a command program: one std ships is resolved once per state of the files its resolution
@@ -459,6 +648,7 @@ mod tests {
                 orb_ref: format!("lazy/{orbital}.orb"),
                 schema: serde_json::from_value(serde_json::json!({ "name": orbital, "orbitals": [] })).unwrap(),
                 lazy: Vec::new(),
+                cache_key: None,
             },
             reads: orbital_core::read_set::ReadSet::default(),
         }
@@ -493,6 +683,118 @@ mod tests {
         let file = std::fs::read_dir(root.path().join("tool-a")).unwrap().flatten().find(|e| e.file_name().to_string_lossy().ends_with("key-1.json")).unwrap().path();
         std::fs::write(&file, "not json").unwrap();
         assert!(cache.get("key-1").is_none(), "a corrupt entry is resolved again, never trusted");
+    }
+
+    #[test]
+    fn a_new_toolchain_folder_replaces_the_folders_the_same_binary_wrote() {
+        let root = tempfile::tempdir().unwrap();
+        let dev = Path::new("/bin/orb-dev.bin");
+        DerivedLazyCache::open(root.path(), "build-1", dev).put("slot-1", "key-1", cached("Late"));
+        DerivedLazyCache::open(root.path(), "build-2", dev);
+        assert!(!root.path().join("build-1").exists(), "the same binary's older folder is removed");
+        assert!(root.path().join("build-2").exists());
+    }
+
+    #[test]
+    fn control_another_binarys_folder_and_an_unmarked_folder_stay() {
+        let root = tempfile::tempdir().unwrap();
+        DerivedLazyCache::open(root.path(), "release-1", Path::new("/bin/orb")).put("slot-1", "key-1", cached("Late"));
+        std::fs::create_dir_all(root.path().join("unmarked")).unwrap();
+        DerivedLazyCache::open(root.path(), "build-1", Path::new("/bin/orb-dev.bin"));
+        assert!(root.path().join("release-1").exists(), "another binary keeps its folder");
+        assert!(root.path().join("unmarked").exists(), "a folder that names no binary waits for the TTL");
+    }
+
+    #[test]
+    fn edge_reopening_the_current_toolchain_keeps_its_entries() {
+        let root = tempfile::tempdir().unwrap();
+        let dev = Path::new("/bin/orb-dev.bin");
+        DerivedLazyCache::open(root.path(), "build-1", dev).put("slot-1", "key-1", cached("Late"));
+        assert!(DerivedLazyCache::open(root.path(), "build-1", dev).get("key-1").is_some());
+    }
+
+    fn page(orbital: &str, key: Option<&str>) -> ResolvedLazy {
+        let mut resolved = cached(orbital).resolved;
+        resolved.cache_key = key.map(str::to_string);
+        resolved
+    }
+
+    fn entry_over(cache: Option<std::sync::Arc<DerivedLazyCache>>, pages: Vec<ResolvedLazy>) -> ResolvedEntry {
+        let schema = serde_json::from_value(serde_json::json!({ "name": "root", "orbitals": [] })).unwrap();
+        ResolvedEntry::new(schema, pages, cache.map(|c| c as std::sync::Arc<dyn LazyResolveCache>), orbital_core::read_set::ReadSet::default())
+    }
+
+    #[test]
+    fn a_lazy_page_the_cache_holds_is_read_from_it_and_not_kept_in_the_entry() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = std::sync::Arc::new(DerivedLazyCache::in_dir(root.path(), "tool-a"));
+        cache.put("slot-1", "key-1", cached("Late"));
+        let entry = entry_over(Some(cache), vec![page("Late", Some("key-1"))]);
+        assert!(entry.lazy[0].held.is_none(), "the page's program stays on disk");
+        let read = entry.lazy_program("lazy/Late.orb").unwrap().expect("the page");
+        assert_eq!(read.name, "Late");
+        assert!(entry.lazy_program("lazy/Other.orb").unwrap().is_none(), "control: a file no page has");
+    }
+
+    #[test]
+    fn control_with_no_lazy_cache_a_page_keeps_its_program() {
+        let entry = entry_over(None, vec![page("Late", Some("key-1"))]);
+        assert!(entry.lazy[0].held.is_some());
+        assert_eq!(entry.lazy_program("lazy/Late.orb").unwrap().map(|p| p.name), Some("Late".to_string()));
+    }
+
+    #[test]
+    fn edge_a_page_gone_from_the_lazy_cache_is_reported_not_answered_empty() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = std::sync::Arc::new(DerivedLazyCache::in_dir(root.path(), "tool-a"));
+        let entry = entry_over(Some(cache), vec![page("Late", Some("never-stored"))]);
+        assert!(entry.lazy_program("lazy/Late.orb").is_err());
+        assert!(entry.lazy_resolved().is_err());
+    }
+
+    #[test]
+    fn a_lazy_cache_entry_is_stored_with_shared_subtrees_once_and_read_back_whole() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = DerivedLazyCache::in_dir(root.path(), "tool-a");
+        let mut entry = cached("Late");
+        entry.resolved.schema = serde_json::from_value(serde_json::json!({ "name": "Late", "orbitals": [{ "name": "A", "entity": { "name": "E", "persistence": "runtime", "fields": [{ "name": "id", "type": "string" }] }, "traits": [{ "name": "T", "linkedEntity": "E", "stateMachine": { "states": [{ "name": "idle", "isInitial": true }], "transitions": [
+            { "from": "idle", "to": "idle", "event": "X", "effects": [["set", "@entity.v", { "presets": ["naqsh", "glass", "sand"] }]] },
+            { "from": "idle", "to": "idle", "event": "Y", "effects": [["set", "@entity.v", { "presets": ["naqsh", "glass", "sand"] }]] }
+        ] } }] }] }))
+        .unwrap();
+        let plain = serde_json::to_vec(&entry.resolved.schema).unwrap();
+        cache.put("slot-1", "key-1", entry);
+        let stored = std::fs::read_to_string(root.path().join("tool-a/key-1.json")).unwrap();
+        assert_eq!(stored.matches("\"sand\"").count(), 1, "{stored}");
+        let back = cache.get("key-1").expect("read back");
+        assert_eq!(serde_json::to_vec(&back.resolved.schema).unwrap(), plain);
+    }
+
+    fn resolved_entry() -> std::sync::Arc<ResolvedEntry> {
+        std::sync::Arc::new(entry_over(None, Vec::new()))
+    }
+
+    #[test]
+    fn the_resolve_cache_keeps_the_most_recent_programs_and_releases_older_ones() {
+        let mut cache = ResolvedCache::default();
+        let keys: Vec<ResolvedKey> = (0..RESOLVED_RECENT + 2).map(|i| (PathBuf::from(format!("/p{i}.lolo")), String::new())).collect();
+        for key in &keys {
+            cache.insert(key.clone(), &resolved_entry());
+        }
+        assert!(cache.get(&keys[0]).is_none() && cache.get(&keys[1]).is_none(), "the oldest are released");
+        assert!(keys[2..].iter().all(|key| cache.get(key).is_some()), "the most recent {RESOLVED_RECENT} stay");
+    }
+
+    #[test]
+    fn control_a_program_a_caller_still_holds_stays_past_the_bound() {
+        let mut cache = ResolvedCache::default();
+        let held = resolved_entry();
+        cache.insert((PathBuf::from("/held.lolo"), String::new()), &held);
+        for i in 0..RESOLVED_RECENT + 2 {
+            cache.insert((PathBuf::from(format!("/p{i}.lolo")), String::new()), &resolved_entry());
+        }
+        let again = cache.get(&(PathBuf::from("/held.lolo"), String::new())).expect("still held by its caller");
+        assert!(std::sync::Arc::ptr_eq(&again, &held));
     }
 
     fn built(parent: &Path, calls: &Cell<u32>, text: &str) -> anyhow::Result<ResolvedProgram> {
@@ -780,7 +1082,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("post.orb"), POST).unwrap();
         let path = dir.path().join("site.orb");
-        let held = |path: &Path| RESOLVED.lock().unwrap().keys().filter(|(p, _)| p == path).count();
+        let held = |path: &Path| RESOLVED.lock().unwrap().entries.keys().filter(|(p, _)| p == path).count();
         for n in 0..4 {
             std::fs::write(&path, SITE.replace("HomeState", &format!("HomeState{n}"))).unwrap();
             resolve_file(&path);

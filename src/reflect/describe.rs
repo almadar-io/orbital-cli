@@ -116,7 +116,7 @@ struct EventVocab<'a> {
 #[derive(Serialize)]
 struct EntityOut {
     name: String,
-    fields: Vec<FieldDefinition>,
+    fields: orbital_core::Shared<Vec<FieldDefinition>>,
     identity: bool,
     persistence: orbital_core::schema::Persistence,
 }

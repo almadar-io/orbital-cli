@@ -7,7 +7,10 @@ Every open gap this repo owns lives here. This file is the source of truth; the 
 - **Codes:** new gaps use this repo's prefix `G-ORBITAL-CLI-`. Take the "Next code" below, then bump it in the same edit. Codes are never reused or renamed.
 - **Close by deleting.** Remove the entry in the same commit as the fix.
 
-Next code: `G-ORBITAL-CLI-006`
+Next code: `G-ORBITAL-CLI-009`
+
+- **G-ORBITAL-CLI-008** [mechanical] — Nine CLI integration tests are red because their fixture programs predate validate rules added since: `relative_lolo_imports` (2), `validate_compile_error_json` (2), `live_registry` (2) and `native_shell_mixed_resolved_schema` (3) expect `valid: true`, and their programs now fail `ORB_ENTITY_WRITE_UNDECLARED` / `ORB_ENTITY_READ_UNDECLARED` (no `@create`/`@read`), `ORB_FETCH_UNBOUNDED` and `ORB_EFF_SERVER_EFFECT_NO_FAILURE_ROUTE`. The rules are right; the fixtures need their policies, limits and failure routes declared. Seen 2026-11-15 running the suite for P-034 memory round 2 (unrelated to it). Reproduce: `cargo test -p orbital-cli --test validate_compile_error_json`. Prevention rung: (3) the verifiers (the suite run at each rule change). Severity: medium. Root cause: one-off.
+
 
 - **G-ORBITAL-CLI-005** [mechanical] — While the catalog is browsed, the launchpad spends its CPU re-reading `.lolo` source. samply on the launchpad process over 80 catalog page opens (`orb profile launchpad --samply`, 2026-11-13, 100 Hz, each thread's pre-recording CPU left out) ranks by self CPU: `orbital_lolo::lexer::Lexer::run` 7.5 s, `Vec::from_iter` 2.8 s, SipHash and `HashMap::insert` about 4 s, file opens, `getdirentries` and `stat` about 4.5 s, brotli compression of responses 1.2 s, `drop_in_place<Parser>` 0.6 s; the counting allocator (`alloc_meter::count`) 0.9 s. So each guest open lexes and parses source files again, about 90 ms of lexer time per open; which ask does it (behavior/resolve, behavior/describe, the catalog listing) is not yet read from the stacks. Owner: orbital-cli (program_host's behavior/* answers) with orbital-lolo. Reproduce: `ORB_CHROME=<chrome> orb profile launchpad --limit 80 --pid <launchpad pid> --samply`. Prevention rung: none (a cost, not a wrong result). Severity: medium. Root cause: one-off.
 
