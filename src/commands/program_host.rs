@@ -1410,8 +1410,7 @@ impl ProgramHost {
     fn resolve_behavior(&self, behavior: &str) -> Result<Value, SubstrateFailure> {
         let path = reflect::behavior_source_path(behavior)
             .map_err(|e| failure(format!("behavior/resolve: {e}")))?;
-        let program = resolved_behavior_program(&path, behavior).map_err(|e| failure(format!("behavior/resolve: {e}")))?;
-        from_json(program)
+        resolved_behavior_program(&path, behavior).map_err(|e| failure(format!("behavior/resolve: {e}")))
     }
 
     /// `behavior/resolve <behavior> { lazy: <file> }`: one `uses lazy` program of the behavior, resolved, by the file its
@@ -1432,12 +1431,12 @@ impl ProgramHost {
 
 /// The resolved program at `path` as `behavior/resolve` answers it: client metadata, and, when it `uses lazy`, the
 /// `lazySource` its lazy programs are read from one file at a time (`behavior/resolve { lazy }`, `program/open`).
-fn resolved_behavior_program(path: &Path, behavior: &str) -> anyhow::Result<serde_json::Value> {
+fn resolved_behavior_program(path: &Path, behavior: &str) -> anyhow::Result<Value> {
     let entry = crate::commands::dev::resolved_file(path)?;
-    let mut program = serde_json::to_value(entry.schema())?;
+    let mut program = orbital_core::value_serialize::to_value(entry.schema())?;
     with_client_metadata(&mut program);
     if let (false, Some(fields)) = (!entry.has_lazy(), program.as_object_mut()) {
-        fields.insert("lazySource".into(), serde_json::json!({ "behavior": behavior }));
+        fields.insert("lazySource".into(), Value::object(orbital_core::ValueMap::from_iter([("behavior".into(), Value::String(behavior.into()))])));
     }
     Ok(program)
 }
@@ -1470,12 +1469,12 @@ fn resolved_lazy_program(path: &Path, file: &str) -> Result<serde_json::Value, L
 
 /// A resolved program is mounted by a browser kernel, which has no installed core: it carries the client metadata
 /// (`orbital_core::effects::runs_on::client_program_metadata`) beside whatever `_metadata` it already has.
-fn with_client_metadata(program: &mut serde_json::Value) {
-    let metadata = orbital_core::effects::runs_on::client_program_metadata(program.get("orbitals").unwrap_or(&serde_json::Value::Null));
+fn with_client_metadata(program: &mut Value) {
+    let metadata = orbital_core::effects::runs_on::client_program_metadata(program.get("orbitals").unwrap_or(&Value::Null));
     let Some(root) = program.as_object_mut() else {
         return;
     };
-    let slot = root.entry("_metadata").or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    let slot = root.entry("_metadata".into()).or_insert_with(|| Value::object(orbital_core::ValueMap::default()));
     if let Some(existing) = slot.as_object_mut() {
         existing.extend(metadata);
     }
@@ -2408,10 +2407,11 @@ orbital O {
     fn a_resolved_behavior_names_its_lazy_source_and_carries_no_lazy_program() {
         let dir = tempfile::tempdir().expect("tempdir");
         let with = resolved_behavior_program(&program_with_lazy_child(dir.path(), true), "pkg/with").expect("resolves");
+        let with = json(&with);
         assert_eq!(with["lazySource"], serde_json::json!({ "behavior": "pkg/with" }), "{with}");
         assert!(with.get("lazyPrograms").is_none(), "its lazy programs are read one at a time, never carried: {with}");
         assert!(with["lazyPages"][0]["orbRef"].is_string(), "the lazy page still names its file: {with}");
-        let without = resolved_behavior_program(&program_with_lazy_child(dir.path(), false), "pkg/without").expect("resolves");
+        let without = json(&resolved_behavior_program(&program_with_lazy_child(dir.path(), false), "pkg/without").expect("resolves"));
         assert!(without.get("lazySource").is_none(), "control: no lazy import, no lazy source: {without}");
     }
 
@@ -2419,7 +2419,7 @@ orbital O {
     fn a_resolved_behaviors_lazy_program_is_answered_by_the_file_its_lazy_page_names() {
         let dir = tempfile::tempdir().expect("tempdir");
         let file = program_with_lazy_child(dir.path(), true);
-        let with = resolved_behavior_program(&file, "pkg/with").expect("resolves");
+        let with = json(&resolved_behavior_program(&file, "pkg/with").expect("resolves"));
         let orb_ref = with["lazyPages"][0]["orbRef"].as_str().expect("the lazy page names its file").to_string();
         let child = resolved_lazy_program(&file, &orb_ref).expect("the child resolves");
         assert!(child["orbitals"].as_array().is_some_and(|o| o.iter().any(|o| o["name"] == "Kid")), "{child}");
@@ -3192,15 +3192,16 @@ orbital O {
         assert!(metadata.get("dispatchFacts").is_some(), "{metadata}");
         assert_eq!(
             metadata.as_object().unwrap().iter().filter(|(k, _)| ["operatorSites", "dispatchFacts", "protocols"].contains(&k.as_str())).count(),
-            orbital_core::effects::runs_on::client_program_metadata(&resolved["orbitals"]).len(),
+            orbital_core::effects::runs_on::client_program_metadata(&from_json(resolved["orbitals"].clone()).unwrap()).len(),
             "the same metadata the served client program carries"
         );
     }
 
     #[test]
     fn edge_a_resolved_program_keeps_the_metadata_it_already_carries() {
-        let mut program = serde_json::json!({ "name": "P", "orbitals": [], "_metadata": { "provenance": "kept" } });
+        let mut program = from_json(serde_json::json!({ "name": "P", "orbitals": [], "_metadata": { "provenance": "kept" } })).unwrap();
         with_client_metadata(&mut program);
+        let program = json(&program);
         assert_eq!(program["_metadata"]["provenance"], "kept");
         assert!(program["_metadata"].get("protocols").is_some());
     }

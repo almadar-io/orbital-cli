@@ -58,6 +58,7 @@ use orbital_compiler::phases::lazy::{LazyResolveCache, ResolvedLazy};
 
 /// One `uses lazy` behavior of a resolved program: where it is stored, never its resolved program when the lazy
 /// cache holds it (read back one page at a time); a behavior the cache does not hold keeps its program here.
+#[derive(serde::Serialize, serde::Deserialize)]
 struct LazyPage {
     orbital: String,
     orb_ref: String,
@@ -219,6 +220,16 @@ impl ResolvedCache {
 
 static RESOLVED: std::sync::LazyLock<std::sync::Mutex<ResolvedCache>> = std::sync::LazyLock::new(Default::default);
 
+/// One gate per program being resolved: a request for a program another thread is resolving waits for that resolution
+/// and reads its entry, so a program is never resolved twice at once.
+static RESOLVING: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<ResolvedKey, std::sync::Arc<std::sync::Mutex<()>>>>> =
+    std::sync::LazyLock::new(Default::default);
+
+thread_local! {
+    /// The programs this thread is resolving, so a resolution that reaches its own program again does not wait on itself.
+    static RESOLVING_HERE: std::cell::RefCell<std::collections::HashSet<ResolvedKey>> = Default::default();
+}
+
 /// The compiler settings a resolution depends on besides what it reads.
 fn settings_key(options: &orbital_compiler::CompilerOptions) -> String {
     use sha2::{Digest, Sha256};
@@ -316,6 +327,60 @@ impl orbital_compiler::phases::lazy::LazyResolveCache for DerivedLazyCache {
     }
 }
 
+/// A resolved program as it is stored: the program, where its lazy pages are, and every file its resolution read.
+#[derive(serde::Serialize)]
+struct StoringProgram<'a> {
+    schema: &'a orbital_core::OrbitalSchema,
+    lazy: &'a [LazyPage],
+    reads: &'a orbital_core::read_set::ReadSet,
+}
+
+#[derive(serde::Deserialize)]
+struct StoredProgram {
+    schema: orbital_core::OrbitalSchema,
+    lazy: Vec<LazyPage>,
+    reads: orbital_core::read_set::ReadSet,
+}
+
+impl DerivedLazyCache {
+    /// The file a program is stored in: one per program path and compiler settings.
+    fn program_file(key: &ResolvedKey) -> String {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        feed(&mut hasher, "path", path_bytes(&key.0));
+        feed(&mut hasher, "settings", key.1.as_bytes());
+        let id: String = hasher.finalize().iter().take(16).map(|b| format!("{b:02x}")).collect();
+        format!("program-{id}.json")
+    }
+
+    /// Stores `entry` as the program `key` names, replacing what was stored for it.
+    fn put_program(&self, key: &ResolvedKey, entry: &ResolvedEntry) {
+        let stored = orbital_core::def_refs::to_vec_with_defs(&StoringProgram { schema: &entry.schema, lazy: &entry.lazy, reads: &entry.reads })
+            .map_err(std::io::Error::other)
+            .and_then(|bytes| self.write(&Self::program_file(key), &bytes));
+        if let Err(e) = stored {
+            tracing::debug!(target: "almadar:cli:resolve-cache", dir = %self.dir.display(), path = %key.0.display(), error = %e, "program not stored");
+        }
+    }
+
+    fn get_program(&self, key: &ResolvedKey) -> Option<StoredProgram> {
+        let raw = std::fs::read(self.dir.join(Self::program_file(key))).ok()?;
+        orbital_core::intern::scope(|| serde_json::from_slice(&raw)).ok()
+    }
+}
+
+/// The program `key` names as `cache` stored it, while every file its resolution read is unchanged; its lazy pages are
+/// read from the same cache.
+fn stored_program(cache: &std::sync::Arc<DerivedLazyCache>, key: &ResolvedKey) -> Option<ResolvedEntry> {
+    let stored = cache.get_program(key).filter(|stored| stored.reads.is_current())?;
+    Some(ResolvedEntry {
+        schema: stored.schema,
+        lazy: stored.lazy,
+        cache: Some(std::sync::Arc::clone(cache) as std::sync::Arc<dyn LazyResolveCache>),
+        reads: stored.reads,
+    })
+}
+
 static LAZY_CACHE: std::sync::LazyLock<Option<std::sync::Arc<DerivedLazyCache>>> =
     std::sync::LazyLock::new(|| DerivedLazyCache::for_toolchain().map(std::sync::Arc::new));
 
@@ -330,6 +395,10 @@ fn store(
     let reads = orbital_core::read_set::end();
     let (schema, lazy) = done.map_err(|e| anyhow::anyhow!("resolve {}: {e}", path.display()))?;
     let entry = std::sync::Arc::new(ResolvedEntry::new(schema, lazy, options.lazy_cache.0.clone(), reads));
+    if let Some(cache) = LAZY_CACHE.as_ref() {
+        let (cache, stored, key) = (std::sync::Arc::clone(cache), std::sync::Arc::clone(&entry), key.clone());
+        std::thread::spawn(move || cache.put_program(&key, &stored));
+    }
     let mut resolved = RESOLVED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     resolved.insert(key, &entry);
     tracing::debug!(
@@ -351,15 +420,55 @@ pub(crate) fn resolved_file(path: &Path) -> anyhow::Result<std::sync::Arc<Resolv
         options.lazy_cache = orbital_compiler::phases::lazy::LazyCache(Some(std::sync::Arc::clone(cache) as std::sync::Arc<dyn orbital_compiler::phases::lazy::LazyResolveCache>));
     }
     let key = (path.to_path_buf(), settings_key(&options));
-    {
-        let mut resolved = RESOLVED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(entry) = resolved.get(&key).filter(|entry| entry.reads.is_current()) {
-            entry.reads.replay();
-            tracing::debug!(target: "almadar:cli:resolve-cache", path = %path.display(), outcome = "hit", entries = resolved.len(), "resolve cache");
-            return Ok(entry);
+    if let Some(entry) = resolved_hit(&key, path) {
+        return Ok(entry);
+    }
+    let reentrant = RESOLVING_HERE.with(|here| here.borrow().contains(&key));
+    let gate = (!reentrant).then(|| {
+        let mut gates = RESOLVING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::sync::Arc::clone(gates.entry(key.clone()).or_default())
+    });
+    let held = gate.as_ref().map(|gate| gate.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
+    let waited = match gate.is_some().then(|| resolved_hit(&key, path)).flatten().or_else(|| disk_hit(&key, path)) {
+        Some(entry) => Ok(entry),
+        None => {
+            RESOLVING_HERE.with(|here| here.borrow_mut().insert(key.clone()));
+            let resolved = resolve_uncached(key.clone(), &options, path);
+            RESOLVING_HERE.with(|here| here.borrow_mut().remove(&key));
+            resolved
+        }
+    };
+    drop(held);
+    if let Some(gate) = gate {
+        let mut gates = RESOLVING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if std::sync::Arc::strong_count(&gate) == 2 {
+            gates.remove(&key);
         }
     }
-    // Resolved with the cache unlocked: a build-time describe resolves the program it names through this cache.
+    waited
+}
+
+/// The program `key` names read back from disk (see [`stored_program`]) and kept as a memory entry; its reads replay.
+fn disk_hit(key: &ResolvedKey, path: &Path) -> Option<std::sync::Arc<ResolvedEntry>> {
+    let entry = std::sync::Arc::new(stored_program(LAZY_CACHE.as_ref()?, key)?);
+    entry.reads.replay();
+    let mut resolved = RESOLVED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    resolved.insert(key.clone(), &entry);
+    tracing::debug!(target: "almadar:cli:resolve-cache", path = %path.display(), outcome = "disk-hit", entries = resolved.len(), "resolve cache");
+    Some(entry)
+}
+
+/// The cached entry for `key` while every file its resolution read is unchanged; a hit replays those reads.
+fn resolved_hit(key: &ResolvedKey, path: &Path) -> Option<std::sync::Arc<ResolvedEntry>> {
+    let mut resolved = RESOLVED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let entry = resolved.get(key).filter(|entry| entry.reads.is_current())?;
+    entry.reads.replay();
+    tracing::debug!(target: "almadar:cli:resolve-cache", path = %path.display(), outcome = "hit", entries = resolved.len(), "resolve cache");
+    Some(entry)
+}
+
+/// `path` read and resolved with the cache unlocked: a build-time describe resolves the program it names through this cache.
+fn resolve_uncached(key: ResolvedKey, options: &orbital_compiler::CompilerOptions, path: &Path) -> anyhow::Result<std::sync::Arc<ResolvedEntry>> {
     orbital_core::read_set::begin();
     let parsed = orbital_core::read_set::read_to_string(path)
         .map_err(|e| anyhow::anyhow!("Failed to read {}: {}", path.display(), e))
@@ -374,7 +483,7 @@ pub(crate) fn resolved_file(path: &Path) -> anyhow::Result<std::sync::Arc<Resolv
             return Err(e);
         }
     };
-    store(key, schema, &options, path)
+    store(key, schema, options, path)
 }
 
 /// [`resolved_file`] once more after a lazy page it named left the lazy cache: the program is resolved again.
@@ -736,6 +845,57 @@ mod tests {
         assert!(entry.lazy_program("lazy/Other.orb").unwrap().is_none(), "control: a file no page has");
     }
 
+    fn site_with_post(dir: &Path) -> PathBuf {
+        std::fs::write(dir.join("post.orb"), POST).unwrap();
+        let path = dir.join("site.orb");
+        std::fs::write(&path, SITE).unwrap();
+        path
+    }
+
+    #[test]
+    fn a_stored_program_reads_back_as_it_was_resolved_with_its_lazy_pages_and_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = site_with_post(dir.path());
+        let resolved = resolve_file(&path);
+        let root = tempfile::tempdir().unwrap();
+        let cache = std::sync::Arc::new(DerivedLazyCache::in_dir(root.path(), "tool-a"));
+        cache.put("slot-1", "key-1", cached("Late"));
+        let entry = ResolvedEntry { schema: resolved.schema.clone(), lazy: vec![LazyPage::of(page("Late", Some("key-1")), true)], cache: None, reads: resolved.reads.clone() };
+        let key = (path.clone(), "settings-a".to_string());
+        cache.put_program(&key, &entry);
+        let back = stored_program(&cache, &key).expect("stored, and every file it read is unchanged");
+        assert_eq!(serde_json::to_value(back.schema()).unwrap(), serde_json::to_value(entry.schema()).unwrap());
+        assert!(back.reads.paths().any(|f| f.ends_with("post.orb")), "its reads come back with it");
+        assert_eq!(back.lazy_program("lazy/Late.orb").unwrap().map(|p| p.name), Some("Late".to_string()), "its lazy pages read from the same cache");
+        assert!(stored_program(&cache, &(path, "settings-b".to_string())).is_none(), "control: other compiler settings are another program");
+    }
+
+    #[test]
+    fn a_stored_program_is_not_read_back_once_a_file_it_read_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = site_with_post(dir.path());
+        let resolved = resolve_file(&path);
+        let root = tempfile::tempdir().unwrap();
+        let cache = std::sync::Arc::new(DerivedLazyCache::in_dir(root.path(), "tool-a"));
+        let key = (path.clone(), "settings-a".to_string());
+        cache.put_program(&key, &resolved);
+        std::fs::write(dir.path().join("post.orb"), POST.replace("PostState", "PostStateRenamed")).unwrap();
+        assert!(stored_program(&cache, &key).is_none(), "an import changed, so the program resolves again");
+    }
+
+    #[test]
+    fn edge_an_unreadable_stored_program_is_a_miss() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = site_with_post(dir.path());
+        let root = tempfile::tempdir().unwrap();
+        let cache = std::sync::Arc::new(DerivedLazyCache::in_dir(root.path(), "tool-a"));
+        let key = (path, "settings-a".to_string());
+        cache.put_program(&key, &resolve_file(&key.0));
+        let file = std::fs::read_dir(root.path().join("tool-a")).unwrap().flatten().find(|e| e.file_name().to_string_lossy().starts_with("program-")).unwrap().path();
+        std::fs::write(&file, "not json").unwrap();
+        assert!(stored_program(&cache, &key).is_none(), "a corrupt program is resolved again, never trusted");
+    }
+
     #[test]
     fn control_with_no_lazy_cache_a_page_keeps_its_program() {
         let entry = entry_over(None, vec![page("Late", Some("key-1"))]);
@@ -1052,6 +1212,47 @@ mod tests {
         assert!(serde_json::to_string(edited.schema()).unwrap().contains("HomeStateRenamed"));
         std::fs::write(dir.path().join("post.orb"), POST.replace("PostState", "PostStateRenamed")).unwrap();
         assert!(!std::sync::Arc::ptr_eq(&edited, &resolved_file(&path).unwrap()), "an edit to an import resolves again");
+    }
+
+    fn wide_program(name: &str, orbitals: usize) -> String {
+        let orbital = |i: usize| format!(r#"{{"name":"O{i}","entity":{{"name":"S{i}","persistence":"runtime","fields":[{{"name":"id","type":"string","required":true}}]}},"traits":[{{"name":"T{i}","linkedEntity":"S{i}","stateMachine":{{"states":[{{"name":"a","isInitial":true}},{{"name":"b"}}],"events":[{{"key":"GO","name":"Go"}}],"transitions":[{{"from":"a","to":"b","event":"GO","effects":[["set","@entity.id","x"]]}}]}}}}],"pages":[]}}"#);
+        format!(r#"{{"name":"{name}","version":"1.0.0","orbitals":[{}]}}"#, (0..orbitals).map(orbital).collect::<Vec<_>>().join(","))
+    }
+
+    fn resolved_together(paths: &[PathBuf]) -> Vec<std::sync::Arc<ResolvedEntry>> {
+        let start = std::sync::Arc::new(std::sync::Barrier::new(paths.len()));
+        let workers: Vec<_> = paths
+            .iter()
+            .cloned()
+            .map(|path| {
+                let start = std::sync::Arc::clone(&start);
+                std::thread::spawn(move || {
+                    start.wait();
+                    resolved_file(&path).expect("resolves")
+                })
+            })
+            .collect();
+        workers.into_iter().map(|w| w.join().expect("worker")).collect()
+    }
+
+    #[test]
+    fn requests_for_one_program_arriving_together_share_one_resolution() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wide.orb");
+        std::fs::write(&path, wide_program("wide", 300)).unwrap();
+        let entries = resolved_together(&[path.clone(), path.clone(), path.clone(), path]);
+        assert!(entries.iter().all(|e| std::sync::Arc::ptr_eq(e, &entries[0])), "every request got the one resolved entry");
+    }
+
+    #[test]
+    fn control_different_programs_arriving_together_resolve_on_their_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let (one, two) = (dir.path().join("one.orb"), dir.path().join("two.orb"));
+        std::fs::write(&one, wide_program("one", 50)).unwrap();
+        std::fs::write(&two, wide_program("two", 50)).unwrap();
+        let entries = resolved_together(&[one, two]);
+        assert!(!std::sync::Arc::ptr_eq(&entries[0], &entries[1]));
+        assert_eq!((entries[0].schema().name.as_str(), entries[1].schema().name.as_str()), ("one", "two"));
     }
 
     #[test]

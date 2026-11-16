@@ -23,9 +23,8 @@ dhat-heap = ["dep:dhat"]
 [dependencies]
 dhat = { version = "0.3", optional = true }
 # Core crates
-orbital-core = { git = "https://github.com/almadar-io/orbital-core", branch = "main", features = ["client-http"] }
-# The native orb answers `ffi/call`; feature unification turns it (and the static WGSL check) on in the runtime orbital-core embeds.
-orbital-core-runtime = { git = "https://github.com/almadar-io/orbital-core", branch = "main", default-features = false, features = ["ffi", "wgsl"] }
+orbital-core = { git = "https://github.com/almadar-io/orbital-core", branch = "main", features = ["native"] }
+orbital-core-runtime = { git = "https://github.com/almadar-io/orbital-core", branch = "main", default-features = false }
 orbital-compiler = { git = "https://github.com/almadar-io/orbital-compiler", branch = "main" }
 orbital-lolo = { git = "https://github.com/almadar-io/orbital-lolo", branch = "main" }
 # The native orb answers `gpu/*` through orbital-canvas.
