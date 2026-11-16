@@ -308,7 +308,7 @@ impl DerivedLazyCache {
 impl orbital_compiler::phases::lazy::LazyResolveCache for DerivedLazyCache {
     fn get(&self, key: &str) -> Option<orbital_compiler::phases::lazy::CachedLazy> {
         let raw = std::fs::read(self.dir.join(format!("{key}.json"))).ok()?;
-        orbital_core::intern::scope(|| serde_json::from_slice(&raw)).ok()
+        orbital_core::intern::scope(|| orbital_core::json_value::from_json_slice(&raw)).ok()
     }
 
     fn put(&self, slot: &str, key: &str, entry: orbital_compiler::phases::lazy::CachedLazy) {
@@ -365,7 +365,7 @@ impl DerivedLazyCache {
 
     fn get_program(&self, key: &ResolvedKey) -> Option<StoredProgram> {
         let raw = std::fs::read(self.dir.join(Self::program_file(key))).ok()?;
-        orbital_core::intern::scope(|| serde_json::from_slice(&raw)).ok()
+        orbital_core::intern::scope(|| orbital_core::json_value::from_json_slice(&raw)).ok()
     }
 }
 
@@ -699,7 +699,7 @@ fn cached_entry(entry: &Path, parent: &Path, stem: &str) -> anyhow::Result<Optio
         Err(e) if vanished(&e) => return Ok(None),
         Err(e) => return Err(e.into()),
     };
-    let reads: orbital_core::read_set::ReadSet = serde_json::from_slice(&raw)?;
+    let reads: orbital_core::read_set::ReadSet = orbital_core::json_value::from_json_slice(&raw)?;
     if !reads.is_current() {
         tracing::debug!(target: "almadar:cli:resolve-cache", stem, outcome = "disk-stale", "command cache");
         return Ok(None);
@@ -759,7 +759,7 @@ mod tests {
             resolved: ResolvedLazy {
                 orbital: orbital.to_string(),
                 orb_ref: format!("lazy/{orbital}.orb"),
-                schema: serde_json::from_value(serde_json::json!({ "name": orbital, "orbitals": [] })).unwrap(),
+                schema: orbital_core::json_value::from_json_value(&serde_json::json!({ "name": orbital, "orbitals": [] })).unwrap(),
                 lazy: Vec::new(),
                 cache_key: None,
             },
@@ -833,7 +833,7 @@ mod tests {
     }
 
     fn entry_over(cache: Option<std::sync::Arc<DerivedLazyCache>>, pages: Vec<ResolvedLazy>) -> ResolvedEntry {
-        let schema = serde_json::from_value(serde_json::json!({ "name": "root", "orbitals": [] })).unwrap();
+        let schema = orbital_core::json_value::from_json_value(&serde_json::json!({ "name": "root", "orbitals": [] })).unwrap();
         ResolvedEntry::new(schema, pages, cache.map(|c| c as std::sync::Arc<dyn LazyResolveCache>), orbital_core::read_set::ReadSet::default())
     }
 
@@ -921,7 +921,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let cache = DerivedLazyCache::in_dir(root.path(), "tool-a");
         let mut entry = cached("Late");
-        entry.resolved.schema = serde_json::from_value(serde_json::json!({ "name": "Late", "orbitals": [{ "name": "A", "entity": { "name": "E", "persistence": "runtime", "fields": [{ "name": "id", "type": "string" }] }, "traits": [{ "name": "T", "linkedEntity": "E", "stateMachine": { "states": [{ "name": "idle", "isInitial": true }], "transitions": [
+        entry.resolved.schema = orbital_core::json_value::from_json_value(&serde_json::json!({ "name": "Late", "orbitals": [{ "name": "A", "entity": { "name": "E", "persistence": "runtime", "fields": [{ "name": "id", "type": "string" }] }, "traits": [{ "name": "T", "linkedEntity": "E", "stateMachine": { "states": [{ "name": "idle", "isInitial": true }], "transitions": [
             { "from": "idle", "to": "idle", "event": "X", "effects": [["set", "@entity.v", { "presets": ["naqsh", "glass", "sand"] }]] },
             { "from": "idle", "to": "idle", "event": "Y", "effects": [["set", "@entity.v", { "presets": ["naqsh", "glass", "sand"] }]] }
         ] } }] }] }))
