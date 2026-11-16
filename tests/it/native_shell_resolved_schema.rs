@@ -8,7 +8,7 @@
 //! both tests are `#[ignore]`d for a standalone orbital-rust checkout and
 //! run explicitly here.
 
-mod common;
+use crate::common;
 
 use orbital_core::schema::TraitReference;
 use std::path::PathBuf;

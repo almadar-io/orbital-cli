@@ -6,7 +6,7 @@
 //! `SEXPR_ARITY_MISMATCH`: `not` takes at most 1 argument (see
 //! orbital-compiler's `sexpr::validate::test_arity_mismatch`).
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 use std::process::Command;

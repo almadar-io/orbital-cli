@@ -3,7 +3,7 @@
 //! kernel has nothing to mount. Uses `01-basic-entity.orb`, which has no
 //! `uses` peers, so it runs in a standalone checkout.
 
-mod common;
+use crate::common;
 
 use orbital_core::schema::TraitReference;
 use std::path::PathBuf;

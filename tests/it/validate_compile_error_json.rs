@@ -5,7 +5,7 @@
 //! The `--json` path used to drop that `Err` (`if let Ok`) and report
 //! `valid:true`, disagreeing with plain `orb validate`.
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 use std::process::Command;

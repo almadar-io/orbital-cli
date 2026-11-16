@@ -1,0 +1,17 @@
+mod common;
+mod behaviors_catalog;
+mod compat_differential;
+mod emit_integration;
+mod emit_map_integration;
+mod i18n_orb;
+mod live_registry;
+mod lolo_parse_error_hints;
+mod native_shell_mixed_resolved_schema;
+mod native_shell_resolved_schema;
+mod relative_lolo_imports;
+mod resolve_catalogs;
+mod rust_codegen_smoke;
+mod validate_compile_error_json;
+mod validate_diagnostic_spans;
+mod validate_emit_missing_event_name;
+mod validate_source_map_line_col;

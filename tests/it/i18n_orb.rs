@@ -7,7 +7,7 @@
 //! It also proves `orb emit orb` translates the same document (the emit path
 //! has its own parse dispatch for prior-ledger anchoring).
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

@@ -1,7 +1,7 @@
 //! `orb resolve` of a program with `locales` writes each locale's merged
 //! catalog beside the resolved `.orb`; stdout has nowhere to put them.
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 use std::process::Command;

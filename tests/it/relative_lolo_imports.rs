@@ -3,7 +3,7 @@
 //! `.lolo` (G-ORB-056). `validate --json` used to re-inline the inlined schema
 //! without its source path, resolving `./x` against the cwd instead.
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

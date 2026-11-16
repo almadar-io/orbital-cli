@@ -3,7 +3,7 @@
 //! See `docs/Almadar_Compiler_Emit_Code.md` §17. These cover file-level
 //! granularity only — per-expression spans land with Phase 5.
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 use std::process::Command;
