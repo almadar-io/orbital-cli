@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 
 const TRAITS_SEGMENT: &str = ".traits.";
 
+#[derive(Clone)]
 pub(crate) struct Resolved {
     pub(crate) path: PathBuf,
     pub(crate) package: Option<BehaviorPackage>,
@@ -46,19 +47,57 @@ fn owner_of(packages: &[BehaviorPackage], path: &Path) -> Option<BehaviorPackage
     packages.iter().find(|p| path.starts_with(p.registry.root())).cloned()
 }
 
+/// How many loaded programs `resolve_from` keeps, each with the files its load read (G-ORBITAL-CLI-005).
+const KEPT_PROGRAMS: usize = 8;
+
+type LoadKey = (PathBuf, Vec<BehaviorPackage>, String, Option<PathBuf>);
+
+struct KeptLoad {
+    key: LoadKey,
+    resolved: Resolved,
+    reads: orbital_core::read_set::ReadSet,
+}
+
+/// The most recent loads, oldest first: one answers again while every file it read is unchanged.
+static KEPT_LOADS: std::sync::Mutex<Vec<KeptLoad>> = std::sync::Mutex::new(Vec::new());
+
 /// `spec` through the loader, a relative specifier resolving from the program file `from`.
 pub(crate) fn resolve_from(spec: &str, from: Option<&Path>) -> anyhow::Result<Resolved> {
     let cwd = std::env::current_dir()?;
     let from = from.map(|f| cwd.join(f));
-    let (mut loader, packages) = loader_for(cwd)?;
-    let loaded = loader
-        .load(spec, from.as_deref(), &mut ImportChain::new())
-        .map_err(|e| anyhow::anyhow!("cannot resolve `{spec}`: {e}"))?;
-    Ok(Resolved {
-        package: owner_of(&packages, &loaded.source_path),
+    let packages = crate::commands::program_host::discover_packages(&cwd)?;
+    resolve_kept(&KEPT_LOADS, (cwd, packages, spec.to_string(), from))
+}
+
+fn resolve_kept(kept: &std::sync::Mutex<Vec<KeptLoad>>, key: LoadKey) -> anyhow::Result<Resolved> {
+    {
+        let mut loads = kept.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(at) = loads.iter().position(|load| load.key == key && load.reads.is_current()) {
+            let load = loads.remove(at);
+            load.reads.replay();
+            let resolved = load.resolved.clone();
+            loads.push(load);
+            return Ok(resolved);
+        }
+    }
+    let (cwd, packages, spec, from) = &key;
+    let mut loader = ExternalOrbitalLoader::new(LoaderConfig { base_path: cwd.clone(), packages: packages.clone(), ..Default::default() });
+    orbital_core::read_set::begin();
+    let loaded = loader.load(spec, from.as_deref(), &mut ImportChain::new()).map(|loaded| Resolved {
+        package: owner_of(packages, &loaded.source_path),
         path: loaded.source_path.clone(),
         schema: loaded.schema.clone(),
-    })
+    });
+    let reads = orbital_core::read_set::end();
+    let resolved = loaded.map_err(|e| anyhow::anyhow!("cannot resolve `{spec}`: {e}"))?;
+    reads.replay();
+    let mut loads = kept.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    loads.retain(|load| load.key != key);
+    loads.push(KeptLoad { key, resolved: resolved.clone(), reads });
+    if loads.len() > KEPT_PROGRAMS {
+        loads.remove(0);
+    }
+    Ok(resolved)
 }
 
 /// The source file a behavior specifier resolves to.
@@ -256,4 +295,57 @@ pub(crate) fn catalog_rows(
         }
     }
     Ok(out.into_values().collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn programs(count: usize) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..count {
+            std::fs::write(dir.path().join(format!("p{i}.orb")), format!(r#"{{ "name": "P{i}", "orbitals": [] }}"#)).unwrap();
+        }
+        dir
+    }
+
+    fn key(dir: &tempfile::TempDir, i: usize) -> LoadKey {
+        (dir.path().to_path_buf(), Vec::new(), format!("./p{i}.orb"), None)
+    }
+
+    #[test]
+    fn only_the_most_recent_loads_are_kept() {
+        let dir = programs(KEPT_PROGRAMS + 1);
+        let kept = std::sync::Mutex::new(Vec::new());
+        for i in 0..=KEPT_PROGRAMS {
+            assert_eq!(resolve_kept(&kept, key(&dir, i)).unwrap().schema.name, format!("P{i}"));
+        }
+        assert_eq!(kept.lock().unwrap().len(), KEPT_PROGRAMS);
+        assert!(kept.lock().unwrap().iter().all(|load| load.key != key(&dir, 0)), "the oldest went");
+        assert_eq!(resolve_kept(&kept, key(&dir, 0)).unwrap().schema.name, "P0", "a dropped load loads again");
+    }
+
+    #[test]
+    fn a_kept_load_whose_file_changed_is_loaded_again() {
+        let dir = programs(1);
+        let kept = std::sync::Mutex::new(Vec::new());
+        assert_eq!(resolve_kept(&kept, key(&dir, 0)).unwrap().schema.name, "P0");
+        std::fs::write(dir.path().join("p0.orb"), r#"{ "name": "Changed", "orbitals": [] }"#).unwrap();
+        assert_eq!(resolve_kept(&kept, key(&dir, 0)).unwrap().schema.name, "Changed");
+        assert_eq!(kept.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn control_an_unchanged_load_answers_from_what_was_kept() {
+        let dir = programs(1);
+        let kept = std::sync::Mutex::new(Vec::new());
+        resolve_kept(&kept, key(&dir, 0)).unwrap();
+        std::fs::remove_file(dir.path().join("p0.orb")).unwrap();
+        assert!(resolve_kept(&kept, key(&dir, 0)).is_err(), "control: a removed file is a changed read");
+        std::fs::write(dir.path().join("p0.orb"), r#"{ "name": "P0", "orbitals": [] }"#).unwrap();
+        let first = resolve_kept(&kept, key(&dir, 0)).unwrap();
+        let again = resolve_kept(&kept, key(&dir, 0)).unwrap();
+        assert_eq!((first.schema.name, again.schema.name), ("P0".to_string(), "P0".to_string()));
+        assert_eq!(kept.lock().unwrap().len(), 1);
+    }
 }
