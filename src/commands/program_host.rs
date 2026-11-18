@@ -3340,7 +3340,7 @@ orbital O {
     fn write_core(node_modules: &Path) {
         let dir = node_modules.join("@almadar/core");
         std::fs::create_dir_all(&dir).unwrap();
-        let manifest = serde_json::json!({ "name": "@almadar/core", "version": "10.1.0", "orbLanguage": { "version": "1.0.0" } });
+        let manifest = serde_json::json!({ "name": "@almadar/core", "version": "10.1.0", "orbLanguage": { "version": "1.7.0" } });
         std::fs::write(dir.join("package.json"), manifest.to_string()).unwrap();
     }
 

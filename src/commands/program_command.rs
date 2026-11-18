@@ -532,7 +532,7 @@ orbital EchoOrbital {
         std::fs::create_dir_all(&core).unwrap();
         std::fs::write(
             core.join("package.json"),
-            r#"{ "name": "@almadar/core", "version": "10.1.0", "orbLanguage": { "version": "1.0.0" } }"#,
+            r#"{ "name": "@almadar/core", "version": "10.1.0", "orbLanguage": { "version": "1.7.0" } }"#,
         )
         .unwrap();
         std::fs::create_dir_all(root.join("store")).unwrap();

@@ -440,23 +440,23 @@ mod tests {
     fn std_is_the_newest_stable_undeprecated_version_whose_language_range_admits_the_installed_core() {
         let packument = r#"{ "versions": {
             "16.0.0": { "version": "16.0.0", "orb": { "language": "^1" }, "dist": { "tarball": "https://r/std-16.tgz", "integrity": "sha512-a" } },
-            "17.0.0": { "version": "17.0.0", "orb": { "language": "^1.3" }, "dist": { "tarball": "https://r/std-17.tgz", "integrity": "sha512-b" } },
-            "17.1.0": { "version": "17.1.0", "orb": { "language": "^1.3" }, "deprecated": "broken", "dist": { "tarball": "https://r/std-171.tgz", "integrity": "sha512-c" } },
-            "18.0.0-rc.1": { "version": "18.0.0-rc.1", "orb": { "language": "^1.3" }, "dist": { "tarball": "https://r/std-rc.tgz", "integrity": "sha512-d" } },
+            "17.0.0": { "version": "17.0.0", "orb": { "language": "^1.10" }, "dist": { "tarball": "https://r/std-17.tgz", "integrity": "sha512-b" } },
+            "17.1.0": { "version": "17.1.0", "orb": { "language": "^1.10" }, "deprecated": "broken", "dist": { "tarball": "https://r/std-171.tgz", "integrity": "sha512-c" } },
+            "18.0.0-rc.1": { "version": "18.0.0-rc.1", "orb": { "language": "^1.10" }, "dist": { "tarball": "https://r/std-rc.tgz", "integrity": "sha512-d" } },
             "18.0.0": { "version": "18.0.0", "orb": { "language": "^2" }, "dist": { "tarball": "https://r/std-18.tgz", "integrity": "sha512-e" } },
             "18.1.0": { "version": "18.1.0", "orb": { "compiler": ">=19.0.0" }, "dist": { "tarball": "https://r/std-181.tgz", "integrity": "sha512-f" } }
         } }"#;
-        let pin = pick(STD_PACKAGE, packument, &Need::Language("1.4.0")).unwrap();
+        let pin = pick(STD_PACKAGE, packument, &Need::Language("1.11.0")).unwrap();
         assert_eq!((pin.version.as_str(), pin.url.as_str(), pin.integrity.as_str()), ("17.0.0", "https://r/std-17.tgz", "sha512-b"));
-        assert_eq!(pick(STD_PACKAGE, packument, &Need::Language("1.2.0")).unwrap().version, "16.0.0", "control: an older language gets the version its range admits");
+        assert_eq!(pick(STD_PACKAGE, packument, &Need::Language("1.9.0")).unwrap().version, "16.0.0", "control: an older language gets the version its range admits");
         assert!(pick(STD_PACKAGE, packument, &Need::Language("3.0.0")).unwrap_err().to_string().starts_with("ORB_BOOTSTRAP_NO_COMPATIBLE"));
     }
 
     #[test]
     fn core_is_the_newest_version_providing_a_language_this_orb_reads_whatever_its_release() {
         let core = r#"{ "versions": {
-            "11.0.0": { "version": "11.0.0", "orbLanguage": { "version": "1.0.0" }, "dist": { "tarball": "https://r/core-11.tgz", "integrity": "sha512-g" } },
-            "12.0.0": { "version": "12.0.0", "orbLanguage": { "version": "1.4.0" }, "dist": { "tarball": "https://r/core-12.tgz", "integrity": "sha512-h" } },
+            "11.0.0": { "version": "11.0.0", "orbLanguage": { "version": "1.7.0" }, "dist": { "tarball": "https://r/core-11.tgz", "integrity": "sha512-g" } },
+            "12.0.0": { "version": "12.0.0", "orbLanguage": { "version": "1.11.0" }, "dist": { "tarball": "https://r/core-12.tgz", "integrity": "sha512-h" } },
             "13.0.0": { "version": "13.0.0", "orbLanguage": { "version": "2.0.0" }, "dist": { "tarball": "https://r/core-13.tgz", "integrity": "sha512-i" } },
             "14.0.0": { "version": "14.0.0", "orbLanguage": { "compiler": ">=17.0.0" }, "dist": { "tarball": "https://r/core-14.tgz", "integrity": "sha512-j" } }
         } }"#;
@@ -525,7 +525,7 @@ mod tests {
         installed(dir.path(), CORE_PACKAGE, serde_json::json!({ "orbLanguage": { "compiler": ">=17.0.0" } }));
         let old = installed_contract(dir.path(), CORE_PACKAGE).unwrap().unwrap();
         assert!(old.predates(CORE_PACKAGE) && !old.meets(&Need::Reads));
-        installed(dir.path(), CORE_PACKAGE, serde_json::json!({ "orbLanguage": { "version": "1.0.0" } }));
+        installed(dir.path(), CORE_PACKAGE, serde_json::json!({ "orbLanguage": { "version": "1.7.0" } }));
         let new = installed_contract(dir.path(), CORE_PACKAGE).unwrap().unwrap();
         assert!(!new.predates(CORE_PACKAGE) && new.meets(&Need::Reads));
         installed(dir.path(), STD_PACKAGE, serde_json::json!({ "orb": { "prefix": "s", "language": "^1" }, "orbLanguage": { "language": "^1" } }));
