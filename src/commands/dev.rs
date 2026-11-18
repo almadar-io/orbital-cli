@@ -409,10 +409,15 @@ fn store(
     options: &orbital_compiler::CompilerOptions,
     path: &Path,
 ) -> anyhow::Result<std::sync::Arc<ResolvedEntry>> {
+    let read_as_it_is = schema.resolved.is_some();
     let done = orbital_compiler::phases::lazy::resolve_program_with_path(schema, options, Some(path));
     let reads = orbital_core::read_set::end();
     let (schema, lazy) = done.map_err(|e| anyhow::anyhow!("resolve {}: {e}", path.display()))?;
     let entry = std::sync::Arc::new(ResolvedEntry::new(schema, lazy, options.lazy_cache.0.clone(), reads));
+    // A resolved file is its own cache (EXEC-LOAD-1): holding it too would pin every program a host loads and unloads.
+    if read_as_it_is {
+        return Ok(entry);
+    }
     if let Some(cache) = LAZY_CACHE.as_ref() {
         let (cache, stored, key) = (std::sync::Arc::clone(cache), std::sync::Arc::clone(&entry), key.clone());
         std::thread::spawn(move || {
@@ -1364,6 +1369,32 @@ mod tests {
         let init = &resolved["orbitals"][0]["traits"][0]["stateMachine"]["transitions"][0]["effects"][0];
         assert_eq!(init[0], "emit", "the describe was answered at build time: {init}");
         assert_eq!(init[1], "DESCRIBED");
+    }
+
+    #[test]
+    fn a_resolved_source_is_read_as_it_is_and_not_held_in_the_resolve_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("post.orb"), POST).unwrap();
+        let source = dir.path().join("site.orb");
+        std::fs::write(&source, SITE).unwrap();
+        let resolved = dir.path().join("site.resolved.orb");
+        std::fs::write(&resolved, orbital_compiler::phases::lazy::resolved_json(resolve_file(&source).schema()).unwrap()).unwrap();
+        let held = |path: &Path| RESOLVED.lock().unwrap().entries.keys().filter(|(p, _)| p == path).count();
+        let entry = resolve_file(&resolved);
+        assert!(entry.schema().resolved.is_some(), "the resolved source keeps its stamp");
+        assert_eq!(held(&resolved), 0, "a resolved file is its own cache (EXEC-LOAD-1)");
+        assert!(!RESOLVED.lock().unwrap().recent.iter().any(|kept| std::sync::Arc::ptr_eq(kept, &entry)), "nothing else keeps it alive");
+    }
+
+    #[test]
+    fn control_an_unresolved_source_is_held_in_the_resolve_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("post.orb"), POST).unwrap();
+        let source = dir.path().join("site.orb");
+        std::fs::write(&source, SITE).unwrap();
+        let held = |path: &Path| RESOLVED.lock().unwrap().entries.keys().filter(|(p, _)| p == path).count();
+        drop(resolve_file(&source));
+        assert_eq!(held(&source), 1);
     }
 
     #[test]
