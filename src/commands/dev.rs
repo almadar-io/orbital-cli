@@ -110,6 +110,8 @@ pub(crate) struct ResolvedEntry {
     lazy: Vec<LazyPage>,
     cache: Option<std::sync::Arc<dyn LazyResolveCache>>,
     reads: orbital_core::read_set::ReadSet,
+    /// The file was already a resolved program and is held as it was read (EXEC-LOAD-1).
+    read_as_it_is: bool,
 }
 
 impl ResolvedEntry {
@@ -120,11 +122,19 @@ impl ResolvedEntry {
         reads: orbital_core::read_set::ReadSet,
     ) -> Self {
         let stored = cache.is_some();
-        ResolvedEntry { schema, lazy: lazy.into_iter().map(|page| LazyPage::of(page, stored)).collect(), cache, reads }
+        ResolvedEntry { schema, lazy: lazy.into_iter().map(|page| LazyPage::of(page, stored)).collect(), cache, reads, read_as_it_is: false }
     }
 
     pub(crate) fn schema(&self) -> &orbital_core::OrbitalSchema {
         &self.schema
+    }
+
+    pub(crate) fn into_schema(self) -> orbital_core::OrbitalSchema {
+        self.schema
+    }
+
+    pub(crate) fn read_as_it_is(&self) -> bool {
+        self.read_as_it_is
     }
 
     pub(crate) fn has_lazy(&self) -> bool {
@@ -396,6 +406,7 @@ fn stored_program(cache: &std::sync::Arc<DerivedLazyCache>, key: &ResolvedKey) -
         lazy: stored.lazy,
         cache: Some(std::sync::Arc::clone(cache) as std::sync::Arc<dyn LazyResolveCache>),
         reads: stored.reads,
+        read_as_it_is: false,
     })
 }
 
@@ -413,7 +424,9 @@ fn store(
     let done = orbital_compiler::phases::lazy::resolve_program_with_path(schema, options, Some(path));
     let reads = orbital_core::read_set::end();
     let (schema, lazy) = done.map_err(|e| anyhow::anyhow!("resolve {}: {e}", path.display()))?;
-    let entry = std::sync::Arc::new(ResolvedEntry::new(schema, lazy, options.lazy_cache.0.clone(), reads));
+    let mut entry = ResolvedEntry::new(schema, lazy, options.lazy_cache.0.clone(), reads);
+    entry.read_as_it_is = read_as_it_is;
+    let entry = std::sync::Arc::new(entry);
     // A resolved file is its own cache (EXEC-LOAD-1): holding it too would pin every program a host loads and unloads.
     if read_as_it_is {
         return Ok(entry);
@@ -903,7 +916,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let cache = std::sync::Arc::new(DerivedLazyCache::in_dir(root.path(), "tool-a"));
         cache.put("slot-1", "key-1", cached("Late"));
-        let entry = ResolvedEntry { schema: resolved.schema.clone(), lazy: vec![LazyPage::of(page("Late", Some("key-1")), true)], cache: None, reads: resolved.reads.clone() };
+        let entry = ResolvedEntry { schema: resolved.schema.clone(), lazy: vec![LazyPage::of(page("Late", Some("key-1")), true)], cache: None, reads: resolved.reads.clone(), read_as_it_is: false };
         let key = (path.clone(), "settings-a".to_string());
         cache.put_program(&key, &entry);
         let back = stored_program(&cache, &key).expect("stored, and every file it read is unchanged");

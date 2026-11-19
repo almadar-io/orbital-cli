@@ -392,6 +392,33 @@ pub(crate) fn resolved_value(path: &Path) -> anyhow::Result<Value> {
     ])))
 }
 
+/// [`resolved_value`] typed, for a host that opens the program: the resolved program at the absolute `path` and each
+/// lazy program under the file (`orbRef`) its lazy page names. A program read as it is (EXEC-LOAD-1) keeps the await
+/// renders its file carries; one resolved here gains them as the printed resolve output does.
+pub(crate) fn resolved_program(path: &Path) -> anyhow::Result<(orbital_core::OrbitalSchema, std::collections::HashMap<String, orbital_core::OrbitalSchema>)> {
+    use orbital_compiler::phases::await_render::set_await_renders;
+    anyhow::ensure!(path.is_absolute(), "`path` is the program's absolute path, not {}", path.display());
+    let (entry, lazy) = super::dev::resolved_with_lazy(path)?;
+    let as_it_is = entry.read_as_it_is();
+    let mut program = match std::sync::Arc::try_unwrap(entry) {
+        Ok(entry) => entry.into_schema(),
+        Err(held) => held.schema().clone(),
+    };
+    if !as_it_is {
+        set_await_renders(&mut program);
+    }
+    let lazy = lazy
+        .into_iter()
+        .map(|mut child| {
+            if !as_it_is {
+                set_await_renders(&mut child.schema);
+            }
+            (child.orb_ref, child.schema)
+        })
+        .collect();
+    Ok((program, lazy))
+}
+
 /// The program at `path` as it reads before resolution, and every trait and orbital reference its resolution resolves,
 /// each naming the upstream declaration it resolved to inside its imported file's orbitals, held once per file
 /// (`program/read { references: true }`).
@@ -1983,6 +2010,12 @@ impl SubstrateHandler for ProgramHost {
         }
         answer
     }
+
+    fn resolved_program(&self, path: &str) -> Result<(orbital_core::OrbitalSchema, std::collections::HashMap<String, orbital_core::OrbitalSchema>), SubstrateFailure> {
+        let answer = resolved_program(Path::new(path)).map_err(|e| failure(format!("program/open: {e}")));
+        release_transients();
+        answer
+    }
 }
 
 impl ProgramHost {
@@ -2426,6 +2459,62 @@ orbital O {
         let missing = resolved_lazy_program(&file, "lazy/Nowhere.orb").expect_err("an unknown file is refused");
         assert!(missing.to_string().contains("lazy/Nowhere.orb"), "{missing}");
     }
+
+    const AWAITING: &str = r#"{ "name": "awaiting", "version": "1.0.0", "orbitals": [ { "name": "Shelf",
+      "entity": { "name": "Item", "persistence": "persistent", "fields": [ { "name": "id", "type": "string", "required": true } ] },
+      "traits": [ { "name": "Browse", "linkedEntity": "Item",
+        "stateMachine": { "states": [ { "name": "idle", "isInitial": true }, { "name": "loading" }, { "name": "ready" } ], "events": [ { "key": "INIT" }, { "key": "LOADED" } ],
+          "transitions": [ { "from": "idle", "to": "loading", "event": "INIT", "effects": [ ["fetch", "Item", { "emit": { "success": "LOADED" } }] ] },
+            { "from": "loading", "to": "ready", "event": "LOADED", "effects": [ ["render-ui", "main", { "type": "data-grid", "skeleton": "grid" }] ] } ] } } ], "pages": [] } ] }"#;
+
+    #[test]
+    fn the_typed_resolved_program_is_the_resolved_value_read_as_a_schema() {
+        orbital_compiler::loader::register_source_lowerer(|path, _, _| crate::lower_lolo_file(path));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = dir.path().join("awaiting.orb");
+        std::fs::write(&source, AWAITING).unwrap();
+        let (typed, lazy) = ProgramHost.resolved_program(&source.display().to_string()).expect("typed read");
+        let value = resolved_value(&source).expect("resolved value");
+        let through: orbital_core::OrbitalSchema = serde_json::from_value(json(value.get_path("program").expect("program"))).expect("a schema");
+        let typed_json = serde_json::to_value(&typed).unwrap();
+        assert_eq!(typed_json, serde_json::to_value(&through).unwrap());
+        assert!(lazy.is_empty());
+        assert!(typed_json["orbitals"][0]["traits"][0]["stateMachine"]["transitions"][0]["awaitRender"].is_array(), "the await render is carried: {typed_json}");
+        let resolved_file = dir.path().join("awaiting-resolved.orb");
+        std::fs::write(&resolved_file, resolved_read(&source, None).map(|r| r.text).expect("orb resolve")).unwrap();
+        let (as_it_is, _) = ProgramHost.resolved_program(&resolved_file.display().to_string()).expect("typed read of the resolved file");
+        assert!(as_it_is.resolved.is_some());
+        assert_eq!(serde_json::to_value(&as_it_is).unwrap()["orbitals"], typed_json["orbitals"], "a resolved file is opened as it is, await renders included");
+        let old_route = resolved_value(&resolved_file).expect("resolved value of the resolved file");
+        let old_schema: orbital_core::OrbitalSchema = serde_json::from_value(json(old_route.get_path("program").expect("program"))).expect("a schema");
+        assert_eq!(format!("{as_it_is:#?}"), format!("{old_schema:#?}"), "the typed read of a resolved file is the schema the value route built, field for field and in order");
+        let refused = ProgramHost.resolved_program("awaiting.orb").expect_err("control: a relative path is refused");
+        assert!(refused.message.contains("absolute"), "{}", refused.message);
+    }
+
+    #[test]
+    fn the_typed_resolved_program_carries_each_lazy_child_under_the_file_its_lazy_page_names() {
+        orbital_compiler::loader::register_source_lowerer(|path, _, _| crate::lower_lolo_file(path));
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("child.lolo"), "app child [ version: \"1.0.0\" ]\norbital ChildOrbital {\n  entity Note [runtime] {\n    id : string!\n  }\n  trait ChildView -> Note {\n    initial: a\n    state a {\n      INIT -> a\n        (render-ui main { type: \"typography\", content: \"child\" })\n    }\n  }\n  page \"/child\" as ChildPage -> ChildView\n}\n").unwrap();
+        let main = |lazy: bool| {
+            let head = if lazy { "uses lazy Child from \"./child\"\n" } else { "" };
+            let tail = if lazy { "orbital Kid = Child.orbitals.ChildOrbital {\n}\n" } else { "" };
+            format!("app main [ version: \"1.0.0\" ]\n{head}orbital MainOrbital {{\n  entity Item [runtime] {{\n    id : string!\n  }}\n  trait MainView -> Item {{\n    initial: a\n    state a {{\n      INIT -> a\n        (render-ui main {{ type: \"typography\", content: \"main\" }})\n    }}\n  }}\n  page \"/\" as Home -> MainView\n}}\n{tail}")
+        };
+        let read = |text: String| {
+            let file = dir.path().join("main.lolo");
+            std::fs::write(&file, text).unwrap();
+            ProgramHost.resolved_program(&file.display().to_string()).expect("typed read")
+        };
+        let (program, lazy) = read(main(true));
+        let pages = serde_json::to_value(&program).unwrap()["lazyPages"].clone();
+        let file = pages[0]["orbRef"].as_str().expect("the lazy page names its file").to_string();
+        assert_eq!(lazy.keys().collect::<Vec<_>>(), vec![&file], "{pages}");
+        assert!(lazy[&file].orbitals.iter().any(|o| o.name == "Kid"), "the child program is carried");
+        assert!(read(main(false)).1.is_empty(), "control: no lazy import, no children");
+    }
+
 
     #[test]
     fn read_with_resolve_and_no_text_answers_each_lazy_child_by_its_orbital() {
