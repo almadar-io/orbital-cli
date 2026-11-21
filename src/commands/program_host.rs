@@ -847,7 +847,20 @@ fn resolve_with_step_config(path: &Path, steps: &[serde_json::Value]) -> anyhow:
 fn resolve_with_step_config_at(path: &Path, source: &Path, steps: &[serde_json::Value]) -> anyhow::Result<orbital_core::OrbitalSchema> {
     let text = std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("Failed to read {}: {e}", path.display()))?;
     let text = orbital_core::step_replay::with_step_config(&text, steps).map_err(|e| anyhow::anyhow!(e))?.unwrap_or(text);
-    resolve_parsed(parsed_text(&text, path)?, source)
+    resolve_for_replay(parsed_text(&text, path)?, path, source)
+}
+
+/// A program handed as a copy at `path`, resolved for a replay: its imports resolve against the copy (an atom that names
+/// its own behavior must not import itself), and its `locales/` catalogs come from beside `source`, its own file.
+fn resolve_for_replay(program: orbital_core::OrbitalSchema, path: &Path, source: &Path) -> anyhow::Result<orbital_core::OrbitalSchema> {
+    let mut resolved = resolve_parsed(program, path)?;
+    if source != path && resolved.locales.as_ref().is_some_and(|locales| !locales.is_empty()) {
+        let dir = source.parent().unwrap_or(Path::new("."));
+        let catalogs = orbital_compiler::phases::messages::merged_catalogs(&resolved, dir)
+            .map_err(|e| anyhow::anyhow!("the catalogs beside {}: {e}", source.display()))?;
+        resolved.messages = Some(catalogs);
+    }
+    Ok(resolved)
 }
 
 /// A replay asked to keep rows in memory (`program/step` `store: "memory"`): every row ask goes to the replay's own
@@ -874,7 +887,7 @@ fn run_cascade(path: &Path, source: &Path, steps: &serde_json::Value, live: bool
     let text = std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("Failed to read {}: {e}", path.display()))?;
     let text = with_step_config(&text, steps).map_err(|e| anyhow::anyhow!(e))?.unwrap_or(text);
     let program = parsed_text(&text, path)?;
-    let mut resolved = resolve_parsed(program.clone(), source)?;
+    let mut resolved = resolve_for_replay(program.clone(), path, source)?;
     if memory_store {
         without_store_drivers(&mut resolved);
     }
