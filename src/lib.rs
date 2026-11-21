@@ -217,6 +217,10 @@ fn run_command(args: &[String]) -> anyhow::Result<i32> {
         found => found?,
     };
     if let Some(command) = program {
+        // `orb update` repairs an install this orb cannot read, so only it runs before the language preflight.
+        if command.command != "update" {
+            tracing::info_span!(target: ns::CLI, "language data").in_scope(crate::utils::require_language_data)?;
+        }
         let answer = tracing::info_span!(target: ns::CLI, "program", hook = %command.command)
             .in_scope(|| commands::program_command::run_command_program(&command.program, &command.command, &command.argv, &cwd))?;
         let ran = command.command.clone();

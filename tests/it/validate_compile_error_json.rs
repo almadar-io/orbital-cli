@@ -57,6 +57,7 @@ const WELL_FORMED_PERSIST: &str = r#"{
         "name": "Note",
         "collection": "notes",
         "persistence": "persistent",
+        "access_waivers": { "read": "Anyone may read notes in this program.", "create": "Anyone may create notes in this program." },
         "fields": [
           { "name": "id", "required": true, "type": "string" },
           { "name": "body", "type": "string" },
@@ -94,7 +95,7 @@ const WELL_FORMED_PERSIST: &str = r#"{
                 "from": "loading",
                 "to": "loading",
                 "effects": [
-                  ["fetch", "Note", { "emit": { "failure": "LOAD_FAILED", "success": "LOADED" } }],
+                  ["fetch", "Note", { "limit": 50, "emit": { "failure": "LOAD_FAILED", "success": "LOADED" } }],
                   ["render-ui", "main", { "type": "typography", "content": "Loading notes" }]
                 ]
               },
@@ -104,7 +105,7 @@ const WELL_FORMED_PERSIST: &str = r#"{
                 "to": "browsing",
                 "effects": [
                   ["set", "@entity.data", "@payload.data"],
-                  ["render-ui", "main", { "type": "typography", "content": "Notes" }]
+                  ["render-ui", "main", { "type": "button", "label": "Save", "action": "SAVE" }]
                 ]
               },
               { "event": "LOAD_FAILED", "from": "loading", "to": "browsing", "effects": [["render-ui", "main", { "type": "alert", "variant": "error", "message": "@payload.error" }]] },
@@ -118,8 +119,8 @@ const WELL_FORMED_PERSIST: &str = r#"{
               },
               { "event": "SAVED", "from": "saving", "to": "browsing" },
               { "event": "SAVE_FAILED", "from": "saving", "to": "browsing", "effects": [["render-ui", "toast", { "type": "alert", "variant": "error", "message": "@payload.error" }]] },
-              { "event": "INIT", "from": "browsing", "to": "loading", "effects": [["fetch", "Note", { "emit": { "failure": "LOAD_FAILED", "success": "LOADED" } }], ["render-ui", "main", { "type": "typography", "content": "Loading notes" }]] },
-              { "event": "INIT", "from": "saving", "to": "loading", "effects": [["fetch", "Note", { "emit": { "failure": "LOAD_FAILED", "success": "LOADED" } }], ["render-ui", "main", { "type": "typography", "content": "Loading notes" }]] }
+              { "event": "INIT", "from": "browsing", "to": "loading", "effects": [["fetch", "Note", { "limit": 50, "emit": { "failure": "LOAD_FAILED", "success": "LOADED" } }], ["render-ui", "main", { "type": "typography", "content": "Loading notes" }]] },
+              { "event": "INIT", "from": "saving", "to": "loading", "effects": [["fetch", "Note", { "limit": 50, "emit": { "failure": "LOAD_FAILED", "success": "LOADED" } }], ["render-ui", "main", { "type": "typography", "content": "Loading notes" }]] }
             ]
           }
         }

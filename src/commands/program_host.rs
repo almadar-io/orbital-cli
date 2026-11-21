@@ -372,24 +372,47 @@ pub(crate) fn resolve_vectors(
 
 /// The resolved program at `path` and each `uses lazy` behavior split off it, as `{ program, lazy: [{ orbital, program }] }`,
 /// keys in declaration order; nothing is written, so a program with lazy behaviors or locales is not refused.
-pub(crate) fn resolved_value(path: &Path) -> anyhow::Result<Value> {
+pub(crate) fn resolved_value(path: &Path, placements: bool) -> anyhow::Result<Value> {
     use orbital_compiler::phases::lazy::resolved_value as canonical;
     use orbital_core::value_serialize::to_value;
     let (entry, lazy) = super::dev::resolved_with_lazy(path)?;
     let resolved = entry.schema();
-    let lazy = lazy
+    let children = lazy
         .iter()
-        .map(|child| {
-            Ok(Value::object(orbital_core::ValueMap::from_iter([
-                ("orbital".into(), to_value(&child.orbital)?),
-                ("program".into(), canonical(&child.schema).map_err(anyhow::Error::msg)?),
-            ])))
-        })
+        .map(|child| Ok((to_value(&child.orbital)?, canonical(&child.schema).map_err(anyhow::Error::msg)?)))
         .collect::<anyhow::Result<Vec<_>>>()?;
-    Ok(Value::object(orbital_core::ValueMap::from_iter([
-        ("program".into(), canonical(resolved).map_err(anyhow::Error::msg)?),
-        ("lazy".into(), Value::array(lazy)),
-    ])))
+    let program = canonical(resolved).map_err(anyhow::Error::msg)?;
+    let schemas: Vec<&orbital_core::OrbitalSchema> = std::iter::once(resolved).chain(lazy.iter().map(|child| &child.schema)).collect();
+    let programs: Vec<&Value> = std::iter::once(&program).chain(children.iter().map(|(_, child)| child)).collect();
+    let placed = if placements { Some(effect_placements_value(&schemas, &programs)?) } else { None };
+    let lazy = children
+        .into_iter()
+        .map(|(orbital, child)| Value::object(orbital_core::ValueMap::from_iter([("orbital".into(), orbital), ("program".into(), child)])))
+        .collect::<Vec<_>>();
+    let mut answer = orbital_core::ValueMap::from_iter([("program".into(), program), ("lazy".into(), Value::array(lazy))]);
+    if let Some(placed) = placed {
+        answer.insert("placements".into(), placed);
+    }
+    Ok(Value::object(answer))
+}
+
+/// Where the kernel runs each call of `programs` (the root and each lazy child) that its registry site puts on the server
+/// but the kernel places elsewhere, keyed by the call's `value/key` (`runs_on::effect_placements`), with every
+/// program's entities as the residence the runtime kernel reads.
+fn effect_placements_value(schemas: &[&orbital_core::OrbitalSchema], programs: &[&Value]) -> anyhow::Result<Value> {
+    use orbital_core::effects::runs_on::{effect_placements, Residence};
+    use orbital_core::schema::EntityRef;
+    let residence = Residence::of_entities(schemas.iter().flat_map(|schema| schema.orbitals.iter()).flat_map(|o| {
+        std::iter::once(&o.entity).chain(o.auxiliary_entities.iter().flatten()).filter_map(|e| match e {
+            EntityRef::Inline(def) => Some(def),
+            _ => None,
+        })
+    }));
+    let mut placed = std::collections::BTreeMap::new();
+    for program in programs {
+        placed.extend(effect_placements(program, &residence).map_err(anyhow::Error::msg)?);
+    }
+    Ok(Value::object(placed.into_iter().map(|(key, site)| (key.into(), Value::string(site.as_str()))).collect::<orbital_core::ValueMap>()))
 }
 
 /// [`resolved_value`] typed, for a host that opens the program: the resolved program at the absolute `path` and each
@@ -816,22 +839,45 @@ fn resolve_parsed(schema: orbital_core::OrbitalSchema, path: &Path) -> anyhow::R
 /// The program at `path` resolved with each step's `config` knob values written over its trait's defaults, as
 /// [`run_cascade`] runs it.
 fn resolve_with_step_config(path: &Path, steps: &[serde_json::Value]) -> anyhow::Result<orbital_core::OrbitalSchema> {
+    resolve_with_step_config_at(path, path, steps)
+}
+
+/// [`resolve_with_step_config`] for the program text at `path`, resolved as the source at `source` (its imports and
+/// its `locales/` catalogs sit beside the source, not beside a scratch copy).
+fn resolve_with_step_config_at(path: &Path, source: &Path, steps: &[serde_json::Value]) -> anyhow::Result<orbital_core::OrbitalSchema> {
     let text = std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("Failed to read {}: {e}", path.display()))?;
     let text = orbital_core::step_replay::with_step_config(&text, steps).map_err(|e| anyhow::anyhow!(e))?.unwrap_or(text);
-    resolve_parsed(parsed_text(&text, path)?, path)
+    resolve_parsed(parsed_text(&text, path)?, source)
+}
+
+/// A replay asked to keep rows in memory (`program/step` `store: "memory"`): every row ask goes to the replay's own
+/// in-memory store, as for a program that declares no store driver, instead of into the declared `.lolo` driver.
+fn without_store_drivers(schema: &mut orbital_core::OrbitalSchema) {
+    use orbital_core::schema::EntityRef;
+    schema.store = None;
+    for orbital in &mut schema.orbitals {
+        for entity in std::iter::once(&mut orbital.entity).chain(orbital.auxiliary_entities.iter_mut().flatten()) {
+            if let EntityRef::Inline(definition) = entity {
+                definition.store = None;
+            }
+        }
+    }
 }
 
 /// Replays `steps` on the program at `path` (`orb execute --steps`); `live` answers their os/* and http asks on the
 /// native program host instead of leaving keyed ones pending (G-ORB-459).
 /// `keep_states` keeps every trait's state and every executed trait's entity on each step, which only the raw report prints.
-fn run_cascade(path: &Path, steps: &serde_json::Value, live: bool, cost: bool, keep_states: bool) -> anyhow::Result<orbital_core::step_replay::StepReport> {
+fn run_cascade(path: &Path, source: &Path, steps: &serde_json::Value, live: bool, cost: bool, keep_states: bool, memory_store: bool) -> anyhow::Result<orbital_core::step_replay::StepReport> {
     use orbital_core::runtime::{EntitySource, InMemoryEntityCache, RuntimeKernel};
     use orbital_core::step_replay::{play_steps, replay_dispatch, trait_definitions, with_step_config, StepAnswers, StepClock, StepCredentials};
     let steps = steps.as_array().ok_or_else(|| anyhow::anyhow!("--steps must be a JSON array"))?;
     let text = std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("Failed to read {}: {e}", path.display()))?;
     let text = with_step_config(&text, steps).map_err(|e| anyhow::anyhow!(e))?.unwrap_or(text);
     let program = parsed_text(&text, path)?;
-    let resolved = resolve_parsed(program.clone(), path)?;
+    let mut resolved = resolve_parsed(program.clone(), source)?;
+    if memory_store {
+        without_store_drivers(&mut resolved);
+    }
     let defs = trait_definitions(&resolved);
     let clock = StepClock::new();
     let live_host = if live {
@@ -1028,10 +1074,16 @@ impl ProgramHost {
             Some(serde_json::Value::String(out)) => Some(std::path::PathBuf::from(out)),
             Some(_) => return Err(failure("program/read: `output` must be a path")),
         };
+        let placements = match options.get("placements") {
+            None | Some(serde_json::Value::Null) | Some(serde_json::Value::Bool(false)) => false,
+            Some(serde_json::Value::Bool(true)) if output.is_none() && options.get("text") == Some(&serde_json::Value::Bool(false)) => true,
+            Some(serde_json::Value::Bool(true)) => return Err(failure("program/read: `placements` answers with `text: false` and no `output`")),
+            Some(_) => return Err(failure("program/read: `placements` must be a boolean")),
+        };
         let with_text = match options.get("text") {
             None | Some(serde_json::Value::Null) | Some(serde_json::Value::Bool(true)) => true,
             Some(serde_json::Value::Bool(false)) if output.is_none() => {
-                return resolved_value(path)
+                return resolved_value(path, placements)
                     .map_err(|e| failure(format!("program/read: {e}")));
             }
             Some(serde_json::Value::Bool(false)) => false,
@@ -1810,6 +1862,12 @@ impl ProgramHost {
         );
         let scratch = Scratch::new("almadar-step")?;
         let path = scratch.write("program.orb", &program.to_string())?;
+        // The program's own source file, when the asker names it: its imports and `locales/` catalogs sit beside it.
+        let source = match options.map(to_json).as_ref().and_then(|o| o.get("source")) {
+            None | Some(serde_json::Value::Null) => path.clone(),
+            Some(serde_json::Value::String(source)) => std::path::PathBuf::from(source),
+            Some(other) => return Err(failure(format!("{op}: options.source must be the program's source path, not {other}"))),
+        };
         let live = match options.map(to_json).as_ref().and_then(|o| o.get("live")) {
             None | Some(serde_json::Value::Null) => false,
             Some(serde_json::Value::Bool(b)) => *b,
@@ -1818,6 +1876,11 @@ impl ProgramHost {
                     "{op}: options.live must be a boolean, not {other}"
                 )))
             }
+        };
+        let memory_store = match options.map(to_json).as_ref().and_then(|o| o.get("store")) {
+            None | Some(serde_json::Value::Null) => false,
+            Some(serde_json::Value::String(store)) if store == "memory" => true,
+            Some(other) => return Err(failure(format!("{op}: options.store must be \"memory\", not {other}"))),
         };
         let cost = match options.map(to_json).as_ref().and_then(|o| o.get("cost")) {
             None | Some(serde_json::Value::Null) => false,
@@ -1828,7 +1891,10 @@ impl ProgramHost {
                 )))
             }
         };
-        let report = run_cascade(&path, &steps, live, cost, raw)
+        if memory_store && live {
+            return Err(failure(format!("{op}: options.store \"memory\" keeps a replay's rows in memory; a live run uses the program's own store")));
+        }
+        let report = run_cascade(&path, &source, &steps, live, cost, raw, memory_store)
         .map_err(|e| failure(format!("{op}: {e}")))?;
         if raw {
             return from_json(serde_json::to_value(report).map_err(|e| failure(format!("{op}: {e}")))?);
@@ -1857,8 +1923,11 @@ impl ProgramHost {
             )));
         }
         let renderer = if render {
-            let schema = resolve_with_step_config(&path, steps.as_array().map(Vec::as_slice).unwrap_or_default())
+            let mut schema = resolve_with_step_config_at(&path, &source, steps.as_array().map(Vec::as_slice).unwrap_or_default())
                 .map_err(|e| failure(format!("{op}: {e}")))?;
+            if memory_store {
+                without_store_drivers(&mut schema);
+            }
             let target = crate::utils::desktop::target()
                 .map_err(|e| failure(format!("{op}: options.render: {e}")))?;
             Some((schema, target))
@@ -2343,6 +2412,45 @@ orbital O {
         let answer = json(&ProgramHost.run("program/read", &[Value::String(String::new().into()), options]).expect("resolves"));
         assert_eq!(answer["lazy"], serde_json::json!([]), "{answer}");
         assert!(answer.get("text").is_none() && answer.get("loadedResolved").is_none() && answer.get("programPath").is_none(), "{answer}");
+        assert!(answer.get("placements").is_none(), "placements are answered only when asked: {answer}");
+    }
+
+    #[test]
+    fn read_with_resolve_answers_where_the_kernel_places_a_server_call_elsewhere() {
+        orbital_compiler::loader::register_source_lowerer(|path, _, _| crate::lower_lolo_file(path));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = dir.path().join("note.lolo");
+        std::fs::write(&source, NOTE.replace(r#"(set @entity.text "hello")"#, "(set @entity.text \"hello\")\n        (program/self { mounted: true } { emit: { success: INIT } })")).unwrap();
+        let options = from_json(serde_json::json!({ "resolve": true, "text": false, "placements": true, "path": source.display().to_string() })).unwrap();
+        let answer = json(&ProgramHost.run("program/read", &[Value::String(String::new().into()), options]).expect("resolves"));
+        fn calls_of<'a>(node: &'a serde_json::Value, head: &str, out: &mut Vec<&'a serde_json::Value>) {
+            match node {
+                serde_json::Value::Array(items) => {
+                    if items.first().and_then(serde_json::Value::as_str) == Some(head) {
+                        out.push(node);
+                    }
+                    items.iter().for_each(|item| calls_of(item, head, out));
+                }
+                serde_json::Value::Object(map) => map.values().for_each(|item| calls_of(item, head, out)),
+                _ => {}
+            }
+        }
+        let mut calls = Vec::new();
+        calls_of(&answer["program"], "program/self", &mut calls);
+        assert_eq!(calls.len(), 1, "{answer}");
+        let key = orbital_core::value_key::structural_key(&from_json(calls[0].clone()).unwrap()).unwrap();
+        assert_eq!(answer["placements"], serde_json::json!({ key: "any" }), "a mounted reflection runs where its step runs");
+    }
+
+    #[test]
+    fn control_read_with_resolve_answers_no_placement_for_a_program_with_only_its_registry_sites() {
+        orbital_compiler::loader::register_source_lowerer(|path, _, _| crate::lower_lolo_file(path));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = dir.path().join("note.lolo");
+        std::fs::write(&source, NOTE).unwrap();
+        let options = from_json(serde_json::json!({ "resolve": true, "text": false, "placements": true, "path": source.display().to_string() })).unwrap();
+        let answer = json(&ProgramHost.run("program/read", &[Value::String(String::new().into()), options]).expect("resolves"));
+        assert_eq!(answer["placements"], serde_json::json!({}), "{answer}");
     }
 
     #[test]
@@ -2397,12 +2505,12 @@ orbital O {
         std::fs::write(&source, NOTE).unwrap();
         let printed: Value = orbital_core::json_value::from_json_str::<Value>(&resolved_read(&source, None).map(|r| r.text).expect("orb resolve"))
             .expect("reads back");
-        let direct = resolved_value(&source).expect("resolved value");
+        let direct = resolved_value(&source, false).expect("resolved value");
         assert_eq!(direct.get_path("program"), Some(&printed));
         assert_eq!(direct.get_path("lazy"), Some(&Value::array(Vec::<Value>::new())));
         let other = std::fs::write(&source, NOTE.replacen("note-pad", "note-other", 1));
         other.unwrap();
-        let changed = resolved_value(&source).expect("resolved value");
+        let changed = resolved_value(&source, false).expect("resolved value");
         assert_ne!(changed.get_path("program"), Some(&printed), "control: another program is another value");
     }
 
@@ -2474,7 +2582,7 @@ orbital O {
         let source = dir.path().join("awaiting.orb");
         std::fs::write(&source, AWAITING).unwrap();
         let (typed, lazy) = ProgramHost.resolved_program(&source.display().to_string()).expect("typed read");
-        let value = resolved_value(&source).expect("resolved value");
+        let value = resolved_value(&source, false).expect("resolved value");
         let through: orbital_core::OrbitalSchema = serde_json::from_value(json(value.get_path("program").expect("program"))).expect("a schema");
         let typed_json = serde_json::to_value(&typed).unwrap();
         assert_eq!(typed_json, serde_json::to_value(&through).unwrap());
@@ -2485,7 +2593,7 @@ orbital O {
         let (as_it_is, _) = ProgramHost.resolved_program(&resolved_file.display().to_string()).expect("typed read of the resolved file");
         assert!(as_it_is.resolved.is_some());
         assert_eq!(serde_json::to_value(&as_it_is).unwrap()["orbitals"], typed_json["orbitals"], "a resolved file is opened as it is, await renders included");
-        let old_route = resolved_value(&resolved_file).expect("resolved value of the resolved file");
+        let old_route = resolved_value(&resolved_file, false).expect("resolved value of the resolved file");
         let old_schema: orbital_core::OrbitalSchema = serde_json::from_value(json(old_route.get_path("program").expect("program"))).expect("a schema");
         assert_eq!(format!("{as_it_is:#?}"), format!("{old_schema:#?}"), "the typed read of a resolved file is the schema the value route built, field for field and in order");
         let refused = ProgramHost.resolved_program("awaiting.orb").expect_err("control: a relative path is refused");
@@ -2822,11 +2930,15 @@ orbital O {
         let options = from_json(serde_json::json!({ "findings": true })).unwrap();
         let read = |text: String| json(&ProgramHost.run("program/read", &[Value::string(text), options.clone()]).expect("reads"));
         let legacy = read(format!("app Foo \"1.0.0\"\n{body}"));
-        assert_eq!(legacy.as_array().map(Vec::len), Some(1), "{legacy}");
-        assert_eq!(legacy[0]["code"], "ORB_L_APP_HEADER_LEGACY");
+        let codes: Vec<&str> = legacy.as_array().into_iter().flatten().filter_map(|f| f["code"].as_str()).collect();
+        assert_eq!(codes, ["ORB_L_APP_HEADER_LEGACY", "ORB_L_APP_HEADER_DESCRIPTION_MISSING"], "{legacy}");
         assert_eq!(legacy[0]["severity"], "warning");
         assert_eq!(legacy[0]["path"], "app:1");
-        assert_eq!(read(format!("app Foo [version: \"1.0.0\"]\n{body}")), serde_json::json!([]), "control: the bracket header is clean");
+        assert_eq!(
+            read(format!("app Foo [version: \"1.0.0\", description: \"x\"]\n{body}")),
+            serde_json::json!([]),
+            "control: the bracket header with a description is clean"
+        );
         let report_input = serde_json::json!({ "findings": legacy });
         assert!(orbital_core::json_value::from_json_value::<Vec<orbital_compiler::phases::validation::report::ProgramFinding>>(&report_input["findings"]).is_ok(), "the list feeds program/validate's `findings` as is");
     }
@@ -3005,7 +3117,7 @@ orbital O {
         let dir = tempfile::tempdir().expect("tempdir");
         let orb = dir.path().join("program.orb");
         std::fs::write(&orb, json(&program).to_string()).unwrap();
-        let expected = serde_json::to_value(run_cascade(&orb, &steps, false, false, true).expect("execute --steps")).unwrap();
+        let expected = serde_json::to_value(run_cascade(&orb, &orb, &steps, false, false, true, false).expect("execute --steps")).unwrap();
         assert_eq!(answer, expected);
         assert_eq!(answer["success"], true, "{answer}");
     }
@@ -3772,6 +3884,52 @@ orbital O {
             resolve_with_step_config(&path, &[serde_json::json!({ "trait": "K", "config": { "nope": 1 } })]).is_err(),
             "edge: an undeclared knob is refused"
         );
+    }
+
+    #[test]
+    fn a_memory_store_replay_sends_no_row_ask_to_a_declared_driver_and_refuses_what_it_cannot_honor() {
+        let mut schema: orbital_core::OrbitalSchema = orbital_core::json_value::from_json_value(&serde_json::json!({
+            "name": "shop", "store": "Rows", "orbitals": [{ "name": "Shop",
+                "entity": { "name": "Ticket", "persistence": "persistent", "store": "Rows", "fields": [] },
+                "auxiliaryEntities": [{ "name": "Note", "persistence": "persistent", "store": "Rows", "fields": [] }],
+                "traits": [] }] }))
+        .unwrap();
+        without_store_drivers(&mut schema);
+        let value = serde_json::to_value(&schema).unwrap();
+        assert!(value.get("store").is_none(), "{value}");
+        assert!(value["orbitals"][0]["entity"].get("store").is_none(), "{value}");
+        assert!(value["orbitals"][0]["auxiliaryEntities"][0].get("store").is_none(), "{value}");
+
+        let program = from_json(serde_json::json!({ "name": "CounterApp", "orbitals": [{ "name": "Counting",
+            "entity": { "name": "Counter", "persistence": "runtime", "fields": [{ "name": "id", "type": "string" }] },
+            "pages": [],
+            "traits": [{ "name": "Count", "linkedEntity": "Counter", "stateMachine": {
+                "states": [{ "name": "ready", "isInitial": true }],
+                "transitions": [{ "from": "ready", "to": "ready", "event": "INC", "effects": [] }] } }] }] }))
+        .unwrap();
+        let requests = from_json(serde_json::json!([{ "orbital": "Counting", "trait": "Count", "from": "ready", "event": "INC", "payload": {} }])).unwrap();
+        let run = |options: serde_json::Value| ProgramHost.run("program/step", &[program.clone(), requests.clone(), from_json(options).unwrap()]);
+        assert!(run(serde_json::json!({ "store": "disk" })).unwrap_err().message.contains("options.store must be \"memory\""));
+        assert!(run(serde_json::json!({ "store": "memory", "live": true })).unwrap_err().message.contains("a live run uses the program's own store"));
+        assert!(run(serde_json::json!({ "store": "memory" })).is_ok(), "control: a replay keeps its rows in memory");
+    }
+
+    #[test]
+    fn a_step_named_with_its_source_resolves_with_the_locales_catalog_beside_it() {
+        let scratch = Scratch::new("almadar-step-source").unwrap();
+        let text = "app tiny [\n  version: \"1.0.0\",\n  description: \"x\",\n  locales: [sl, en]\n]\norbital O {\n  entity E [runtime] {\n    id : string!\n  }\n  trait T -> E {\n    initial: idle\n    state idle {\n      INIT -> idle\n        (render-ui main { type: stack, title: (i18n/t \"greeting\") })\n    }\n  }\n  page \"/\" -> T\n}\n";
+        let source = scratch.write("tiny.lolo", text).unwrap();
+        for locale in ["sl", "en"] {
+            std::fs::create_dir_all(source.parent().unwrap().join("locales").join(locale)).unwrap();
+        }
+        scratch.write("locales/sl/tiny.json", r#"{"greeting":"Pozdravljeni"}"#).unwrap();
+        scratch.write("locales/en/tiny.json", r#"{"greeting":"Hello"}"#).unwrap();
+        let program = json(&ProgramHost.run("program/read", &[Value::string(text), from_json(serde_json::json!({})).unwrap()]).expect("reads"));
+        let elsewhere = Scratch::new("almadar-step-copy").unwrap();
+        let copy = elsewhere.write("program.orb", &program.to_string()).unwrap();
+        let messages = |at: &Path| serde_json::to_value(resolve_with_step_config_at(&copy, at, &[]).unwrap()).unwrap()["messages"].clone();
+        assert_eq!(messages(&source)["sl"]["tiny:greeting"], serde_json::json!("Pozdravljeni"));
+        assert_eq!(messages(&copy)["sl"]["tiny:greeting"], serde_json::Value::Null, "control: the copy has no catalog beside it");
     }
 
     #[test]

@@ -9,10 +9,13 @@ use crate::common;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const CART: &str = r#"orbital ShoppingCart {
+const CART: &str = r#"app cart [ version: "1.0.0", description: "A shopping cart." ]
+orbital ShoppingCart {
   entity Cart [persistent: carts] {
     id : string!
     total : number = 0
+    @create none "Anyone may create rows in this program."
+    @read none "Anyone may read rows in this program."
   }
 
   trait CartView -> @rebindable Cart {
@@ -20,8 +23,10 @@ const CART: &str = r#"orbital ShoppingCart {
 
     state idle {
       INIT -> idle
-        (fetch Cart)
+        (fetch Cart { limit: 50, emit: { failure: LOAD_FAILED } })
         (render-ui main { type: typography, content: "Cart" })
+      LOAD_FAILED -> idle
+        (render-ui main { type: alert, variant: error, message: "Could not load" })
     }
   }
 
@@ -29,12 +34,15 @@ const CART: &str = r#"orbital ShoppingCart {
 }
 "#;
 
-const ORDERS: &str = r#"orbital OrderProcessing {
+const ORDERS: &str = r#"app orders [ version: "1.0.0", description: "Order processing." ]
+orbital OrderProcessing {
   uses ShoppingCart from "./Cart"
 
   entity Order [persistent: orders] {
     id : string!
     total : number = 0
+    @create none "Anyone may create rows in this program."
+    @read none "Anyone may read rows in this program."
   }
 
   trait CartView = ShoppingCart.traits.CartView -> Order {

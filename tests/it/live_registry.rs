@@ -7,11 +7,13 @@ use orbital_core::json_value::{from_json_str, from_json_slice};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-const CART: &str = r#"app std-cartx [ version: "1.0.0" ]
+const CART: &str = r#"app std-cartx [ version: "1.0.0", description: "A shopping cart." ]
 orbital ShoppingCart {
   entity Cart [persistent: carts] {
     id : string!
     total : number = 0
+    @create none "Anyone may create rows in this program."
+    @read none "Anyone may read rows in this program."
   }
 
   trait CartView -> @rebindable Cart {
@@ -19,8 +21,10 @@ orbital ShoppingCart {
 
     state idle {
       INIT -> idle
-        (fetch Cart)
+        (fetch Cart { limit: 50, emit: { failure: LOAD_FAILED } })
         (render-ui main { type: typography, content: "Cart" })
+      LOAD_FAILED -> idle
+        (render-ui main { type: alert, variant: error, message: "Could not load" })
     }
   }
 
@@ -28,13 +32,15 @@ orbital ShoppingCart {
 }
 "#;
 
-const ORDERS: &str = r#"app orders-app [ version: "1.0.0" ]
+const ORDERS: &str = r#"app orders-app [ version: "1.0.0", description: "Order processing." ]
 orbital OrderProcessing {
   uses ShoppingCart from "std/behaviors/std-cartx"
 
   entity Order [persistent: orders] {
     id : string!
     total : number = 0
+    @create none "Anyone may create rows in this program."
+    @read none "Anyone may read rows in this program."
   }
 
   trait CartView = ShoppingCart.traits.CartView -> Order {
