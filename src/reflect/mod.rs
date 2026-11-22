@@ -6,7 +6,7 @@
 mod describe;
 mod index;
 
-pub(crate) use describe::{describe, DescribeTarget};
+pub(crate) use describe::{describe, describe_summary, DescribeTarget};
 use index::{package_rows, BehaviorRow};
 pub(crate) use index::RowDepth;
 

@@ -11,6 +11,7 @@ mod native_shell_mixed_resolved_schema;
 mod native_shell_resolved_schema;
 mod relative_lolo_imports;
 mod resolve_catalogs;
+mod resolve_child;
 mod rust_codegen_smoke;
 mod validate_compile_error_json;
 mod validate_diagnostic_spans;

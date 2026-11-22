@@ -813,6 +813,135 @@ fn copy_web_client(built: Option<&Path>, output: &Path) -> Result<PathBuf, Subst
 }
 
 /// `webClient` is the copied prebuilt web client, null when the generate asked for none.
+/// A `program/eval { generate }` request, read and checked.
+struct GenerateArgs {
+    path: PathBuf,
+    output: PathBuf,
+    shell: crate::ShellType,
+    mode: crate::ShellMode,
+    frontend: Option<crate::ShellType>,
+    backend: Option<crate::ShellType>,
+    backend_url: Option<String>,
+    renderer: Option<crate::ShellRenderer>,
+    patterns: Option<PathBuf>,
+    dev_logs: bool,
+    host: crate::HostArg,
+    emit_orb: Option<PathBuf>,
+    source: Option<PathBuf>,
+    web_client: bool,
+}
+
+fn generate_args(options: &serde_json::Value) -> Result<GenerateArgs, SubstrateFailure> {
+    let op = "program/eval";
+    Options::of(op, options)?.only("generate", &["generate"])?;
+    let generate = options.get("generate").unwrap_or(&serde_json::Value::Null);
+    let g = Options::of(op, generate)?;
+    g.only(
+        "generate",
+        &[
+            "path", "output", "shell", "mode", "frontend", "backend", "backendUrl", "renderer", "patterns", "devLogs", "host",
+            "emitOrb", "webClient", "source",
+        ],
+    )?;
+    let web_client = g.flag("webClient")?;
+    let source = match g.path("source")? {
+        Some(source) if !source.is_absolute() => {
+            return Err(failure(format!("{op}: `generate` needs an absolute `source`, not {}", source.display())))
+        }
+        source => source,
+    };
+    Ok(GenerateArgs {
+        path: g.absolute("path", "generate")?,
+        output: g.absolute("output", "generate")?,
+        shell: g.choice("shell")?.ok_or_else(|| failure(format!("{op}: `generate` needs the `shell` to generate for")))?,
+        mode: g.choice("mode")?.unwrap_or_default(),
+        frontend: g.choice("frontend")?,
+        backend: g.choice("backend")?,
+        backend_url: g.text("backendUrl")?,
+        renderer: g.choice("renderer")?,
+        patterns: g.path("patterns")?,
+        dev_logs: g.flag("devLogs")?,
+        host: g.choice("host")?.unwrap_or_default(),
+        emit_orb: g.path("emitOrb")?,
+        source,
+        web_client,
+    })
+}
+
+/// What `orb compile` does and prints for `options`, in this process: `{ lines, files, warnings, nextSteps, webClient }`;
+/// `webClient: true` also copies the shell's prebuilt web client into the output. The program is validated before anything
+/// is generated, as the command does.
+fn generate_in_process(options: &serde_json::Value) -> Result<serde_json::Value, SubstrateFailure> {
+    use crate::commands::program_compile::{compile_run, CompileRequest};
+    let op = "program/eval";
+    let a = generate_args(options)?;
+    let report = compile_run(CompileRequest {
+        path: &a.path,
+        output: &a.output,
+        shell: a.shell,
+        mode: a.mode,
+        frontend: a.frontend,
+        backend: a.backend,
+        backend_url: a.backend_url.clone(),
+        renderer: a.renderer,
+        patterns_path: a.patterns.as_deref(),
+        dev_logs: a.dev_logs,
+        host: a.host,
+        emit_orb: a.emit_orb.as_deref(),
+        source: a.source.as_deref(),
+    })
+    .map_err(|e| failure(format!("{op}: {e}")))?;
+    let web_client = if a.web_client {
+        let shell_program = crate::utils::shell_programs::locate(a.shell.program()).map_err(|e| failure(format!("{op}: {e}")))?;
+        Some(copy_web_client(shell_program.description.web_client.as_deref(), &a.output)?)
+    } else {
+        None
+    };
+    Ok(generate_answer(&report, web_client.as_deref()))
+}
+
+/// The bootloader's internal `__generate` entry: the `program/eval { generate }` options on stdin, `{ answer }` or `{ error }`
+/// on stdout.
+pub(crate) fn generate_child(options_text: &str) -> serde_json::Value {
+    let answer = serde_json::from_str::<serde_json::Value>(options_text)
+        .map_err(|e| failure(format!("program/eval: the generate options are not JSON: {e}")))
+        .and_then(|options| generate_in_process(&options));
+    match answer {
+        Ok(answer) => serde_json::json!({ "answer": answer }),
+        Err(e) => serde_json::json!({ "error": e.message }),
+    }
+}
+
+/// `program/eval { generate }` run by a child copy of this orb: a whole program is resolved more than once and compiled,
+/// and the heap that leaves behind (fragmented between the long-lived pages) ends with the child instead of staying in a
+/// server for its whole life (P-049).
+fn generate_in_child(options: &serde_json::Value) -> Result<serde_json::Value, String> {
+    use std::io::Write;
+    let exe = std::env::current_exe().map_err(|e| format!("this orb's own path: {e}"))?;
+    let mut child = std::process::Command::new(exe)
+        .arg("__generate")
+        .env(crate::utils::bootstrap::HANDED_OFF_ENV, "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit())
+        .spawn()
+        .map_err(|e| format!("could not start the compile: {e}"))?;
+    child
+        .stdin
+        .take()
+        .ok_or("the compile has no input")?
+        .write_all(options.to_string().as_bytes())
+        .map_err(|e| format!("could not hand the compile its request: {e}"))?;
+    let out = child.wait_with_output().map_err(|e| format!("the compile did not finish: {e}"))?;
+    let reply: serde_json::Value = serde_json::from_slice(&out.stdout)
+        .map_err(|e| format!("the compile answered something that is not its report ({e}), exit {}", out.status))?;
+    match (reply.get("answer"), reply.get("error").and_then(serde_json::Value::as_str)) {
+        (Some(answer), _) => Ok(answer.clone()),
+        (None, Some(error)) => Err(error.strip_prefix("program/eval: ").unwrap_or(error).to_string()),
+        (None, None) => Err(format!("the compile answered neither a report nor an error, exit {}", out.status)),
+    }
+}
+
 fn generate_answer(report: &orbital_compiler::mixed::CompileReport, web_client: Option<&Path>) -> serde_json::Value {
     serde_json::json!({
         "lines": report.lines,
@@ -1215,54 +1344,8 @@ impl ProgramHost {
     /// host?, listenHost?, port?, emitOrb?, webClient?, source? } }`: what `orb compile` does and prints, as `{ lines, files,
     /// warnings, nextSteps, webClient }`; `webClient: true` also copies the shell's prebuilt web client into the output. The program is validated before anything is generated, as the command does.
     fn eval_generate(options: &serde_json::Value) -> Result<Value, SubstrateFailure> {
-        use crate::commands::program_compile::{compile_run, CompileRequest};
-        let op = "program/eval";
-        Options::of(op, options)?.only("generate", &["generate"])?;
-        let generate = options.get("generate").unwrap_or(&serde_json::Value::Null);
-        let g = Options::of(op, generate)?;
-        g.only(
-            "generate",
-            &[
-                "path", "output", "shell", "mode", "frontend", "backend", "backendUrl", "renderer", "patterns", "devLogs", "host",
-                "emitOrb", "webClient", "source",
-            ],
-        )?;
-        let web_client = g.flag("webClient")?;
-        let source = match g.path("source")? {
-            Some(source) if !source.is_absolute() => {
-                return Err(failure(format!("{op}: `generate` needs an absolute `source`, not {}", source.display())))
-            }
-            source => source,
-        };
-        let path = g.absolute("path", "generate")?;
-        let output = g.absolute("output", "generate")?;
-        let shell: crate::ShellType = g
-            .choice("shell")?
-            .ok_or_else(|| failure(format!("{op}: `generate` needs the `shell` to generate for")))?;
-        let (patterns, emit_orb) = (g.path("patterns")?, g.path("emitOrb")?);
-        let report = compile_run(CompileRequest {
-            path: &path,
-            output: &output,
-            shell,
-            mode: g.choice("mode")?.unwrap_or_default(),
-            frontend: g.choice("frontend")?,
-            backend: g.choice("backend")?,
-            backend_url: g.text("backendUrl")?,
-            renderer: g.choice("renderer")?,
-            patterns_path: patterns.as_deref(),
-            dev_logs: g.flag("devLogs")?,
-            host: g.choice("host")?.unwrap_or_default(),
-            emit_orb: emit_orb.as_deref(),
-            source: source.as_deref(),
-        })
-        .map_err(|e| failure(format!("{op}: {e}")))?;
-        let web_client = if web_client {
-            let shell_program = crate::utils::shell_programs::locate(shell.program()).map_err(|e| failure(format!("{op}: {e}")))?;
-            Some(copy_web_client(shell_program.description.web_client.as_deref(), &output)?)
-        } else {
-            None
-        };
-        from_json(generate_answer(&report, web_client.as_deref()))
+        generate_args(options)?;
+        from_json(generate_in_child(options).map_err(|e| failure(format!("program/eval: {e}")))?)
     }
 
     fn read(&self, text: &str) -> Result<Value, SubstrateFailure> {
@@ -1446,8 +1529,15 @@ impl ProgramHost {
     }
 
     /// `behavior/describe`: a description without vectors; the knob vectors and the forwarded controls are std's to attach.
-    fn describe(op: &str, value: Option<&Value>) -> Result<Value, SubstrateFailure> {
-        let described = reflect::describe(Self::describe_target(op, value)?, None).map_err(|e| failure(format!("{op}: {e}")))?;
+    fn describe(op: &str, value: Option<&Value>, options: Option<&Value>) -> Result<Value, SubstrateFailure> {
+        let detail = options.map(to_json).and_then(|o| o.get("detail").and_then(serde_json::Value::as_str).map(str::to_string));
+        let described = match (detail.as_deref(), Self::describe_target(op, value)?) {
+            (Some("summary"), DescribeTarget::Spec(spec)) => reflect::describe_summary(&spec),
+            (Some("summary"), DescribeTarget::Value(_)) => Err(anyhow::anyhow!("a summary describes {{ behavior }} or an orbital, not a trait value")),
+            (Some(other), _) => Err(anyhow::anyhow!("`detail` is \"summary\" or left out, not \"{other}\"")),
+            (None, target) => reflect::describe(target, None),
+        }
+        .map_err(|e| failure(format!("{op}: {e}")))?;
         from_json(described)
     }
 
@@ -2155,7 +2245,7 @@ impl ProgramHost {
             "program/validate" if option_flag(args.get(1), "report") == Some(true) => Self::validation_report(&to_json(&args[1])),
             "program/validate" => self.validate(program_arg(op, args.first())?, args.get(1)),
             "behavior/catalog" => Self::catalog(args.first(), args.get(1)),
-            "behavior/describe" => Self::describe(op, args.first()),
+            "behavior/describe" => Self::describe(op, args.first(), args.get(1)),
             "behavior/packages" => Self::packages(),
             "behavior/source" => Self::source(op, args.first(), args.get(1)),
             "behavior/resolve" if option_flag(args.get(1), "expects") == Some(true) => {
@@ -3366,6 +3456,32 @@ orbital O {
         );
         assert_eq!(refused["valid"], false);
         assert_eq!(refused["errors"][0]["code"], "PROGRAM_NAME_INVALID");
+    }
+
+    /// `detail: "summary"` answers a whole behavior's app knobs and its orbitals' trait names only (P-049: the playground
+    /// loader reads nothing else, and the full answer carries every trait's config, knobs and expectations).
+    #[test]
+    fn a_summary_describe_lists_the_traits_and_app_knobs_and_nothing_per_trait() {
+        orbital_compiler::loader::register_source_lowerer(|path, _, _| crate::lower_lolo_file(path));
+        let value = from_json(serde_json::json!({ "behavior": "almadar-std/std-retry" })).unwrap();
+        let full = json(&ProgramHost.run("behavior/describe", &[value.clone()]).expect("describe"));
+        let options = from_json(serde_json::json!({ "detail": "summary" })).unwrap();
+        let summary = json(&ProgramHost.run("behavior/describe", &[value.clone(), options]).expect("summary"));
+        assert_eq!(summary["behavior"], full["behavior"]);
+        assert_eq!(summary["knobs"], full["knobs"]);
+        let names = |d: &serde_json::Value| -> Vec<Vec<String>> {
+            d["orbitals"].as_array().unwrap().iter().map(|o| o["traits"].as_array().unwrap().iter().map(|t| t["trait"].as_str().unwrap().to_string()).collect()).collect()
+        };
+        assert_eq!(names(&summary), names(&full));
+        for orbital in summary["orbitals"].as_array().unwrap() {
+            assert_eq!(orbital["value"], full["orbitals"][0]["value"]);
+            assert!(orbital.get("expects").is_none(), "{orbital}");
+            for t in orbital["traits"].as_array().unwrap() {
+                assert!(t.get("knobs").is_none() && t.get("config").is_none(), "{t}");
+            }
+        }
+        let emit_only = from_json(serde_json::json!({ "emit": { "success": "DESCRIBED", "failure": "DESCRIBE_FAILED" } })).unwrap();
+        assert_eq!(json(&ProgramHost.run("behavior/describe", &[value, emit_only]).unwrap()), full, "control: without detail the answer is the full description");
     }
 
     #[test]

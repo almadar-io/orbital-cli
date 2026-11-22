@@ -112,7 +112,14 @@ enum Commands {
         /// The `.lolo`/`.orb` program.
         program: PathBuf,
     },
-
+    /// Internal: answer one `program/eval { generate }` (its options on stdin) as a child of the orb that asked (P-049).
+    #[command(name = "__generate", hide = true)]
+    GenerateChild,
+    /// Internal: resolve one program into the disk cache as a child of the server that asked (P-049).
+    #[command(name = "__resolve", hide = true)]
+    ResolveChild {
+        program: PathBuf,
+    },
 }
 
 /// The loader's `.lolo` lowerer: a relative import of a `.lolo`-only sibling.
@@ -264,6 +271,16 @@ fn run_command(args: &[String]) -> anyhow::Result<i32> {
 fn dispatch(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
         Some(Commands::Run { program }) => commands::program_command::run_program(&program),
+        Some(Commands::GenerateChild) => {
+            let mut options = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut options)?;
+            println!("{}", commands::program_host::generate_child(&options));
+            Ok(())
+        }
+        Some(Commands::ResolveChild { program }) => {
+            println!("{}", commands::dev::resolve_child(&program));
+            Ok(())
+        }
         None => {
             use clap::CommandFactory;
             Cli::command().print_help()?;

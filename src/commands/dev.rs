@@ -419,6 +419,7 @@ fn store(
     schema: orbital_core::OrbitalSchema,
     options: &orbital_compiler::CompilerOptions,
     path: &Path,
+    store_now: bool,
 ) -> anyhow::Result<std::sync::Arc<ResolvedEntry>> {
     let read_as_it_is = schema.resolved.is_some();
     let done = orbital_compiler::phases::lazy::resolve_program_with_path(schema, options, Some(path));
@@ -431,7 +432,9 @@ fn store(
     if read_as_it_is {
         return Ok(entry);
     }
-    if let Some(cache) = LAZY_CACHE.as_ref() {
+    if let (Some(cache), true) = (LAZY_CACHE.as_ref(), store_now) {
+        cache.put_program(&key, &entry);
+    } else if let Some(cache) = LAZY_CACHE.as_ref() {
         let (cache, stored, key) = (std::sync::Arc::clone(cache), std::sync::Arc::clone(&entry), key.clone());
         std::thread::spawn(move || {
             cache.put_program(&key, &stored);
@@ -468,7 +471,10 @@ pub(crate) fn resolved_file(path: &Path) -> anyhow::Result<std::sync::Arc<Resolv
         Some(entry) => Ok(entry),
         None => {
             RESOLVING_HERE.with(|here| here.borrow_mut().insert(key.clone()));
-            let resolved = resolve_uncached(key.clone(), &options, path);
+            let resolved = match resolved_by_child(&key, path) {
+                Some(entry) => Ok(entry),
+                None => resolve_uncached(key.clone(), &options, path, false),
+            };
             RESOLVING_HERE.with(|here| here.borrow_mut().remove(&key));
             resolved
         }
@@ -504,7 +510,7 @@ fn resolved_hit(key: &ResolvedKey, path: &Path) -> Option<std::sync::Arc<Resolve
 }
 
 /// `path` read and resolved with the cache unlocked: a build-time describe resolves the program it names through this cache.
-fn resolve_uncached(key: ResolvedKey, options: &orbital_compiler::CompilerOptions, path: &Path) -> anyhow::Result<std::sync::Arc<ResolvedEntry>> {
+fn resolve_uncached(key: ResolvedKey, options: &orbital_compiler::CompilerOptions, path: &Path, store_now: bool) -> anyhow::Result<std::sync::Arc<ResolvedEntry>> {
     orbital_core::read_set::begin();
     let parsed = orbital_core::read_set::read_to_string(path)
         .map_err(|e| anyhow::anyhow!("Failed to read {}: {}", path.display(), e))
@@ -519,7 +525,42 @@ fn resolve_uncached(key: ResolvedKey, options: &orbital_compiler::CompilerOption
             return Err(e);
         }
     };
-    store(key, schema, options, path)
+    store(key, schema, options, path, store_now)
+}
+
+/// A server resolves a program it has not stored in a child copy of this orb, which stores it before it exits, and
+/// reads the stored program back: the resolve's heap ends with the child instead of staying fragmented in the server
+/// (P-049). `None` (resolve here) outside a server, without a disk cache, or when the child stored nothing.
+fn resolved_by_child(key: &ResolvedKey, path: &Path) -> Option<std::sync::Arc<ResolvedEntry>> {
+    if !orbital_core::runtime::memory_release::serving() || LAZY_CACHE.is_none() {
+        return None;
+    }
+    let exe = std::env::current_exe().ok()?;
+    let out = std::process::Command::new(exe)
+        .arg("__resolve")
+        .arg(path)
+        .env(crate::utils::bootstrap::HANDED_OFF_ENV, "1")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit())
+        .output()
+        .ok()?;
+    let reply: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+    if reply.get("stored").and_then(serde_json::Value::as_bool) != Some(true) {
+        tracing::debug!(target: "almadar:cli:resolve-cache", path = %path.display(), reply = %reply, "resolved here after the child");
+        return None;
+    }
+    disk_hit(key, path)
+}
+
+/// The bootloader's internal `__resolve` entry: resolve the program at `path` the way [`resolved_file`] does and store it
+/// in the disk cache before answering `{ stored }` (or `{ error }`) on stdout.
+pub(crate) fn resolve_child(path: &Path) -> serde_json::Value {
+    let (options, key) = resolve_options(path);
+    match resolve_uncached(key, &options, path, true) {
+        Ok(entry) => serde_json::json!({ "stored": !entry.read_as_it_is && LAZY_CACHE.is_some() }),
+        Err(e) => serde_json::json!({ "error": e.to_string() }),
+    }
 }
 
 /// The program at `path` this process already resolved, whether or not every file it read is still unchanged: a caller

@@ -452,6 +452,44 @@ fn describe_behavior(behavior: &str, only_orbital: Option<&str>) -> anyhow::Resu
     })
 }
 
+/// A whole behavior described as its app knobs and, per orbital, its value and its traits' names: the
+/// `behavior/describe { detail: "summary" }` answer (P-049), with no per-trait config, knobs or expectations.
+pub(crate) fn describe_summary(spec: &str) -> anyhow::Result<Value> {
+    if spec.contains(TRAITS_SEGMENT) {
+        anyhow::bail!("a summary describes a whole behavior or one orbital, not the trait `{spec}`");
+    }
+    let (behavior, only_orbital) = match spec.rfind(ORBITALS_SEGMENT).filter(|&i| i > 0) {
+        Some(i) => (spec[..i].to_string(), Some(spec[i + ORBITALS_SEGMENT.len()..].to_string())),
+        None => (spec.to_string(), None),
+    };
+    let resolved = resolve_from(&behavior, None)?;
+    let entry = resolved_program(&resolved, &behavior)?;
+    let program = entry.schema();
+    let canonical = canonical_name(&resolved, &behavior);
+    let program_events: HashSet<String> = program.orbitals.iter().flat_map(orbital_event_names).collect();
+    let knobs = knob_fields(program.config.as_ref(), &EventVocab { scalar: &program_events, member: &program_events })?;
+    let orbitals: Vec<Value> = program
+        .orbitals
+        .iter()
+        .filter(|orbital| only_orbital.as_deref().is_none_or(|o| o == orbital.name))
+        .map(|orbital| {
+            let traits: Vec<Value> = orbital
+                .traits
+                .iter()
+                .filter_map(|t| match t {
+                    TraitReference::Inline(td) => Some(serde_json::json!({ "trait": td.name })),
+                    _ => None,
+                })
+                .collect();
+            serde_json::json!({ "value": { "behavior": canonical, "orbital": orbital.name }, "traits": traits })
+        })
+        .collect();
+    if let (Some(o), true) = (&only_orbital, orbitals.is_empty()) {
+        anyhow::bail!("`{canonical}` has no orbital `{o}`");
+    }
+    Ok(serde_json::json!({ "behavior": canonical, "knobs": knobs, "orbitals": orbitals }))
+}
+
 fn describe_trait(value: Option<Value>, behavior: &str, trait_name: &str, from: Option<&Path>) -> anyhow::Result<Value> {
     let resolved = resolve_from(behavior, from)?;
     let entry = resolved_program(&resolved, behavior)?;

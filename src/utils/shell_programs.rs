@@ -75,28 +75,47 @@ pub(crate) fn generate(
     shell_options: BTreeMap<String, Value>,
 ) -> anyhow::Result<GenerateResponse> {
     let shell = locate(name)?;
-    // A server is the program's own declaration: compile never composes one beside it.
-    let served = if shell.description.needs_served && options.mode != orbital_compiler::ShellMode::Client {
-        let app = resolve_compiled_schema(compile_path, source_path)?;
-        if !crate::commands::program_command::declares_server_endpoint(&app) {
-            anyhow::bail!(
-                "{} declares no http endpoint, so there is no server to compile: compose one in the program (`orbital Api = Server.orbitals.HttpServerOrbital {{ config {{ host: …, port: … }} }}`) or compile `--mode client`",
-                source_path.display()
-            );
-        }
-        Some(app)
-    } else {
-        None
-    };
+    let needs_served = shell.description.needs_served && options.mode != orbital_compiler::ShellMode::Client;
     // The client opens each lazy page through its own loader (EXEC-LOAD-2), so it gets the program split: the one
     // resolution the generate makes for resolved.orb and the catalogs.
     let needs_resolved = shell.description.needs_resolved;
-    let response = generate_from_file_with_source_resolved(compile_path, source_path, output, options, |module, split, out| {
+    let mut refused: Option<anyhow::Error> = None;
+    let generated = generate_from_file_with_source_resolved(compile_path, source_path, output, options, |module, split, out| {
+        // A server is the program's own declaration: compile never composes one beside it. Without lazy behaviors the
+        // split program is the compiled program, so it is not resolved again (P-049).
+        let served = if needs_served {
+            let app = if split.1.is_empty() {
+                let mut app = split.0.clone();
+                orbital_core::schema::normalize_fn_shapes(&mut app);
+                Ok(app)
+            } else {
+                resolve_compiled_schema(compile_path, source_path)
+            };
+            match app {
+                Ok(app) if crate::commands::program_command::declares_server_endpoint(&app) => Some(app),
+                Ok(_) => {
+                    refused = Some(anyhow::anyhow!(
+                        "{} declares no http endpoint, so there is no server to compile: compose one in the program (`orbital Api = Server.orbitals.HttpServerOrbital {{ config {{ host: …, port: … }} }}`) or compile `--mode client`",
+                        source_path.display()
+                    ));
+                    return Err(GenerateError::Backend(String::new()));
+                }
+                Err(e) => {
+                    refused = Some(e);
+                    return Err(GenerateError::Backend(String::new()));
+                }
+            }
+        } else {
+            None
+        };
         let (resolved, lazy) = if needs_resolved { client_split(split) } else { (None, Vec::new()) };
         shell_protocol::invoke(&shell.binary, &request(module, resolved, lazy, served, source_path, options, shell_options), out)
             .map_err(GenerateError::ShellProgram)
-    })?;
-    Ok(response)
+    });
+    if let Some(refused) = refused {
+        return Err(refused);
+    }
+    Ok(generated?)
 }
 
 /// The `name` shell's files for `module`, written nowhere.
