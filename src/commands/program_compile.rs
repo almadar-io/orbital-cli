@@ -209,6 +209,10 @@ pub(crate) fn compile_run(request: CompileRequest) -> anyhow::Result<CompileRepo
     for file in response.files.iter().filter(|f| f.ends_with(".orb")) {
         refuse_invalid(&output.join(file), path)?;
     }
+    let bundled = fetch_bundled_files(output, &response.files, &fetch_url)?;
+    if bundled > 0 {
+        lines.push(format!("Bundled {bundled} remote files into the app"));
+    }
     lines.extend(shell_programs::report_lines(&response));
     Ok(CompileReport {
         lines,
@@ -216,6 +220,46 @@ pub(crate) fn compile_run(request: CompileRequest) -> anyhow::Result<CompileRepo
         warnings: response.warnings.clone(),
         next_steps: response.next_steps.clone(),
     })
+}
+
+/// Download each file a generated app lists in a `bundle-files.json` it wrote, to its path beside that list, so the
+/// app carries the bytes instead of fetching them when it starts. A file that cannot be fetched fails the compile.
+fn fetch_bundled_files(
+    output: &Path,
+    files: &[String],
+    fetch: &dyn Fn(&str) -> Result<Vec<u8>, String>,
+) -> anyhow::Result<usize> {
+    let mut fetched = 0;
+    for list in files.iter().filter(|f| {
+        Path::new(f).file_name().and_then(|n| n.to_str()) == Some(orbital_core::native_bundle::BUNDLED_FILES)
+    }) {
+        let list = output.join(list);
+        let text = std::fs::read_to_string(&list).map_err(|e| anyhow::anyhow!("{}: {e}", list.display()))?;
+        let bundled: orbital_core::native_bundle::BundledFiles = orbital_core::json_value::from_json_str(&text)
+            .map_err(|e| anyhow::anyhow!("{}: {e}", list.display()))?;
+        let dir = list.parent().unwrap_or(output);
+        for file in &bundled.files {
+            let bytes = fetch(&file.url).map_err(|e| anyhow::anyhow!("bundle {}: {e}", file.url))?;
+            let target = dir.join(&file.path);
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&target, bytes).map_err(|e| anyhow::anyhow!("{}: {e}", target.display()))?;
+            fetched += 1;
+        }
+    }
+    Ok(fetched)
+}
+
+fn fetch_url(url: &str) -> Result<Vec<u8>, String> {
+    let response = ureq::get(url).call().map_err(|e| match e {
+        ureq::Error::Status(code, _) => format!("HTTP {code}"),
+        ureq::Error::Transport(t) => format!("transport error: {}", t.kind()),
+    })?;
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(&mut response.into_reader(), &mut bytes)
+        .map_err(|e| format!("download interrupted: {:?}", e.kind()))?;
+    Ok(bytes)
 }
 
 fn compile_mixed(
@@ -313,6 +357,29 @@ fn compile_mixed(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_listed_bundled_file_is_written_beside_its_list_and_a_failed_fetch_fails_the_compile() {
+        let root = std::env::temp_dir().join(format!("orb-bundled-{}", std::process::id()));
+        let assets = root.join("app/src/main/assets");
+        std::fs::create_dir_all(&assets).unwrap();
+        std::fs::write(
+            assets.join("bundle-files.json"),
+            r#"{"files":[{"url":"https://fonts.test/Body.ttf","path":"fonts/0"}]}"#,
+        )
+        .unwrap();
+        std::fs::write(assets.join("program.orb"), "{}").unwrap();
+        let files = vec!["app/src/main/assets/program.orb".to_string(), "app/src/main/assets/bundle-files.json".to_string()];
+        let served = |url: &str| -> Result<Vec<u8>, String> {
+            (url == "https://fonts.test/Body.ttf").then(|| b"font bytes".to_vec()).ok_or_else(|| "unknown".to_string())
+        };
+        assert_eq!(fetch_bundled_files(&root, &files, &served).unwrap(), 1);
+        assert_eq!(std::fs::read(assets.join("fonts/0")).unwrap(), b"font bytes");
+        let offline = |_: &str| -> Result<Vec<u8>, String> { Err("offline".into()) };
+        assert!(fetch_bundled_files(&root, &files, &offline).is_err(), "a file that cannot be fetched fails the compile");
+        assert_eq!(fetch_bundled_files(&root, &files[..1], &offline).unwrap(), 0, "control: no list, nothing fetched");
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn parallel_compiles_each_read_back_their_own_lowered_program() {
