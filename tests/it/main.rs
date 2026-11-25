@@ -4,6 +4,7 @@ mod compat_differential;
 mod emit_integration;
 mod emit_map_integration;
 mod i18n_orb;
+mod kernel_parity_gate;
 mod language_data_preflight;
 mod live_registry;
 mod lolo_parse_error_hints;

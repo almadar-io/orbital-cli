@@ -5,7 +5,7 @@ use orbital_core::json_value::from_json_str;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-fn project(unreadable_access: bool) -> tempfile::TempDir {
+pub(super) fn project(unreadable_access: bool) -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("package.json"), r#"{"name":"preflight-test","private":true}"#).unwrap();
     std::fs::create_dir_all(dir.path().join("home")).unwrap();
@@ -27,7 +27,7 @@ fn project(unreadable_access: bool) -> tempfile::TempDir {
     dir
 }
 
-fn orb(dir: &Path, args: &[&str]) -> Output {
+pub(super) fn orb(dir: &Path, args: &[&str]) -> Output {
     Command::new(PathBuf::from(env!("CARGO_BIN_EXE_orb")))
         .args(args)
         .current_dir(dir)
