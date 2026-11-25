@@ -444,7 +444,7 @@ pub(crate) fn run_handoff(answer: CommandAnswer) -> anyhow::Result<()> {
     let app = header("orb-app").ok_or_else(|| {
         anyhow::anyhow!("orb-run: server needs orb-app, the resolved app its lazy files sit beside")
     })?;
-    let schema: orbital_core::OrbitalSchema = orbital_core::json_value::from_json_str(&body)
+    let schema: orbital_core::OrbitalSchema = orbital_core::json_value::program_from_json(body.as_bytes())
         .map_err(|e| anyhow::anyhow!("orb-run: server: the body is not a program: {e}"))?;
     drop(body);
     let host = orbital_shell_rust::host::SubstratePort(std::sync::Arc::new(

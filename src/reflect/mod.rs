@@ -120,7 +120,7 @@ fn program_value(resolved: &Resolved) -> anyhow::Result<orbital_core::Value> {
     if resolved.path.extension().is_some_and(|e| e == "orb") {
         let raw =
             std::fs::read_to_string(&resolved.path).map_err(|e| anyhow::anyhow!("failed to read {}: {e}", resolved.path.display()))?;
-        orbital_core::json_value::from_json_str(&raw).map_err(|e| anyhow::anyhow!("{} is not valid JSON: {e}", resolved.path.display()))
+        orbital_core::json_value::program_from_json(raw.as_bytes()).map_err(|e| anyhow::anyhow!("{} is not valid JSON: {e}", resolved.path.display()))
     } else {
         Ok(orbital_core::json_value::from_json_value(&(serde_json::to_value(&resolved.schema)?))?)
     }
@@ -185,7 +185,7 @@ pub(crate) fn resolve_import(
 pub(crate) fn expectations(spec: &str) -> anyhow::Result<Value> {
     let file = Path::new(spec);
     let schema: Value = if file.is_file() {
-        orbital_core::json_value::from_json_str(&std::fs::read_to_string(file)?).map_err(|e| anyhow::anyhow!("`{spec}` is not a .orb program: {e}"))?
+        orbital_core::json_value::program_from_json(std::fs::read_to_string(file)?.as_bytes()).map_err(|e| anyhow::anyhow!("`{spec}` is not a .orb program: {e}"))?
     } else {
         serde_json::to_value(&resolve_from(spec, None)?.schema)?
     };

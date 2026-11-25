@@ -7,7 +7,12 @@ use std::path::PathBuf;
 
 const PINNED: &[&str] = &[
     "agent/abilities.replay.goldens.json",
+    "auth/dev-personas-identity.replay.goldens.json",
+    "connect/conversation-outbox.replay.goldens.json",
+    "dev/orb-stats.replay.goldens.json",
+    "dev/review-pins.replay.goldens.json",
     "flow/job-runner-scheduler.replay.goldens.json",
+    "store/storage.replay.goldens.json",
     "net/http-keyed.replay.goldens.json",
     "ui/rasm/stack.replay.goldens.json",
 ];

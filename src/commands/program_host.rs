@@ -481,7 +481,7 @@ pub(crate) fn resolved_read(path: &Path, output: Option<&Path>) -> anyhow::Resul
     }
     let content = std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("Failed to read {}: {}", path.display(), e))?;
     let mark = match detect_syntax(&content) {
-        InputSyntax::OrbJson => orbital_core::json_value::from_json_str::<Stamp>(&content)
+        InputSyntax::OrbJson => orbital_core::json_value::program_from_json::<Stamp>(content.as_bytes())
             .map_err(|e| anyhow::anyhow!("Failed to read the resolved stamp of {}: {}", path.display(), e))?
             .resolved,
         InputSyntax::Lolo => None,
@@ -1233,7 +1233,7 @@ impl ProgramHost {
         };
         let read = resolved_read(path, output.as_deref())
             .map_err(|e| failure(format!("program/read: {e}")))?;
-        let program: Value = orbital_core::json_value::from_json_str(&read.text).map_err(|e| failure(e.to_string()))?;
+        let program: Value = orbital_core::json_value::program_from_json(read.text.as_bytes()).map_err(|e| failure(e.to_string()))?;
         let mut fields = orbital_core::ValueMap::default();
         fields.insert("program".into(), program);
         fields.insert("loadedResolved".into(), Value::Bool(read.loaded_resolved));
@@ -2401,7 +2401,7 @@ orbital O {
         let answer = json(&ProgramHost.run("program/read", &[Value::String(String::new().into()), options]).expect("resolves"));
         let expected = resolved_read(&file, None).map(|r| r.text).expect("orb resolve");
         assert_eq!(answer["text"], serde_json::Value::String(expected.clone()));
-        assert_eq!(answer["program"], orbital_core::json_value::from_json_str::<serde_json::Value>(&expected).unwrap());
+        assert_eq!(answer["program"], orbital_core::json_value::program_from_json::<serde_json::Value>(expected.as_bytes()).unwrap());
     }
 
     #[test]
@@ -2606,7 +2606,7 @@ orbital O {
         let dir = tempfile::tempdir().expect("tempdir");
         let source = dir.path().join("note.lolo");
         std::fs::write(&source, NOTE).unwrap();
-        let printed: Value = orbital_core::json_value::from_json_str::<Value>(&resolved_read(&source, None).map(|r| r.text).expect("orb resolve"))
+        let printed: Value = orbital_core::json_value::program_from_json::<Value>(resolved_read(&source, None).map(|r| r.text).expect("orb resolve").as_bytes())
             .expect("reads back");
         let direct = resolved_value(&source, false).expect("resolved value");
         assert_eq!(direct.get_path("program"), Some(&printed));
