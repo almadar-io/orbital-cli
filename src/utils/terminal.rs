@@ -164,6 +164,7 @@ pub(crate) fn init(args: &LogArgs) -> Terminal {
         std::env::set_var(key, value);
     }
     let skipped = config.clone();
+    let files = logging::file_layer_from_env(config.clone());
     let installed = if progress {
         let spinners = IndicatifLayer::new()
             .with_progress_style(
@@ -182,6 +183,7 @@ pub(crate) fn init(args: &LogArgs) -> Terminal {
                 console,
                 writer.clone(),
             ))
+            .with(files)
             .with(timings.as_ref().map(|t| t.layer()))
             .with(phase_lines.map(|max| PhaseLines::layer(writer, max, ansi)))
             .with(
@@ -198,6 +200,7 @@ pub(crate) fn init(args: &LogArgs) -> Terminal {
                 console,
                 std::io::stderr,
             ))
+            .with(files)
             .with(timings.as_ref().map(|t| t.layer()))
             .with(phase_lines.map(|max| PhaseLines::layer(std::io::stderr, max, ansi)))
             .try_init()
