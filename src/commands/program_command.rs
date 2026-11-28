@@ -444,6 +444,7 @@ pub(crate) fn run_handoff(answer: CommandAnswer) -> anyhow::Result<()> {
     let app = header("orb-app").ok_or_else(|| {
         anyhow::anyhow!("orb-run: server needs orb-app, the resolved app its lazy files sit beside")
     })?;
+    let unconnected_session_expiry = session_expiry(header("orb-session-expiry-minutes"))?;
     let schema: orbital_core::OrbitalSchema = orbital_core::json_value::program_from_json(body.as_bytes())
         .map_err(|e| anyhow::anyhow!("orb-run: server: the body is not a program: {e}"))?;
     drop(body);
@@ -457,6 +458,7 @@ pub(crate) fn run_handoff(answer: CommandAnswer) -> anyhow::Result<()> {
         host,
         &std::env::vars().collect(),
         false,
+        unconnected_session_expiry,
     )?;
     orbital_shell_rust::host::run::mount_init(
         &runtime,
@@ -467,8 +469,36 @@ pub(crate) fn run_handoff(answer: CommandAnswer) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The hand-off's `orb-session-expiry-minutes`: how long a session whose live stream never opened may stay quiet
+/// (EXEC-DIST-9); no header declares none.
+fn session_expiry(minutes: Option<&str>) -> anyhow::Result<Option<std::time::Duration>> {
+    let Some(minutes) = minutes else { return Ok(None) };
+    minutes
+        .parse::<u64>()
+        .ok()
+        .filter(|minutes| *minutes > 0)
+        .map(|minutes| Some(std::time::Duration::from_secs(minutes * 60)))
+        .ok_or_else(|| anyhow::anyhow!("orb-run: server: orb-session-expiry-minutes {minutes:?} is not a whole number of minutes above 0"))
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_hand_offs_session_expiry_minutes_become_the_hosts_expiry() {
+        assert_eq!(super::session_expiry(Some("30")).unwrap(), Some(std::time::Duration::from_secs(1800)));
+    }
+
+    #[test]
+    fn control_no_session_expiry_header_declares_none() {
+        assert_eq!(super::session_expiry(None).unwrap(), None);
+    }
+
+    #[test]
+    fn edge_a_session_expiry_of_zero_or_not_a_number_is_refused() {
+        assert!(super::session_expiry(Some("0")).is_err());
+        assert!(super::session_expiry(Some("soon")).is_err());
+    }
+
     use super::*;
     use orbital_shell_rust::host::run::{RunEnd, RUN_ENTITY};
 
