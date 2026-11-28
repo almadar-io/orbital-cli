@@ -78,7 +78,7 @@ fn emit_ts_contains_expected_exports() {
     for needle in [
         "export interface ModalRecord",
         "export type ModalRecordModalEventPayloadMap =",
-        "// ───── packages/client/public/program.client.orb ─────",
+        "// ───── packages/client/public/assets/program.",
     ] {
         assert!(
             stdout.contains(needle),
@@ -481,7 +481,9 @@ fn compile_keeps_an_authored_null_payload_literal_and_leaves_unset_schema_fields
     let (_stdout, stderr, ok) = run_orb(&["compile", lolo.to_str().unwrap(), "--shell", "typescript", "--host", "kernel", "-o", out.path().to_str().unwrap()]);
     assert!(ok, "compile exited non-zero. stderr:\n{stderr}");
 
-    for file in ["schema.orb", "resolved.orb", "packages/server/generated/program.orb", "packages/client/public/program.client.orb"] {
+    let manifest: serde_json::Value = from_json_str(&std::fs::read_to_string(out.path().join("packages/client/public/client.json")).expect("client.json")).expect("client.json is JSON");
+    let client = format!("packages/client/public/{}", manifest["program"].as_str().expect("client.json names the program"));
+    for file in ["schema.orb", "resolved.orb", "packages/server/generated/program.orb", client.as_str()] {
         let text = std::fs::read_to_string(out.path().join(file)).unwrap_or_else(|e| panic!("{file}: {e}"));
         let json: serde_json::Value = from_json_str(&text).unwrap_or_else(|e| panic!("{file} is not JSON: {e}"));
         let payload = find_emit(&json, "NULL_FAILED").unwrap_or_else(|| panic!("{file}: the emit effect is missing"));
